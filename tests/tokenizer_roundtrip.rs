@@ -232,7 +232,7 @@ fn encode_with_specials_inserts_special_verbatim() {
         want.extend(&world);
         assert_eq!(ids, want);
         assert!(
-            ids.iter().any(|&id| id == eot_id),
+            ids.contains(&eot_id),
             "eot_id must appear in the output verbatim"
         );
     });
