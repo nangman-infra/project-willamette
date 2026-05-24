@@ -8,7 +8,22 @@ defined in [`README.md`](README.md).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+* `willamette run` no longer panics with `decoded bytes are not valid
+  UTF-8` when the generated stream is cut off in the middle of a
+  multi-byte character (Korean / CJK / emoji). Generation now ends
+  cleanly and the truncated suffix is shown as `U+FFFD`.
+* The streaming token-by-token printer in `willamette run` now buffers
+  bytes across tokens and emits only up to the last valid UTF-8
+  boundary on each tick, so multi-byte characters split across two or
+  three BPE tokens no longer silently disappear from the live output.
+
+### Added
+* `Tokenizer::decode_to_bytes(ids) -> Vec<u8>` — raw byte stream, no
+  UTF-8 validation.
+* `Tokenizer::decode_lossy(ids) -> String` — replaces a trailing
+  incomplete UTF-8 suffix with `U+FFFD`; keeps internal multi-byte
+  characters intact.
 
 ## [v0.1.0-mvp] — 2026-05-24
 

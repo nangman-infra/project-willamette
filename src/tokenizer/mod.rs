@@ -220,7 +220,68 @@ impl Tokenizer {
         Ok(ids)
     }
 
-    /// Decode token IDs back to UTF-8 text.
+    /// Decode token IDs to a raw byte stream (no UTF-8 validation).
+    ///
+    /// Useful when generation may have stopped in the middle of a
+    /// multi-byte UTF-8 character — the raw bytes are always
+    /// recoverable. Callers wanting a `String` should use
+    /// [`Tokenizer::decode`] (strict) or
+    /// [`Tokenizer::decode_lossy`] (replaces invalid suffix with U+FFFD).
+    pub fn decode_to_bytes(&self, ids: &[u32]) -> Result<Vec<u8>, WillametteError> {
+        let mut bytes: Vec<u8> = Vec::with_capacity(ids.len() * 2);
+        for &id in ids {
+            let token_str = self.id_to_token.get(id as usize).ok_or_else(|| {
+                WillametteError::UnsupportedTokenizer(format!(
+                    "token id {} out of vocab range (size = {})",
+                    id,
+                    self.id_to_token.len()
+                ))
+            })?;
+            for c in token_str.chars() {
+                let b = self.byte_unicode.decode_char(c).ok_or_else(|| {
+                    WillametteError::UnsupportedTokenizer(format!(
+                        "token {:?} (id {}) contains char '{}' (U+{:04X}) \
+                         with no byte-unicode inverse",
+                        token_str, id, c, c as u32
+                    ))
+                })?;
+                bytes.push(b);
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// Decode token IDs to text, replacing any trailing incomplete
+    /// UTF-8 byte sequence with `U+FFFD` (replacement character). This
+    /// is the right choice when generation may have been truncated
+    /// mid-character (e.g. `max_new_tokens` reached during a 3-byte
+    /// Korean codepoint).
+    ///
+    /// Internal multi-byte sequences that are well-formed are
+    /// preserved exactly. Only an incomplete suffix is replaced.
+    pub fn decode_lossy(&self, ids: &[u32]) -> Result<String, WillametteError> {
+        let bytes = self.decode_to_bytes(ids)?;
+        match std::str::from_utf8(&bytes) {
+            Ok(_) => Ok(unsafe { String::from_utf8_unchecked(bytes) }),
+            Err(e) => {
+                let valid_end = e.valid_up_to();
+                // SAFETY: bytes[..valid_end] is the maximal valid UTF-8 prefix
+                // by definition of `Utf8Error::valid_up_to`.
+                let head =
+                    unsafe { std::str::from_utf8_unchecked(&bytes[..valid_end]).to_string() };
+                if valid_end < bytes.len() {
+                    Ok(format!("{}\u{FFFD}", head))
+                } else {
+                    Ok(head)
+                }
+            }
+        }
+    }
+
+    /// Decode token IDs back to UTF-8 text. Strict: fails if the
+    /// concatenated bytes are not valid UTF-8 (e.g. generation stopped
+    /// mid-multi-byte-character). Use [`Tokenizer::decode_lossy`] for
+    /// generation streams that may be truncated.
     ///
     /// Special tokens (e.g. BOS) decode to their literal display string
     /// (e.g. `"<|begin_of_text|>"`); the caller chooses whether to keep them.

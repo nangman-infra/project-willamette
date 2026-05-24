@@ -413,6 +413,13 @@ fn cmd_run(
     std::io::stdout().flush().ok();
 
     let max_seq_len = (prompt_ids.len() + max_new_tokens + 16).max(64);
+    // Streaming UTF-8 boundary-aware printer: a multi-byte Korean /
+    // CJK / emoji codepoint is often split across two or three BPE
+    // tokens. We accumulate raw bytes and only print up to the last
+    // complete UTF-8 boundary on each tick — the partial suffix
+    // waits for the next token.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut printed_up_to: usize = 0;
     let generated = generate_with_cache_and_sampler(
         &graph,
         &prompt_ids,
@@ -422,18 +429,39 @@ fn cmd_run(
         max_seq_len,
         &mut sampler,
         |_step, _next_pos, tok_id| {
-            if let Ok(text) = tokenizer.decode(&[tok_id]) {
-                print!("{}", text);
-                std::io::stdout().flush().ok();
+            if let Ok(more) = tokenizer.decode_to_bytes(&[tok_id]) {
+                pending.extend_from_slice(&more);
+                let valid_end = match std::str::from_utf8(&pending) {
+                    Ok(_) => pending.len(),
+                    Err(e) => e.valid_up_to(),
+                };
+                if valid_end > printed_up_to {
+                    // SAFETY: bytes[..valid_end] is valid UTF-8 by
+                    // definition of `Utf8Error::valid_up_to`.
+                    let chunk = unsafe {
+                        std::str::from_utf8_unchecked(&pending[printed_up_to..valid_end])
+                    };
+                    print!("{}", chunk);
+                    std::io::stdout().flush().ok();
+                    printed_up_to = valid_end;
+                }
             }
         },
     )
     .map_err(|e| anyhow::anyhow!("generation failed: {}", e))?;
+    // Flush any leftover incomplete suffix as U+FFFD so the user sees
+    // it was there (rather than silently dropping it).
+    if printed_up_to < pending.len() {
+        print!("\u{FFFD}");
+        std::io::stdout().flush().ok();
+    }
     println!();
     println!();
     println!("Generated {} token(s): {:?}", generated.len(), generated);
+    // Use lossy decode for the final summary so a truncated trailing
+    // multi-byte character doesn't crash the run.
     let generated_text = tokenizer
-        .decode(&generated)
+        .decode_lossy(&generated)
         .map_err(|e| anyhow::anyhow!("decode failed: {}", e))?;
     println!("Generated text:   {:?}", generated_text);
     let full_text = format!("{}{}", prompt, generated_text);
