@@ -161,6 +161,11 @@ fn write_kv_string_array(buf: &mut Vec<u8>, key: &str, values: &[String]) {
 /// `src/tokenizer/byte_unicode.rs`. Returns 256 single-char strings
 /// indexed by raw byte value. Every byte-level BPE encoder must include
 /// all of these in its vocab so that any UTF-8 input round-trips.
+///
+/// The explicit index loops mirror the OpenAI `bytes_to_unicode()`
+/// algorithm 1:1 — the same allow is on
+/// `src/tokenizer/byte_unicode.rs` for the production version.
+#[allow(clippy::needless_range_loop)]
 fn gpt2_byte_unicode_vocab() -> Vec<String> {
     let mut printable = [false; 256];
     for b in (b'!' as usize)..=(b'~' as usize) {

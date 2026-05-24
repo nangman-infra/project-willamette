@@ -166,7 +166,11 @@ fn build_synthetic_bitnet_gguf() -> Vec<u8> {
     // 1) Tensor list. Order matters only insofar as offsets are computed
     //    sequentially; the GGUF spec doesn't impose a particular order.
     let mut tensors: Vec<TensorDesc> = Vec::new();
-    tensors.push(TensorDesc::f16_embd("token_embd.weight", N_EMBD, VOCAB_SIZE));
+    tensors.push(TensorDesc::f16_embd(
+        "token_embd.weight",
+        N_EMBD,
+        VOCAB_SIZE,
+    ));
     tensors.push(TensorDesc::f32_norm("output_norm.weight", N_EMBD));
     for il in 0..N_LAYERS {
         tensors.push(TensorDesc::f32_norm(
