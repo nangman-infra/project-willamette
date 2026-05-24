@@ -25,6 +25,111 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.2.2-mvp] — 2026-05-25
+
+Patch release: chat usability + honest in-CI coverage.
+
+The user-facing v0.2.1 chat was leaking model self-talk into the
+visible output (the base model writes its own follow-up
+`User:` / `BITNETAssistant:` turns past the answer). This release
+detects those patterns and truncates. It also replaces the
+v0.2.0 cycle's Sonar `coverage.exclusions`-shaped fix with actual
+in-CI tests covering 59 new lines that were previously at 0 %.
+
+### Fixed
+* **`ChatEngine` runaway**: `stream_assistant_response` now checks
+  the accumulated response text after each token for hallucinated
+  turn-boundary phrases — `BITNETAssistant:`, `User:`, `Human:`,
+  `Human (`, `User (`, `AI Assistant:`, `Assistant:`, `Question:`,
+  and 3 more variants observed in real-model output — and breaks
+  out of the generation loop on the first match. The recorded
+  `history` is truncated at the boundary so subsequent turns see
+  a clean transcript. Empirical: a single `"how are you?"` turn
+  that used to spill 543 tokens of fake hash-function tutorial now
+  stops cleanly at 51 tokens.
+* **`UnsupportedTokenizer` out-of-range messaging**: now consistent
+  across the `encode_with_specials` synthetic test (was implicit
+  before; tests in `tests/tokenizer_synthetic.rs` lock it in).
+
+### Added
+* `find_chat_stop_sequence(&str) -> Option<usize>` and
+  `truncate_at_chat_stop_sequence(&mut String) -> bool` as
+  `pub(crate)` helpers — pure functions, 15 inline unit tests
+  cover Unicode safety, false-positive guards (`Humans`/`Users`),
+  earliest-match selection, and the verbatim v0.2.1 TUI failure
+  string.
+* `tests/tokenizer_synthetic.rs` extended with 7 new tests that
+  build a valid in-memory tokenizer GGUF (256 byte-level glyphs
+  + BOS + EOS, no merges) and exercise `encode_with_specials`,
+  `encode`, and the BOS/EOS plumbing without needing the 1.1 GiB
+  model file.
+* `tests/synthetic_model.rs` — new ~280-LoC test file that builds
+  a complete in-memory BitNet b1.58 GGUF (≈73 KB; 2 layers,
+  n_embd 128, vocab 4, all-1.0 norms, all-0 BitLinear, all-1.0
+  embeddings) and exercises `ModelGraph::from_gguf`,
+  `forward_single_token_position_zero`, `forward_with_cache`,
+  and `multi_token_forward`. 6 new tests cover:
+  full GGUF parse, norm-cache pre-decode invariant, no-NaN
+  forward output, KV cache continuity across 2 positions, and
+  cache-vs-no-cache parity at position 0.
+* `Quality Gate breakdown` step in `.github/workflows/sonar.yml`
+  — queries the SonarQube REST API on every scan and prints the
+  per-condition pass/fail with actual values, so future Quality
+  Gate failures are debuggable from the GitHub Actions log
+  without dashboard access. `continue-on-error: true` so a
+  transient API hiccup never blocks the official gate-action.
+* `ChatArgs` shared clap argument group + `build_sampling_params`
+  helper in `src/main.rs` — DRY for the `chat` and `tui`
+  subcommands.
+* `print_slash_help`, `print_slash_history`, `print_slash_stats`,
+  `handle_slash_save`, `handle_slash_sys` — per-command helpers
+  in `src/main.rs`.
+* `build_chat_fragment`, `prefill_prompt_tokens`,
+  `stream_assistant_response`, `emit_token_bytes` — helper
+  methods on `ChatEngine` extracted from the previously-monolithic
+  `send_user_message`.
+* `drain_token_events`, `apply_token_event`, `finish_bot_turn`,
+  `fail_bot_turn`, `clear_transient_if_old`, `poll_one_input` —
+  helpers extracted from `ui_loop` in `src/chat/tui.rs`.
+
+### Changed
+* **Sonar action bumped** `SonarSource/sonarqube-scan-action@v6`
+  → `@v7.2.1` — v6 is a Node 20 action that GitHub now force-runs
+  on Node 24 with a deprecation warning. v7.2.1 is the last v7
+  release before v8.0.0 flipped `skipSignatureVerification` to
+  `false` (breaking change); v7.2.1 is drop-in compatible with v6.
+* **Sonar `coverage.exclusions`** pruned back to only what truly
+  cannot run in CI: `src/main.rs` (interactive CLI),
+  `src/chat/**` (TTY-dependent), `src/model/bitlinear_neon.rs`
+  (aarch64-only kernel; x86 CI runner compiles it out via cfg),
+  `scripts/**`, `.github/**`. Everything else (model load,
+  forward path, tokenizer module) now has real in-CI coverage
+  via the new synthetic-GGUF tests above.
+* **Cognitive Complexity** (rust:S3776) fixed on the four
+  functions Sonar flagged: `cmd_chat` (was 20 → ≤15),
+  `handle_slash_command` (19 → ≤15), `send_user_message`
+  (23 → ≤15), `ui_loop` (31 → ≤15). All four broken out into
+  named helpers.
+* **`Tokenizer::encode_with_specials` test** rewritten with
+  `ids.contains(&eot_id)` instead of `iter().any(|&id| id == eot_id)`
+  to satisfy Rust 1.95.0's new `clippy::manual_contains` lint.
+
+### Tests
+* Total: **221** (v0.2.1 had 193 — 28 new this cycle).
+* Coverage: SonarQube `new_coverage = 100.0 %` on the v0.2.x new
+  code, replacing the previous 0 % (which was hidden by a blanket
+  exclusion).
+* Quality Gate: ✔ OK on all 3 conditions
+  (`new_violations` 0, `new_duplicated_lines_density` 1.34 %,
+  `new_coverage` 100 %).
+
+### Notes
+* No public-API change to any of the existing subcommands. The
+  `chat` / `tui` CLI flag surface is unchanged (clap's
+  `#[command(flatten)]` preserves the argument layout).
+* No numeric inference change. Reference parity with the pinned
+  bitnet.cpp on Stage 5-E prompts is preserved.
+
 ## [v0.2.1-mvp] — 2026-05-25
 
 Patch release: chat-template choice tuned for the base model.
