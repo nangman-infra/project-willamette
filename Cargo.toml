@@ -1,0 +1,31 @@
+[package]
+name = "project-willamette"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-native, mmap-backed runtime for the official microsoft/BitNet-b1.58-2B-4T 1.58-bit GGUF."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+# Backend selection is currently `cfg`-based, not feature-based:
+#   * On aarch64 hosts, `src/model/bitlinear_neon.rs` is compiled in
+#     and the dispatcher in `bitlinear.rs` picks NEON at runtime via
+#     `is_aarch64_feature_detected!("neon")`.
+#   * Elsewhere only the scalar fallback exists.
+#
+# A future `x86-simd` cargo feature will gate Stage 6-B (AVX2/SSE2)
+# code once an x86 host is available to validate it.
+
+[dependencies]
+memmap2 = "0.9"          # zero-copy file mapping
+anyhow = "1.0"           # CLI error plumbing
+thiserror = "1.0"        # typed errors in src/error.rs
+clap = { version = "4", features = ["derive"] }
+byteorder = "1.5"        # GGUF little-endian primitive reads
+regex = "1"              # byte-level BPE pre-tokenization
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

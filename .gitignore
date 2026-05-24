@@ -1,0 +1,25 @@
+# Rust build artefacts
+/target/
+
+# Model files — NEVER commit (~1.1 GiB).
+# Download per README §"Download the model".
+/models/
+
+# Generated outputs from Stage 5-E reference scripts.
+/outputs/
+/reference_outputs/
+
+# Generated reports (re-created by `scripts/compare_reference.sh`).
+/compat_report.md
+
+# Generated inspect dump (re-created by `willamette inspect`).
+/inspect.log
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local environment overrides.
+.env
