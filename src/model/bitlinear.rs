@@ -71,9 +71,24 @@ pub fn bitlinear_i2s_matvec_f32(
 ) -> Result<(), WillametteError> {
     #[cfg(target_arch = "aarch64")]
     {
+        // Stage 10-D finding: an int8-activation kernel
+        // (`bitlinear_i2s_matvec_f32_neon_i8`) was implemented and is
+        // numerically correct (greedy decode produces identical
+        // tokens to scalar on Stage 5-E reference prompts). But on
+        // stable Rust the `vdotq_s32` SDOT instruction is gated
+        // behind the unstable `stdarch_neon_dotprod` feature, forcing
+        // a `vmull_s8`-based widening dot product. Across 20-sample
+        // decode-step averages on Apple M1 the int8 path ran at 7.82
+        // tok/sec vs the f32-input NEON path's 7.91 tok/sec — a
+        // measured regression. We keep the int8 code present (use it
+        // by enabling RUSTFLAGS="--cfg willamette_i8_activations"
+        // when nightly dotprod stabilises) and default to f32-NEON.
         if std::arch::is_aarch64_feature_detected!("neon") {
-            // SAFETY: feature-detected at runtime; the NEON function
-            // re-checks all length/dtype preconditions internally.
+            #[cfg(willamette_i8_activations)]
+            return unsafe {
+                super::bitlinear_neon::bitlinear_i2s_matvec_f32_neon_i8(weight, input, output)
+            };
+            #[cfg(not(willamette_i8_activations))]
             return unsafe {
                 super::bitlinear_neon::bitlinear_i2s_matvec_f32_neon(weight, input, output)
             };

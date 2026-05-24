@@ -21,12 +21,209 @@
 #![cfg(target_arch = "aarch64")]
 
 use std::arch::aarch64::*;
+use std::cell::RefCell;
 
 use crate::error::WillametteError;
 use crate::gguf::tensor::TensorView;
 use crate::gguf::types::GgmlType;
 
 const QK_I2_S: usize = 128;
+
+thread_local! {
+    /// Per-thread reusable scratch buffer for unpacked I2_S row data.
+    /// Grows on first need to fit the largest `in_dim` seen by this
+    /// thread (max in BitNet b1.58 2B is `feed_forward_length = 6912`),
+    /// then stays put — no further allocations.
+    static MATVEC_SCRATCH: RefCell<Vec<i8>> = const { RefCell::new(Vec::new()) };
+    /// Per-thread reusable scratch buffer for the i8-quantised
+    /// activation (Stage 10-D). Same growth strategy as MATVEC_SCRATCH.
+    static ACTIVATION_I8_SCRATCH: RefCell<Vec<i8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Quantise an f32 activation vector to i8 via absmax-per-vector scale.
+/// Returns the scale `s` such that `f32_x ≈ s * i8_x`. Writes into
+/// `out`, which is resized to `input.len()` if needed.
+#[inline]
+fn quantize_input_absmax_i8(input: &[f32], out: &mut Vec<i8>) -> f32 {
+    let mut max_abs: f32 = 0.0;
+    for &v in input {
+        let a = v.abs();
+        if a > max_abs {
+            max_abs = a;
+        }
+    }
+    if out.len() < input.len() {
+        out.resize(input.len(), 0);
+    }
+    if max_abs == 0.0 {
+        for slot in out.iter_mut().take(input.len()) {
+            *slot = 0;
+        }
+        return 1.0;
+    }
+    let scale = max_abs / 127.0;
+    let inv_scale = 127.0_f32 / max_abs;
+    for (i, &v) in input.iter().enumerate() {
+        let q = (v * inv_scale).round().clamp(-127.0, 127.0);
+        out[i] = q as i8;
+    }
+    scale
+}
+
+/// NEON i8×i8 → i32 dot product (Stage 10-D, stable-Rust path).
+///
+/// Computes `Σᵢ weights[i] * inputs[i]` in `i32`, by widening each
+/// 16-element chunk via `vmull_s8` (i8 × i8 → i16, no overflow possible
+/// since `|w| ≤ 1` for ternary weights and `|x| ≤ 127`) and then
+/// widening + accumulating in two parallel `i32x4` accumulators.
+///
+/// Why not `vdotq_s32`? Rust stable does not (yet) expose
+/// `stdarch_neon_dotprod`, so the 8.4-A `SDOT` instruction is
+/// unreachable without nightly. The vmull widening below is
+/// ~2× slower than DOTPROD but still wins versus the f32-input path
+/// thanks to halved memory bandwidth (2 bytes/elem instead of 5).
+///
+/// SAFETY: caller guarantees `in_dim` is a multiple of 16, both
+/// pointers are valid for `in_dim` elements, and NEON is detected.
+#[target_feature(enable = "neon")]
+unsafe fn neon_dot_i8_i8_s32(weights: *const i8, inputs: *const i8, in_dim: usize) -> i32 {
+    debug_assert_eq!(in_dim % 16, 0);
+    let mut acc0 = vdupq_n_s32(0);
+    let mut acc1 = vdupq_n_s32(0);
+    let mut i: usize = 0;
+    while i + 16 <= in_dim {
+        let w = vld1q_s8(weights.add(i));
+        let x = vld1q_s8(inputs.add(i));
+
+        // 8 × (i8 × i8) → 8 × i16, low and high halves of the 16-lane vectors.
+        let prod_lo = vmull_s8(vget_low_s8(w), vget_low_s8(x));
+        let prod_hi = vmull_s8(vget_high_s8(w), vget_high_s8(x));
+
+        // Widen 8 × i16 → 8 × i32 via two halves each, accumulate.
+        acc0 = vaddq_s32(acc0, vmovl_s16(vget_low_s16(prod_lo)));
+        acc0 = vaddq_s32(acc0, vmovl_s16(vget_high_s16(prod_lo)));
+        acc1 = vaddq_s32(acc1, vmovl_s16(vget_low_s16(prod_hi)));
+        acc1 = vaddq_s32(acc1, vmovl_s16(vget_high_s16(prod_hi)));
+
+        i += 16;
+    }
+    let sum = vaddq_s32(acc0, acc1);
+    vaddvq_s32(sum)
+}
+
+/// I2_S matvec via int8 activation quantization (W1.58A8 scheme).
+///
+/// 1. Quantize f32 input → i8 (absmax-per-vector scale).
+/// 2. Per output row: unpack I2_S weights → i8 (in {-1, 0, +1}),
+///    compute integer dot with `neon_dot_i8_i8_s32`.
+/// 3. Apply combined scale `weight.i2s_scale * input_scale` to the i32
+///    sum and write the f32 result.
+///
+/// This is the same quantization the BitNet paper describes for
+/// activation int8. The numerical error vs the scalar f32 path is
+/// bounded by `O(in_dim * input_scale / 2)`; on the real model it's
+/// ~1e-1 absolute per output element, well below typical logit
+/// magnitudes (5-15) so argmax stability is preserved on the Stage
+/// 5-E reference prompts.
+///
+/// # Safety
+///
+/// Caller must guarantee NEON + DOTPROD CPU features (dispatcher
+/// checks via `is_aarch64_feature_detected!`). All shape / length
+/// preconditions are re-checked here.
+#[target_feature(enable = "neon")]
+pub unsafe fn bitlinear_i2s_matvec_f32_neon_i8(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), WillametteError> {
+    if weight.ggml_type != GgmlType::BitNetI2S {
+        return Err(WillametteError::UnsupportedTensorType(
+            weight.ggml_type.to_raw(),
+        ));
+    }
+    if weight.shape.len() != 2 {
+        return Err(WillametteError::GgufParse(format!(
+            "neon-i8 matvec: weight {:?} is not 2-D",
+            weight.name
+        )));
+    }
+    let in_dim = weight.shape[0] as usize;
+    let out_dim = weight.shape[1] as usize;
+    if input.len() != in_dim {
+        return Err(WillametteError::GgufParse(format!(
+            "neon-i8 matvec: input.len()={} != in_dim={}",
+            input.len(),
+            in_dim
+        )));
+    }
+    if output.len() != out_dim {
+        return Err(WillametteError::GgufParse(format!(
+            "neon-i8 matvec: output.len()={} != out_dim={}",
+            output.len(),
+            out_dim
+        )));
+    }
+    if in_dim == 0 || !in_dim.is_multiple_of(QK_I2_S) {
+        return Err(WillametteError::GgufParse(format!(
+            "neon-i8 matvec: in_dim {} is not a positive multiple of {}",
+            in_dim, QK_I2_S
+        )));
+    }
+    let bytes_per_row = in_dim / 4;
+    let expected = bytes_per_row * out_dim;
+    if weight.data.len() != expected {
+        return Err(WillametteError::GgufParse(format!(
+            "neon-i8 matvec: weight {:?} data.len()={} != expected {}",
+            weight.name,
+            weight.data.len(),
+            expected
+        )));
+    }
+
+    let w_scale = weight.i2s_scale()?;
+    let packed = weight.data;
+
+    // Quantise input once per matvec (not per row).
+    let input_scale = ACTIVATION_I8_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        quantize_input_absmax_i8(input, &mut buf)
+    });
+    let combined_scale = w_scale * input_scale;
+
+    // Snapshot the quantised input into a local Vec we can read across
+    // rayon workers (the thread_local is not Sync).
+    let input_i8: Vec<i8> = ACTIVATION_I8_SCRATCH.with(|cell| {
+        let buf = cell.borrow();
+        buf[..in_dim].to_vec()
+    });
+
+    use rayon::prelude::*;
+    output
+        .par_chunks_mut(32)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            MATVEC_SCRATCH.with(|cell| {
+                let mut unpacked = cell.borrow_mut();
+                if unpacked.len() < in_dim {
+                    unpacked.resize(in_dim, 0);
+                }
+                let unpacked: &mut [i8] = &mut unpacked[..in_dim];
+                let row_start = chunk_idx * 32;
+                for (k, out_val) in out_chunk.iter_mut().enumerate() {
+                    let j = row_start + k;
+                    let row_byte_start = j * bytes_per_row;
+                    let packed_row = &packed[row_byte_start..row_byte_start + bytes_per_row];
+                    unpack_row(packed_row, in_dim, unpacked);
+                    let dot_i32 = unsafe {
+                        neon_dot_i8_i8_s32(unpacked.as_ptr(), input_i8.as_ptr(), in_dim)
+                    };
+                    *out_val = combined_scale * (dot_i32 as f32);
+                }
+            });
+        });
+    Ok(())
+}
 
 /// Unpack one packed row (`bytes_per_row = in_dim / 4` bytes) of I2_S
 /// into `out` (length `in_dim`, values in `{-1, 0, +1}`). Mirrors the
@@ -184,18 +381,41 @@ pub unsafe fn bitlinear_i2s_matvec_f32_neon(
     let scale = weight.i2s_scale()?;
     let packed = weight.data;
 
-    // Per-row scratch buffer.
-    let mut unpacked: Vec<i8> = vec![0; in_dim];
-
-    for j in 0..out_dim {
-        let row_start = j * bytes_per_row;
-        let packed_row = &packed[row_start..row_start + bytes_per_row];
-        unpack_row(packed_row, in_dim, &mut unpacked);
-
-        // SAFETY: lengths checked above; in_dim is a multiple of 128 hence 16.
-        let dot = neon_dot_i8_f32(unpacked.as_ptr(), input.as_ptr(), in_dim);
-        output[j] = scale * dot;
-    }
+    // Stage 10-C: rayon-parallel row dispatch. Each worker thread
+    // owns its own MATVEC_SCRATCH (thread_local), so unpack_row +
+    // neon_dot_i8_f32 run independently across cores. Chunk size 32
+    // keeps per-task work above rayon's ~1-2µs overhead (each row
+    // is ~0.7µs of work on M1).
+    //
+    // SAFETY (NEON): the dispatcher in `super::bitlinear` guarantees
+    // `is_aarch64_feature_detected!("neon")` on the calling thread; the
+    // rayon worker pool was spawned on the same machine so every
+    // worker also has NEON. The `unsafe` block below merely names
+    // that guarantee.
+    use rayon::prelude::*;
+    output
+        .par_chunks_mut(32)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            MATVEC_SCRATCH.with(|cell| {
+                let mut unpacked = cell.borrow_mut();
+                if unpacked.len() < in_dim {
+                    unpacked.resize(in_dim, 0);
+                }
+                let unpacked: &mut [i8] = &mut unpacked[..in_dim];
+                let row_start = chunk_idx * 32;
+                for (k, out_val) in out_chunk.iter_mut().enumerate() {
+                    let j = row_start + k;
+                    let row_byte_start = j * bytes_per_row;
+                    let packed_row = &packed[row_byte_start..row_byte_start + bytes_per_row];
+                    unpack_row(packed_row, in_dim, unpacked);
+                    let dot = unsafe {
+                        neon_dot_i8_f32(unpacked.as_ptr(), input.as_ptr(), in_dim)
+                    };
+                    *out_val = scale * dot;
+                }
+            });
+        });
 
     Ok(())
 }

@@ -22,7 +22,7 @@
 use crate::error::WillametteError;
 use crate::model::block::transformer_block_forward_position_zero;
 use crate::model::graph::ModelGraph;
-use crate::model::primitives::{embedding_gather_f16, f32_tensor_to_vec, rms_norm_f32};
+use crate::model::primitives::{embedding_gather_f16, rms_norm_f32};
 
 /// Single-token forward at position 0. Returns the post-`output_norm`
 /// hidden state (length `n_embd`). Does NOT compute logits.
@@ -50,11 +50,10 @@ pub fn forward_single_token_position_zero(
     }
 
     // Final output_norm.
-    let on_w = f32_tensor_to_vec(graph.output_norm)?;
     let mut final_hidden = vec![0.0_f32; n_embd];
     rms_norm_f32(
         &hidden_a,
-        &on_w,
+        &graph.output_norm_f32,
         graph.config.layer_norm_rms_epsilon,
         &mut final_hidden,
     )?;

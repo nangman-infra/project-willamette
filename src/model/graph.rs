@@ -15,23 +15,33 @@ use crate::gguf::reader::GgufFile;
 use crate::gguf::tensor::TensorView;
 use crate::gguf::types::GgmlType;
 use crate::model::config::BitNetConfig;
+use crate::model::primitives::f32_tensor_to_vec;
 
 #[derive(Debug)]
 pub struct LayerWeights<'a> {
     pub index: u32,
 
     pub attn_norm: &'a TensorView<'a>,
+    /// Pre-decoded `attn_norm` weights (Stage 10-A). Forward paths read
+    /// this directly instead of decoding the F32 view on every token.
+    pub attn_norm_f32: Vec<f32>,
     pub attn_q: &'a TensorView<'a>,
     pub attn_k: &'a TensorView<'a>,
     pub attn_v: &'a TensorView<'a>,
     pub attn_output: &'a TensorView<'a>,
     pub attn_sub_norm: &'a TensorView<'a>,
+    /// Pre-decoded `attn_sub_norm` weights (Stage 10-A).
+    pub attn_sub_norm_f32: Vec<f32>,
 
     pub ffn_norm: &'a TensorView<'a>,
+    /// Pre-decoded `ffn_norm` weights (Stage 10-A).
+    pub ffn_norm_f32: Vec<f32>,
     pub ffn_gate: &'a TensorView<'a>,
     pub ffn_up: &'a TensorView<'a>,
     pub ffn_down: &'a TensorView<'a>,
     pub ffn_sub_norm: &'a TensorView<'a>,
+    /// Pre-decoded `ffn_sub_norm` weights (Stage 10-A).
+    pub ffn_sub_norm_f32: Vec<f32>,
 }
 
 #[derive(Debug)]
@@ -40,6 +50,10 @@ pub struct ModelGraph<'a> {
 
     pub token_embd: &'a TensorView<'a>,
     pub output_norm: &'a TensorView<'a>,
+    /// Pre-decoded `output_norm` weights (Stage 10-A). Forward paths
+    /// read this directly so we don't re-decode 4 bytes/element on
+    /// every token.
+    pub output_norm_f32: Vec<f32>,
 
     /// Final projection. For BitNet b1.58 this always references
     /// `token_embd` — the weight-tying rule is unconditional in
@@ -177,26 +191,38 @@ impl<'a> ModelGraph<'a> {
                 ],
             )?;
 
+            let attn_norm_f32 = f32_tensor_to_vec(attn_norm)?;
+            let attn_sub_norm_f32 = f32_tensor_to_vec(attn_sub_norm)?;
+            let ffn_norm_f32 = f32_tensor_to_vec(ffn_norm)?;
+            let ffn_sub_norm_f32 = f32_tensor_to_vec(ffn_sub_norm)?;
+
             layers.push(LayerWeights {
                 index: il,
                 attn_norm,
+                attn_norm_f32,
                 attn_q,
                 attn_k,
                 attn_v,
                 attn_output,
                 attn_sub_norm,
+                attn_sub_norm_f32,
                 ffn_norm,
+                ffn_norm_f32,
                 ffn_gate,
                 ffn_up,
                 ffn_down,
                 ffn_sub_norm,
+                ffn_sub_norm_f32,
             });
         }
+
+        let output_norm_f32 = f32_tensor_to_vec(output_norm)?;
 
         Ok(Self {
             config,
             token_embd,
             output_norm,
+            output_norm_f32,
             lm_head,
             has_output_weight_tensor,
             layers,

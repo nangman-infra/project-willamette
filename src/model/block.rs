@@ -26,7 +26,6 @@ use crate::model::attention::{attention_block_forward_position_zero, residual_ad
 use crate::model::config::BitNetConfig;
 use crate::model::ffn::ffn_block_forward;
 use crate::model::graph::LayerWeights;
-use crate::model::primitives::f32_tensor_to_vec;
 
 /// Run one transformer block on a single token at position 0.
 ///
@@ -53,23 +52,23 @@ pub fn transformer_block_forward_position_zero(
         )));
     }
 
-    // Per-layer F32 norm weights are read once per call. The cost is
-    // dwarfed by the seven BitLinear matvecs; Stage 6 may add caching.
-    let attn_norm_w = f32_tensor_to_vec(layer.attn_norm)?;
-    let attn_sub_norm_w = f32_tensor_to_vec(layer.attn_sub_norm)?;
-    let ffn_norm_w = f32_tensor_to_vec(layer.ffn_norm)?;
-    let ffn_sub_norm_w = f32_tensor_to_vec(layer.ffn_sub_norm)?;
+    // Stage 10-A: norm weights are pre-decoded in ModelGraph::from_gguf
+    // — no per-call allocation needed.
+    let attn_norm_w = &layer.attn_norm_f32;
+    let attn_sub_norm_w = &layer.attn_sub_norm_f32;
+    let ffn_norm_w = &layer.ffn_norm_f32;
+    let ffn_sub_norm_w = &layer.ffn_sub_norm_f32;
 
     // Attention half.
     let mut attn_out = vec![0.0_f32; n_embd];
     attention_block_forward_position_zero(
         x,
-        &attn_norm_w,
+        attn_norm_w,
         layer.attn_q,
         layer.attn_k,
         layer.attn_v,
         layer.attn_output,
-        &attn_sub_norm_w,
+        attn_sub_norm_w,
         config,
         &mut attn_out,
     )?;
@@ -82,11 +81,11 @@ pub fn transformer_block_forward_position_zero(
     let mut ffn_out = vec![0.0_f32; n_embd];
     ffn_block_forward(
         &x_mid,
-        &ffn_norm_w,
+        ffn_norm_w,
         layer.ffn_gate,
         layer.ffn_up,
         layer.ffn_down,
-        &ffn_sub_norm_w,
+        ffn_sub_norm_w,
         config,
         &mut ffn_out,
     )?;

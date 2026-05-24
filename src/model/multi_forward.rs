@@ -27,8 +27,8 @@ use crate::model::bitlinear::bitlinear_i2s_matvec_f32;
 use crate::model::ffn::{elementwise_mul, relu_square};
 use crate::model::graph::ModelGraph;
 use crate::model::primitives::{
-    attention_scale, embedding_gather_f16, f32_tensor_to_vec, kv_head_for_q_head, rms_norm_f32,
-    AttentionShape, RopeType,
+    attention_scale, embedding_gather_f16, kv_head_for_q_head, rms_norm_f32, AttentionShape,
+    RopeType,
 };
 
 #[inline]
@@ -86,17 +86,18 @@ pub fn multi_token_forward(
 
     // Per-layer transformer.
     for layer in &graph.layers {
-        let attn_norm_w = f32_tensor_to_vec(layer.attn_norm)?;
-        let attn_sub_norm_w = f32_tensor_to_vec(layer.attn_sub_norm)?;
-        let ffn_norm_w = f32_tensor_to_vec(layer.ffn_norm)?;
-        let ffn_sub_norm_w = f32_tensor_to_vec(layer.ffn_sub_norm)?;
+        // Stage 10-A: norm weights are pre-decoded in ModelGraph.
+        let attn_norm_w = &layer.attn_norm_f32;
+        let attn_sub_norm_w = &layer.attn_sub_norm_f32;
+        let ffn_norm_w = &layer.ffn_norm_f32;
+        let ffn_sub_norm_w = &layer.ffn_sub_norm_f32;
 
         // ── attention half ──
         // x_norm per token.
         let mut x_norms: Vec<Vec<f32>> = Vec::with_capacity(m);
         for t in 0..m {
             let mut xn = vec![0.0_f32; n_embd];
-            rms_norm_f32(&hidden[t], &attn_norm_w, eps, &mut xn)?;
+            rms_norm_f32(&hidden[t], attn_norm_w, eps, &mut xn)?;
             x_norms.push(xn);
         }
 
@@ -165,7 +166,7 @@ pub fn multi_token_forward(
         // attn_sub_norm + Wo + residual #1 (in place on hidden[t]).
         for t in 0..m {
             let mut sub_normed = vec![0.0_f32; n_embd];
-            rms_norm_f32(&attn_outs[t], &attn_sub_norm_w, eps, &mut sub_normed)?;
+            rms_norm_f32(&attn_outs[t], attn_sub_norm_w, eps, &mut sub_normed)?;
             let mut wo_out = vec![0.0_f32; n_embd];
             bitlinear_i2s_matvec_f32(layer.attn_output, &sub_normed, &mut wo_out)?;
             for d in 0..n_embd {
@@ -185,7 +186,7 @@ pub fn multi_token_forward(
         for t in 0..m {
             // x_norm = RMSNorm(hidden[t], ffn_norm)
             let mut x_norm = vec![0.0_f32; n_embd];
-            rms_norm_f32(&hidden[t], &ffn_norm_w, eps, &mut x_norm)?;
+            rms_norm_f32(&hidden[t], ffn_norm_w, eps, &mut x_norm)?;
 
             let mut gate = vec![0.0_f32; n_ff];
             let mut up = vec![0.0_f32; n_ff];
@@ -195,7 +196,7 @@ pub fn multi_token_forward(
             let mut fused = vec![0.0_f32; n_ff];
             elementwise_mul(&gate, &up, &mut fused)?;
             let mut fused_norm = vec![0.0_f32; n_ff];
-            rms_norm_f32(&fused, &ffn_sub_norm_w, eps, &mut fused_norm)?;
+            rms_norm_f32(&fused, ffn_sub_norm_w, eps, &mut fused_norm)?;
             let mut down = vec![0.0_f32; n_embd];
             bitlinear_i2s_matvec_f32(layer.ffn_down, &fused_norm, &mut down)?;
             for d in 0..n_embd {
@@ -214,8 +215,8 @@ pub fn multi_token_forward(
 
     // output_norm on the LAST token only — that's the only hidden we
     // need for next-token prediction.
-    let on_w = f32_tensor_to_vec(graph.output_norm)?;
+    let on_w = &graph.output_norm_f32;
     let mut final_hidden = vec![0.0_f32; n_embd];
-    rms_norm_f32(&hidden[m - 1], &on_w, eps, &mut final_hidden)?;
+    rms_norm_f32(&hidden[m - 1], on_w, eps, &mut final_hidden)?;
     Ok(final_hidden)
 }
