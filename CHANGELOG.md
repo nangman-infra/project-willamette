@@ -25,6 +25,58 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.2.1-mvp] — 2026-05-25
+
+Patch release: chat-template choice tuned for the base model.
+
+Empirical testing of v0.2.0's chat surface showed two failure
+modes — every response was prefixed with a hallucinated tag
+(`PowerShell>`, `Vietnamese>`, `French>`, …) and the model would
+not honour even trivial instructions like "tell me only english."
+
+Investigation:
+
+* `microsoft/bitnet-b1.58-2B-4T-gguf` is a **base/foundation
+  model**, not instruct-tuned. The GGUF self-description is plain
+  `general.name = "bitnet2b"` (no Instruct tag); the upstream
+  `microsoft/BitNet` README:245 documents `-cnv, --conversation` as
+  being "for instruct models" and lists eligible repos — this one
+  is not in that list. The model was trained on 4 T tokens of web
+  text without SFT or RLHF; expecting it to follow instructions is
+  out of scope for a base model.
+* The GGUF includes a `tokenizer.chat_template` Jinja string of the
+  shape `Human: <content>\n\nBITNETAssistant: <eos_token>`, but
+  that template was inserted unconditionally by the conversion
+  script (`utils/convert-ms-to-gguf-bitnet.py:1324`) regardless of
+  whether the model itself was trained on that pattern. The
+  `eos_token` variable was therefore never grounded in any specific
+  inference-time token id during training.
+
+What v0.2.0 did wrong: it injected `<|eot_id|>` (128009) between
+turns, interpreting Jinja `eos_token` as the LLaMA-3 turn
+boundary. Empirically this pushed the model into the
+"language-prefix" failure mode above.
+
+### Fixed
+* `ChatEngine::send_user_message` now uses a plain text bridge
+  (`\n\nHuman: <content>\n\nBITNETAssistant: `) between turns
+  instead of injecting a Jinja-template-derived turn marker. The
+  same prompt that produced `"PowerShell> Hello!"` in v0.2.0 now
+  produces `"Hello! How can I assist you today?"` in v0.2.1.
+  Reference parity with bitnet.cpp greedy decode (Stage 5-E
+  prompts) is unchanged.
+
+### Unchanged
+* `Tokenizer::encode_with_specials(&[PromptPart])` (Stage 9-B) and
+  `PromptPart::{Text, Special}` remain in the public API. They were
+  needed for the template-faithful approach we just reverted and
+  may still be useful for future instruct-tuned BitNet variants
+  (e.g. Falcon3-Instruct-1.58bit) that *were* trained with explicit
+  turn markers.
+* All 193 tests still pass.
+* Performance unchanged (this is a chat-template choice, not a
+  kernel change).
+
 ## [v0.2.0-mvp] — 2026-05-25
 
 Minor release: first-class chat experience + ~5× decode-step speedup.
