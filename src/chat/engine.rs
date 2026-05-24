@@ -252,8 +252,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             // that's the price of continuity. (If we don't forward,
             // turn N+1 sees a phantom "the last response ended with
             // token T-1" view of history.)
-            last_hidden =
-                forward_with_cache(self.graph, &mut self.cache, next, self.next_pos)?;
+            last_hidden = forward_with_cache(self.graph, &mut self.cache, next, self.next_pos)?;
             self.next_pos += 1;
             let _ = step;
         }

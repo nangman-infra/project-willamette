@@ -215,9 +215,8 @@ pub unsafe fn bitlinear_i2s_matvec_f32_neon_i8(
                     let row_byte_start = j * bytes_per_row;
                     let packed_row = &packed[row_byte_start..row_byte_start + bytes_per_row];
                     unpack_row(packed_row, in_dim, unpacked);
-                    let dot_i32 = unsafe {
-                        neon_dot_i8_i8_s32(unpacked.as_ptr(), input_i8.as_ptr(), in_dim)
-                    };
+                    let dot_i32 =
+                        unsafe { neon_dot_i8_i8_s32(unpacked.as_ptr(), input_i8.as_ptr(), in_dim) };
                     *out_val = combined_scale * (dot_i32 as f32);
                 }
             });
@@ -409,9 +408,7 @@ pub unsafe fn bitlinear_i2s_matvec_f32_neon(
                     let row_byte_start = j * bytes_per_row;
                     let packed_row = &packed[row_byte_start..row_byte_start + bytes_per_row];
                     unpack_row(packed_row, in_dim, unpacked);
-                    let dot = unsafe {
-                        neon_dot_i8_f32(unpacked.as_ptr(), input.as_ptr(), in_dim)
-                    };
+                    let dot = unsafe { neon_dot_i8_f32(unpacked.as_ptr(), input.as_ptr(), in_dim) };
                     *out_val = scale * dot;
                 }
             });

@@ -633,9 +633,7 @@ fn cmd_chat(
         "Budget:      max_seq_len={}  max_new_tokens_per_turn={}",
         max_seq_len, max_new_tokens
     );
-    println!(
-        "Slash commands: /help /reset /history /save <file> /sys [text|off] /quit (Ctrl-D)"
-    );
+    println!("Slash commands: /help /reset /history /save <file> /sys [text|off] /quit (Ctrl-D)");
     println!();
 
     let stdin = std::io::stdin();
@@ -724,7 +722,11 @@ fn cmd_tui(
     let sp = SamplingParams {
         temperature,
         top_k: if top_k == 0 { None } else { Some(top_k) },
-        top_p: if top_p >= 1.0 || top_p <= 0.0 { None } else { Some(top_p) },
+        top_p: if top_p >= 1.0 || top_p <= 0.0 {
+            None
+        } else {
+            Some(top_p)
+        },
         repetition_penalty: if repetition_penalty <= 1.0 {
             None
         } else {
@@ -791,7 +793,11 @@ fn handle_slash_command(cmd_line: &str, engine: &mut ChatEngine<'_, '_>) -> Resu
             }
             let path = PathBuf::from(rest);
             save_history_jsonl(&path, engine.history())?;
-            println!("[wrote {} message(s) to {}]", engine.history().len(), path.display());
+            println!(
+                "[wrote {} message(s) to {}]",
+                engine.history().len(),
+                path.display()
+            );
             Ok(SlashOutcome::Continue)
         }
         "sys" => {
@@ -804,7 +810,10 @@ fn handle_slash_command(cmd_line: &str, engine: &mut ChatEngine<'_, '_>) -> Resu
                 println!("[system prompt cleared]");
             } else {
                 engine.set_system_prompt(Some(rest.to_string()));
-                println!("[system prompt set ({} chars) — takes effect from next /reset]", rest.len());
+                println!(
+                    "[system prompt set ({} chars) — takes effect from next /reset]",
+                    rest.len()
+                );
             }
             Ok(SlashOutcome::Continue)
         }
@@ -825,7 +834,10 @@ fn handle_slash_command(cmd_line: &str, engine: &mut ChatEngine<'_, '_>) -> Resu
     }
 }
 
-fn save_history_jsonl(path: &Path, history: &[project_willamette::chat::ChatMessage]) -> Result<()> {
+fn save_history_jsonl(
+    path: &Path,
+    history: &[project_willamette::chat::ChatMessage],
+) -> Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)
         .with_context(|| format!("create save file: {}", path.display()))?;
@@ -842,7 +854,11 @@ fn save_history_jsonl(path: &Path, history: &[project_willamette::chat::ChatMess
             .replace('\n', "\\n")
             .replace('\r', "\\r")
             .replace('\t', "\\t");
-        writeln!(f, "{{\"role\":\"{}\",\"content\":\"{}\"}}", role, content_escaped)?;
+        writeln!(
+            f,
+            "{{\"role\":\"{}\",\"content\":\"{}\"}}",
+            role, content_escaped
+        )?;
     }
     f.flush()?;
     Ok(())

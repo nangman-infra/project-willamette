@@ -142,10 +142,7 @@ impl UiState {
 /// Entry point. Loads the model, builds a [`ChatEngine`], and runs
 /// the TUI to completion.
 #[allow(clippy::too_many_arguments)]
-pub fn run_tui(
-    mut engine: ChatEngine<'_, '_>,
-    max_new_tokens: usize,
-) -> Result<()> {
+pub fn run_tui(mut engine: ChatEngine<'_, '_>, max_new_tokens: usize) -> Result<()> {
     let max_seq = engine.max_seq_len();
 
     // Channels.
@@ -257,10 +254,7 @@ fn ui_loop(
                     ui.last_turn_secs = Some(secs);
                     ui.last_turn_chars = Some(chars);
                     let cps = if secs > 0.0 { chars as f64 / secs } else { 0.0 };
-                    ui.status = format!(
-                        "idle · last turn {:.1}s ({:.1} chars/s)",
-                        secs, cps
-                    );
+                    ui.status = format!("idle · last turn {:.1}s ({:.1} chars/s)", secs, cps);
                 }
                 Ok(TokenEvent::Failed(msg)) => {
                     let partial = std::mem::take(&mut ui.streaming);
@@ -401,14 +395,21 @@ fn handle_slash(ui: &mut UiState, cmd: &str, cmd_tx: &Sender<UserCmd>) -> Result
                 ui.flash("usage: /sys <text>  or  /sys off");
                 return Ok(false);
             }
-            let payload = if rest == "off" { None } else { Some(rest.to_string()) };
+            let payload = if rest == "off" {
+                None
+            } else {
+                Some(rest.to_string())
+            };
             cmd_tx
                 .send(UserCmd::SetSys(payload.clone()))
                 .map_err(|e| anyhow::anyhow!("sys: {}", e))?;
             ui.history.push(DisplayMsg {
                 role: Role::System,
                 content: if payload.is_some() {
-                    format!("[system prompt set ({} chars) — takes effect after next /reset]", rest.len())
+                    format!(
+                        "[system prompt set ({} chars) — takes effect after next /reset]",
+                        rest.len()
+                    )
                 } else {
                     "[system prompt cleared]".to_string()
                 },
@@ -483,9 +484,16 @@ fn render(f: &mut ratatui::Frame, ui: &UiState) {
     let status_text = if let Some((msg, _)) = &ui.transient {
         format!("  {}", msg)
     } else {
-        format!("  {}   ·   /help · Ctrl-C exit · PgUp/PgDn scroll", ui.status)
+        format!(
+            "  {}   ·   /help · Ctrl-C exit · PgUp/PgDn scroll",
+            ui.status
+        )
     };
-    let status_color = if ui.generating { Color::Yellow } else { Color::Gray };
+    let status_color = if ui.generating {
+        Color::Yellow
+    } else {
+        Color::Gray
+    };
     let status = Paragraph::new(Line::from(Span::styled(
         status_text,
         Style::default().fg(status_color),
