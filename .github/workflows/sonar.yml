@@ -81,6 +81,46 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
 
+      # Diagnostic: pull the failed Quality Gate conditions from the
+      # SonarQube API and print them, so future failures are visible
+      # in the GitHub Actions log without needing dashboard access.
+      # Runs whether the scan succeeded or failed (`if: always()`) and
+      # before the quality-gate-action below, which fails fast without
+      # explaining which condition tripped.
+      - name: Quality Gate breakdown
+        if: always()
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
+        run: |
+          # Wait briefly for the analysis to finish processing on the
+          # Sonar server; the scan-action returns as soon as the report
+          # is uploaded, not when the gate is computed.
+          for i in 1 2 3 4 5 6; do
+            status_json=$(curl -sS -u "${SONAR_TOKEN}:" \
+              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=project-willamette" || true)
+            overall=$(echo "${status_json}" | jq -r '.projectStatus.status // "PENDING"')
+            if [ "${overall}" != "PENDING" ] && [ "${overall}" != "NONE" ] && [ -n "${overall}" ]; then
+              break
+            fi
+            echo "[gate breakdown] still computing (attempt $i)…"
+            sleep 5
+          done
+          echo "Overall Quality Gate: ${overall:-UNKNOWN}"
+          echo
+          echo "Failed conditions (if any):"
+          echo "${status_json}" | jq -r '
+            .projectStatus.conditions[]?
+            | select(.status == "ERROR")
+            | "  ✗ \(.metricKey)  (actual: \(.actualValue // "n/a"), threshold: \(.comparator) \(.errorThreshold))"
+          ' || echo "  (could not parse Sonar API response)"
+          echo
+          echo "All conditions:"
+          echo "${status_json}" | jq -r '
+            .projectStatus.conditions[]?
+            | "  \(.status)  \(.metricKey)  actual=\(.actualValue // "n/a")  threshold=\(.comparator) \(.errorThreshold)"
+          ' || true
+
       - name: SonarQube Quality Gate
         uses: SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
