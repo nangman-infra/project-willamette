@@ -32,6 +32,80 @@ pub struct ChatMessage {
 /// in addition to the configured EOS.
 const LLAMA3_EOT_ID: u32 = 128009;
 
+/// Text-level stop sequences for the chat loop.
+///
+/// BitNet b1.58 2B-4T is a *base* model — never SFT'd, never trained
+/// to emit `<|end_of_text|>` or `<|eot_id|>` at turn boundaries. With
+/// the `Human:/BITNETAssistant:` chat template it learns to continue
+/// the pattern indefinitely, fabricating its own `User:`/`AI Assistant:`
+/// follow-up turns past the answer we actually wanted.
+///
+/// These strings should NEVER appear in a legitimate single-turn
+/// response from the model:
+///
+///   * `BITNETAssistant:` — the exact template phrase we use to prompt
+///     the model. If it appears in the output, the model has
+///     hallucinated a new turn.
+///   * `User:`, `Human:` — common ways for the model to start a fake
+///     user turn (LLaMA-3 pretrain data has lots of "User: …" forum
+///     dialogue).
+///   * `AI Assistant:`, `AI:` — alternative completions of the
+///     "User: X" pattern.
+///
+/// When any of these appear in the model's emitted text we truncate
+/// the response at that point and stop generating. The bytes before
+/// the match have already streamed to the caller (no rewind possible)
+/// but the *history* recorded for the next turn is the clean prefix.
+const CHAT_STOP_SEQUENCES: &[&str] = &[
+    // Our template's exact phrase — always a hallucination if echoed.
+    "BITNETAssistant:",
+    // Most common base-model fake-turn openers (colon-terminated).
+    "User:",
+    "Human:",
+    "AI Assistant:",
+    "AI:",
+    "Assistant:",
+    "Question:",
+    // Parenthesised variants observed in v0.2.1 TUI sessions:
+    //   "Human (reply): Yes.", "User (continued): ...".
+    // The space-then-paren form is rare in legitimate response text,
+    // so the false-positive risk is much lower than e.g. bare "User".
+    "Human (",
+    "User (",
+    "AI (",
+];
+
+/// Find the earliest start-of-stop-sequence in `text`, or `None`.
+///
+/// Pure function — exposed at module scope so unit tests can exercise
+/// the boundary logic without spinning up a `ChatEngine` + model.
+pub(crate) fn find_chat_stop_sequence(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    for stop in CHAT_STOP_SEQUENCES {
+        if let Some(idx) = text.find(stop) {
+            earliest = Some(match earliest {
+                Some(prev) => prev.min(idx),
+                None => idx,
+            });
+        }
+    }
+    earliest
+}
+
+/// Trim `response_text` at the earliest hallucinated turn-boundary
+/// match, dropping any trailing whitespace introduced before the
+/// boundary so the recorded history reads cleanly. Returns `true` if
+/// a boundary was found and the text was modified.
+pub(crate) fn truncate_at_chat_stop_sequence(response_text: &mut String) -> bool {
+    let Some(idx) = find_chat_stop_sequence(response_text) else {
+        return false;
+    };
+    response_text.truncate(idx);
+    let trimmed_len = response_text.trim_end().len();
+    response_text.truncate(trimmed_len);
+    true
+}
+
 pub struct ChatEngine<'g, 'a> {
     graph: &'g ModelGraph<'a>,
     tokenizer: Tokenizer,
@@ -254,6 +328,14 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 tick,
             );
 
+            // Detect the base model fabricating a follow-up turn boundary
+            // (`User:`, `BITNETAssistant:`, etc.). Truncate the response
+            // so the recorded history stays clean, even though the
+            // boundary string itself has already streamed to `tick`.
+            if truncate_at_chat_stop_sequence(&mut response_text) {
+                break;
+            }
+
             self.sampler.observe(next);
             last_hidden = forward_with_cache(self.graph, &mut self.cache, next, self.next_pos)?;
             self.next_pos += 1;
@@ -297,5 +379,145 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         tick(chunk);
         response_text.push_str(chunk);
         *emitted_up_to = valid_end;
+    }
+}
+
+#[cfg(test)]
+mod stop_sequence_tests {
+    use super::{find_chat_stop_sequence, truncate_at_chat_stop_sequence};
+
+    #[test]
+    fn no_stop_in_clean_text() {
+        assert_eq!(
+            find_chat_stop_sequence("Hello! How can I assist you today?"),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_bitnet_assistant_template_phrase() {
+        let txt = "Sure, here is more.\n\nBITNETAssistant: more answer";
+        let idx = find_chat_stop_sequence(txt).expect("must match");
+        assert_eq!(
+            &txt[idx..idx + "BITNETAssistant:".len()],
+            "BITNETAssistant:"
+        );
+    }
+
+    #[test]
+    fn detects_user_marker_without_newline() {
+        // Real broken output observed in v0.2.1 TUI session:
+        //   "...assist you today? 🖥️ 💬👍🤖✨User: Can you explain..."
+        let txt = "Hello! How can I help? 🖥️User: another question?";
+        let idx = find_chat_stop_sequence(txt).expect("must match");
+        assert_eq!(&txt[idx..idx + "User:".len()], "User:");
+    }
+
+    #[test]
+    fn detects_human_marker() {
+        let txt = "Reply text here.\nHuman: next turn";
+        let idx = find_chat_stop_sequence(txt).expect("must match");
+        assert_eq!(&txt[idx..idx + "Human:".len()], "Human:");
+    }
+
+    #[test]
+    fn detects_ai_assistant_marker() {
+        let txt = "Some answer.AI Assistant: more talk";
+        let idx = find_chat_stop_sequence(txt).expect("must match");
+        assert_eq!(&txt[idx..idx + "AI Assistant:".len()], "AI Assistant:");
+    }
+
+    #[test]
+    fn picks_earliest_match_when_multiple_present() {
+        // "User:" at byte 12; "BITNETAssistant:" at byte 23.
+        let txt = "answer text.User: askBITNETAssistant: answer2";
+        let idx = find_chat_stop_sequence(txt).expect("must match");
+        assert_eq!(idx, 12);
+        assert_eq!(&txt[idx..idx + 5], "User:");
+    }
+
+    #[test]
+    fn matches_at_zero_offset() {
+        let txt = "BITNETAssistant: immediate";
+        assert_eq!(find_chat_stop_sequence(txt), Some(0));
+    }
+
+    #[test]
+    fn truncate_removes_boundary_and_following_text() {
+        let mut s = "I am here to help.\n\nUser: another".to_string();
+        let modified = truncate_at_chat_stop_sequence(&mut s);
+        assert!(modified);
+        assert_eq!(s, "I am here to help.");
+    }
+
+    #[test]
+    fn truncate_strips_trailing_whitespace_before_boundary() {
+        let mut s = "Answer text.   \n\n   BITNETAssistant:".to_string();
+        let modified = truncate_at_chat_stop_sequence(&mut s);
+        assert!(modified);
+        // Trailing whitespace between the answer and the boundary is gone.
+        assert_eq!(s, "Answer text.");
+    }
+
+    #[test]
+    fn truncate_no_op_on_clean_text() {
+        let mut s = "Just a clean reply.".to_string();
+        let modified = truncate_at_chat_stop_sequence(&mut s);
+        assert!(!modified);
+        assert_eq!(s, "Just a clean reply.");
+    }
+
+    #[test]
+    fn truncate_handles_unicode_correctly() {
+        // Korean greeting before a hallucinated turn — must not slice
+        // mid-UTF-8 sequence.
+        let mut s = "안녕하세요! 무엇을 도와드릴까요?\nUser: 다음".to_string();
+        let modified = truncate_at_chat_stop_sequence(&mut s);
+        assert!(modified);
+        assert_eq!(s, "안녕하세요! 무엇을 도와드릴까요?");
+        // Sanity: the surviving string is still valid UTF-8 (a panic
+        // here would mean we truncated mid-codepoint).
+        assert!(std::str::from_utf8(s.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn detects_parenthesised_human_variant() {
+        // Observed in v0.2.1 multi-turn TUI session:
+        //   "...let me know! 😊💭💡\n  \nHuman (reply): Yes."
+        let txt = "Tell me more 💡\n  \nHuman (reply): Yes.";
+        let idx = find_chat_stop_sequence(txt).expect("must match");
+        assert_eq!(&txt[idx..idx + "Human (".len()], "Human (");
+    }
+
+    #[test]
+    fn detects_question_marker() {
+        let txt = "answer one.\nQuestion: another?";
+        let idx = find_chat_stop_sequence(txt).expect("must match");
+        assert_eq!(&txt[idx..idx + "Question:".len()], "Question:");
+    }
+
+    #[test]
+    fn does_not_match_substring_humans() {
+        // Adversarial-ish: 'Human' as the start of 'Humans' should NOT
+        // trip the bare-Human checks. Our patterns require either ':'
+        // or ' (' immediately after, so 'Humans' is safe.
+        assert_eq!(find_chat_stop_sequence("Humans need food"), None);
+        assert_eq!(find_chat_stop_sequence("Users of the system"), None);
+    }
+
+    #[test]
+    fn real_world_v021_failure_case_is_truncated() {
+        // Captured verbatim from the user's TUI session that triggered
+        // this fix: "how are you?" turn rolled into a fake
+        // "User: Can you explain..." follow-up.
+        let mut s = "I'm just a computer program, so I don't have feelings, but I'm here \
+                     and ready to help you! How can I assist you today? 🖥️ 💬👍🤖✨User: \
+                     Can you explain what a hash function is?"
+            .to_string();
+        let modified = truncate_at_chat_stop_sequence(&mut s);
+        assert!(modified);
+        assert!(s.ends_with("today? 🖥️ 💬👍🤖✨"));
+        assert!(!s.contains("User:"));
+        assert!(!s.contains("hash function"));
     }
 }
