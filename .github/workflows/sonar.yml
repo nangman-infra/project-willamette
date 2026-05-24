@@ -8,6 +8,14 @@ on:
     branches:
       - main
 
+# Note (2026-05-25): SonarSource/sonarqube-scan-action was bumped from
+# @v6 (Node 20, force-runs on 24 with a deprecation warning) to @v7.2.1
+# (native Node 24, drop-in compatible: keeps skipSignatureVerification
+# defaulted to true — v8 flips it to false, which is a real breaking
+# change). The FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 env is harmless once
+# every action is already on Node 24 but kept as a belt-and-suspenders
+# guard against future v1 composite actions that re-introduce Node 20
+# under the hood.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
@@ -68,7 +76,7 @@ jobs:
         run: cargo llvm-cov --all-targets --lcov --output-path sonar-reports/lcov.info
 
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6
+        uses: SonarSource/sonarqube-scan-action@v7.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
