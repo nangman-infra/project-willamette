@@ -81,29 +81,35 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
 
-      # Diagnostic: pull the failed Quality Gate conditions from the
-      # SonarQube API and print them, so future failures are visible
-      # in the GitHub Actions log without needing dashboard access.
-      # Runs whether the scan succeeded or failed (`if: always()`) and
-      # before the quality-gate-action below, which fails fast without
-      # explaining which condition tripped.
+      # Diagnostic: pull the Quality Gate conditions from the SonarQube
+      # API and print them, so future failures are visible in the
+      # GitHub Actions log without needing dashboard access.
+      #
+      # `continue-on-error: true` — this step is informational. If the
+      # API call hiccups (transient HTML error page from Sonar, jq
+      # parsing a non-JSON body, etc.) we don't want to block the real
+      # quality-gate-action step below, which has its own independent
+      # logic.
       - name: Quality Gate breakdown
         if: always()
+        continue-on-error: true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
+        shell: bash {0}  # NOT `bash -e` — we want to keep printing even after a jq parse fail
         run: |
+          set +e
           # Wait briefly for the analysis to finish processing on the
           # Sonar server; the scan-action returns as soon as the report
           # is uploaded, not when the gate is computed.
           for i in 1 2 3 4 5 6; do
             status_json=$(curl -sS -u "${SONAR_TOKEN}:" \
-              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=project-willamette" || true)
-            overall=$(echo "${status_json}" | jq -r '.projectStatus.status // "PENDING"')
-            if [ "${overall}" != "PENDING" ] && [ "${overall}" != "NONE" ] && [ -n "${overall}" ]; then
+              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=project-willamette")
+            overall=$(echo "${status_json}" | jq -r '.projectStatus.status // "PENDING"' 2>/dev/null)
+            if [ -n "${overall}" ] && [ "${overall}" != "PENDING" ] && [ "${overall}" != "NONE" ] && [ "${overall}" != "null" ]; then
               break
             fi
-            echo "[gate breakdown] still computing (attempt $i)…"
+            echo "[gate breakdown] still computing (attempt $i; raw response prefix: $(echo "${status_json}" | head -c 80))"
             sleep 5
           done
           echo "Overall Quality Gate: ${overall:-UNKNOWN}"
@@ -113,13 +119,14 @@ jobs:
             .projectStatus.conditions[]?
             | select(.status == "ERROR")
             | "  ✗ \(.metricKey)  (actual: \(.actualValue // "n/a"), threshold: \(.comparator) \(.errorThreshold))"
-          ' || echo "  (could not parse Sonar API response)"
+          ' 2>/dev/null
           echo
           echo "All conditions:"
           echo "${status_json}" | jq -r '
             .projectStatus.conditions[]?
             | "  \(.status)  \(.metricKey)  actual=\(.actualValue // "n/a")  threshold=\(.comparator) \(.errorThreshold)"
-          ' || true
+          ' 2>/dev/null
+          exit 0
 
       - name: SonarQube Quality Gate
         uses: SonarSource/sonarqube-quality-gate-action@v1
