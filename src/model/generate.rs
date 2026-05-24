@@ -172,6 +172,7 @@ where
 /// Generate with a user-supplied `Sampler` (temperature / top-k /
 /// top-p / repetition penalty). Defaults to greedy when the sampler
 /// has no knobs set. Stops on `eos_id` OR on any id in `stop_ids`.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_with_cache_and_sampler<F>(
     graph: &ModelGraph<'_>,
     prompt_ids: &[u32],

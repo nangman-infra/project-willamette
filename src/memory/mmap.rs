@@ -18,9 +18,11 @@ impl ModelMmap {
     /// # Safety
     ///
     /// Mapping a file is inherently unsafe because:
+    ///
     /// 1. If another process or thread truncates or modifies the file while it is mapped,
     ///    accessing the mapped slice will lead to Undefined Behavior (UB), such as bus errors (SIGBUS).
     /// 2. The caller must guarantee that the file contents are not concurrently modified.
+    ///
     /// We assume the model weights file is static and immutable during the runtime inference.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;

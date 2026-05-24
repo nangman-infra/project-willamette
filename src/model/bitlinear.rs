@@ -1,3 +1,7 @@
+// Hot tensor inner loops are clearer with explicit index variables
+// (row j × block bk × byte gp) than with iterator chains.
+#![allow(clippy::needless_range_loop)]
+
 //! Stage 4-C — scalar reference BitLinear / I2_S matvec.
 //!
 //! Single function, used by all seven BitLinear roles
@@ -116,7 +120,7 @@ pub fn bitlinear_i2s_matvec_f32_scalar(
             weight.name
         )));
     }
-    if in_dim == 0 || in_dim % QK_I2_S != 0 {
+    if in_dim == 0 || !in_dim.is_multiple_of(QK_I2_S) {
         return Err(WillametteError::GgufParse(format!(
             "bitlinear_i2s_matvec_f32: in_dim {} is not a positive multiple of {} (QK_I2_S)",
             in_dim, QK_I2_S
@@ -204,7 +208,7 @@ pub fn i2s_unpack_row_to_i8(
             row_idx, out_dim
         )));
     }
-    if in_dim == 0 || in_dim % QK_I2_S != 0 {
+    if in_dim == 0 || !in_dim.is_multiple_of(QK_I2_S) {
         return Err(WillametteError::GgufParse(format!(
             "i2s_unpack_row_to_i8: in_dim {} is not a positive multiple of {}",
             in_dim, QK_I2_S

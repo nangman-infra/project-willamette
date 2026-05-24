@@ -160,7 +160,7 @@ fn metadata_special_tokens_match_inspect_log() {
         assert_eq!(tok.bos_id, Some(128000));
         assert_eq!(tok.eos_id, Some(128001));
         assert_eq!(tok.pad_id, Some(128001));
-        assert_eq!(tok.default_add_bos, true);
+        assert!(tok.default_add_bos);
         assert_eq!(tok.vocab_size(), 128256);
         assert_eq!(tok.model_type, "gpt2");
     });

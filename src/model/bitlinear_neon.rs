@@ -1,3 +1,8 @@
+// Hot kernel loops index parallel tensors (weight bytes, input f32s,
+// output rows) at the same step; explicit `for j in 0..N` reads better
+// than iterator chains here.
+#![allow(clippy::needless_range_loop)]
+
 //! Stage 6-C — NEON-accelerated I2_S BitLinear matvec (aarch64).
 //!
 //! Strategy: per row, scalar-unpack the 2-bit codes into an `i8` scratch
@@ -116,8 +121,14 @@ unsafe fn neon_dot_i8_f32(weights_i8: *const i8, input: *const f32, in_dim: usiz
 
 /// Full I2_S matvec via per-row scalar unpack + NEON dot product.
 ///
-/// SAFETY: NEON availability must already have been verified by the
-/// caller (see [`super::bitlinear::bitlinear_i2s_matvec_f32`]).
+/// # Safety
+///
+/// The caller must ensure NEON is available on the running CPU
+/// (Apple Silicon always satisfies this; on other aarch64 hosts use
+/// `std::arch::is_aarch64_feature_detected!("neon")` first — see
+/// the dispatcher in [`super::bitlinear::bitlinear_i2s_matvec_f32`]).
+/// All length / dtype / shape preconditions are re-checked inside
+/// this function and reported as typed errors, not UB.
 #[target_feature(enable = "neon")]
 pub unsafe fn bitlinear_i2s_matvec_f32_neon(
     weight: &TensorView<'_>,
@@ -153,7 +164,7 @@ pub unsafe fn bitlinear_i2s_matvec_f32_neon(
             weight.name
         )));
     }
-    if in_dim == 0 || in_dim % QK_I2_S != 0 {
+    if in_dim == 0 || !in_dim.is_multiple_of(QK_I2_S) {
         return Err(WillametteError::GgufParse(format!(
             "neon matvec: in_dim {} is not a positive multiple of {}",
             in_dim, QK_I2_S

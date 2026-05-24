@@ -1,3 +1,8 @@
+#![allow(clippy::needless_range_loop)]
+// Per-token + per-head indexing across many parallel arrays (qs, ks,
+// vs, x_norms, hidden) reads naturally as explicit indices; iterator
+// chains over five parallel collections would obscure the loop body.
+
 //! Stage 5-B — multi-token reference forward without KV cache.
 //!
 //! Given a sequence of `M` token ids, run them all the way through the

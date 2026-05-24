@@ -246,7 +246,7 @@ pub fn apply_rope_f32(
             head_dim
         )));
     }
-    if n_rot == 0 || n_rot % 2 != 0 {
+    if n_rot == 0 || !n_rot.is_multiple_of(2) {
         return Err(WillametteError::GgufParse(format!(
             "apply_rope_f32: n_rot={} must be a positive even number",
             n_rot
@@ -311,7 +311,7 @@ pub fn gqa_group_size(n_heads: u32, n_kv_heads: u32) -> Result<u32, WillametteEr
             "gqa_group_size: n_kv_heads must be > 0".to_string(),
         ));
     }
-    if n_heads % n_kv_heads != 0 {
+    if !n_heads.is_multiple_of(n_kv_heads) {
         return Err(WillametteError::GgufParse(format!(
             "gqa_group_size: n_heads ({}) not divisible by n_kv_heads ({})",
             n_heads, n_kv_heads

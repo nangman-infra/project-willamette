@@ -1,3 +1,7 @@
+#![allow(clippy::needless_range_loop)]
+// Token-position + head-index indexing reads more naturally than
+// iterator chains over multiple parallel arrays.
+
 //! Stage 5-C — single-token forward with a `KVCache`.
 //!
 //! Designed to be called once per token, in position order

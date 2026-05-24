@@ -383,8 +383,8 @@ mod tests {
     fn rope_multi_head_each_head_independent() {
         let mut q = vec![0.0_f32; 2 * 128];
         // Head 0 has values, head 1 is all zero
-        for i in 0..128 {
-            q[i] = (i as f32) * 0.01;
+        for (i, slot) in q.iter_mut().take(128).enumerate() {
+            *slot = (i as f32) * 0.01;
         }
         let head1_pre = q[128..].to_vec();
         apply_rope_multi_head(&mut q, 2, 128, 128, 7, 500_000.0, RopeType::Neox).unwrap();

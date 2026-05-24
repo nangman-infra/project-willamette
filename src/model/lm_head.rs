@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 //! Stage 4-D5 — lm_head logits via tied `token_embd.weight`.
 //!
 //! For BitNet b1.58 the final projection is unconditionally tied to the

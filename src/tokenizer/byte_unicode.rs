@@ -1,3 +1,9 @@
+#![allow(clippy::needless_range_loop)]
+// The byte → unicode table builds two parallel 256-element arrays
+// indexed by byte value; explicit `for b in 0..256` matches the
+// GPT-2 algorithm in `bytes_to_unicode()` 1:1 and is the form audited
+// against upstream.
+
 //! GPT-2 byte → Unicode reversible mapping.
 //!
 //! GPT-2 / LLaMA 3 byte-level BPE encodes a raw byte by mapping it to one of

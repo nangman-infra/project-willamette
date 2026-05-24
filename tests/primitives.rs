@@ -283,8 +283,8 @@ fn gqa_mapping_covers_all_q_heads() {
         hits[kv as usize] += 1;
     }
     // Every KV head must be hit by exactly 4 Q heads.
-    for kv in 0..5 {
-        assert_eq!(hits[kv], 4, "kv head {} hit count = {}", kv, hits[kv]);
+    for (kv, &count) in hits.iter().enumerate() {
+        assert_eq!(count, 4, "kv head {} hit count = {}", kv, count);
     }
 }
 

@@ -107,7 +107,7 @@ impl<'a> TensorView<'a> {
     /// whole multiple of `I2S_ELEMENTS_PER_BLOCK`.
     pub fn i2s_expected_byte_len(shape: &[u64]) -> Result<u64, WillametteError> {
         let n: u64 = shape.iter().product();
-        if n % Self::I2S_ELEMENTS_PER_BLOCK != 0 {
+        if !n.is_multiple_of(Self::I2S_ELEMENTS_PER_BLOCK) {
             return Err(WillametteError::GgufParse(format!(
                 "I2_S tensor shape product {} is not a multiple of \
                  QK_I2_S={} — block-misaligned tensors are unsupported",
