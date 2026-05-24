@@ -238,65 +238,85 @@ fn ui_loop(
             .draw(|f| render(f, ui))
             .map_err(|e| anyhow::anyhow!("draw: {}", e))?;
 
-        // Drain any pending TokenEvents (non-blocking).
-        loop {
-            match evt_rx.try_recv() {
-                Ok(TokenEvent::Chunk(c)) => {
-                    ui.streaming.push_str(&c);
-                }
-                Ok(TokenEvent::Done { secs, chars }) => {
-                    let resp = std::mem::take(&mut ui.streaming);
-                    ui.history.push(DisplayMsg {
-                        role: Role::Bot,
-                        content: resp,
-                    });
-                    ui.generating = false;
-                    ui.last_turn_secs = Some(secs);
-                    ui.last_turn_chars = Some(chars);
-                    let cps = if secs > 0.0 { chars as f64 / secs } else { 0.0 };
-                    ui.status = format!("idle · last turn {:.1}s ({:.1} chars/s)", secs, cps);
-                }
-                Ok(TokenEvent::Failed(msg)) => {
-                    let partial = std::mem::take(&mut ui.streaming);
-                    if !partial.is_empty() {
-                        ui.history.push(DisplayMsg {
-                            role: Role::Bot,
-                            content: partial,
-                        });
-                    }
-                    ui.generating = false;
-                    ui.status = format!("error: {}", msg);
-                }
-                Ok(TokenEvent::StateChanged { token_position }) => {
-                    ui.token_position = token_position;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
-            }
+        if drain_token_events(ui, &evt_rx) {
+            return Ok(());
         }
+        clear_transient_if_old(ui);
 
-        // Clear transient after 2.5s.
-        if let Some((_, when)) = ui.transient {
-            if when.elapsed() > Duration::from_millis(2500) {
-                ui.transient = None;
-            }
-        }
-
-        // Poll input with a timeout that yields to redraws even when
-        // nothing's happening.
-        let timeout = tick_period.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout).map_err(|e| anyhow::anyhow!("poll: {}", e))? {
-            if let Event::Key(key) = event::read().map_err(|e| anyhow::anyhow!("read: {}", e))? {
-                if handle_key(ui, key, &cmd_tx)? {
-                    let _ = cmd_tx.send(UserCmd::Shutdown);
-                    return Ok(());
-                }
-            }
+        if poll_one_input(ui, &cmd_tx, tick_period.saturating_sub(last_tick.elapsed()))? {
+            let _ = cmd_tx.send(UserCmd::Shutdown);
+            return Ok(());
         }
         if last_tick.elapsed() >= tick_period {
             last_tick = Instant::now();
         }
     }
+}
+
+/// Drain any pending `TokenEvent`s from the worker thread.
+/// Returns `true` if the worker has disconnected (UI should exit).
+fn drain_token_events(ui: &mut UiState, evt_rx: &Receiver<TokenEvent>) -> bool {
+    loop {
+        match evt_rx.try_recv() {
+            Ok(evt) => apply_token_event(ui, evt),
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+fn apply_token_event(ui: &mut UiState, evt: TokenEvent) {
+    match evt {
+        TokenEvent::Chunk(c) => ui.streaming.push_str(&c),
+        TokenEvent::Done { secs, chars } => finish_bot_turn(ui, secs, chars),
+        TokenEvent::Failed(msg) => fail_bot_turn(ui, msg),
+        TokenEvent::StateChanged { token_position } => ui.token_position = token_position,
+    }
+}
+
+fn finish_bot_turn(ui: &mut UiState, secs: f64, chars: usize) {
+    let resp = std::mem::take(&mut ui.streaming);
+    ui.history.push(DisplayMsg {
+        role: Role::Bot,
+        content: resp,
+    });
+    ui.generating = false;
+    ui.last_turn_secs = Some(secs);
+    ui.last_turn_chars = Some(chars);
+    let cps = if secs > 0.0 { chars as f64 / secs } else { 0.0 };
+    ui.status = format!("idle · last turn {:.1}s ({:.1} chars/s)", secs, cps);
+}
+
+fn fail_bot_turn(ui: &mut UiState, msg: String) {
+    let partial = std::mem::take(&mut ui.streaming);
+    if !partial.is_empty() {
+        ui.history.push(DisplayMsg {
+            role: Role::Bot,
+            content: partial,
+        });
+    }
+    ui.generating = false;
+    ui.status = format!("error: {}", msg);
+}
+
+fn clear_transient_if_old(ui: &mut UiState) {
+    if let Some((_, when)) = ui.transient {
+        if when.elapsed() > Duration::from_millis(2500) {
+            ui.transient = None;
+        }
+    }
+}
+
+/// Poll for one input event, dispatch to `handle_key` if present.
+/// Returns `true` if the user requested quit.
+fn poll_one_input(ui: &mut UiState, cmd_tx: &Sender<UserCmd>, timeout: Duration) -> Result<bool> {
+    if !event::poll(timeout).map_err(|e| anyhow::anyhow!("poll: {}", e))? {
+        return Ok(false);
+    }
+    let Event::Key(key) = event::read().map_err(|e| anyhow::anyhow!("read: {}", e))? else {
+        return Ok(false);
+    };
+    handle_key(ui, key, cmd_tx)
 }
 
 /// Returns `true` to request quit.
