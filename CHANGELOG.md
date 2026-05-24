@@ -3,10 +3,33 @@
 All notable changes to Project Willamette are recorded here. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 project version increments follow [SemVer](https://semver.org/) — the
-`-mvp` suffix marks the first release that hits the v0.1.0 MVP bar
-defined in [`README.md`](README.md).
+`-mvp` suffix marks releases that still treat the runtime as an MVP
+rather than a stabilised library.
+
+### Versioning policy (carried forward)
+
+| Change | Bumps |
+| ------ | ----- |
+| Bug fix (same intent, corrected result) | `patch` |
+| Public CLI / API addition (new subcommand, new public function) | `minor` |
+| Public CLI / API change or removal (breaking) | `major` |
+| Internal-only (CI, refactor, docs, clippy cleanup) | _no bump; only `[Unreleased]` notes_ |
+| Model compatibility breakage (new ggml_type required, new tokenizer pre mandatory) | `major` or `minor`, sized by user impact |
+
+The `-mvp` suffix is kept while iterating in `v0.1.x` and `v0.2.x`.
+It will be dropped on the first release we feel comfortable advertising
+as a stable library — at which point the next tag becomes `v0.3.0`
+(or `v1.0.0` if there is also a public API guarantee).
 
 ## [Unreleased]
+
+_No changes yet._
+
+## [v0.1.1-mvp] — 2026-05-24
+
+Patch release: bug fix in generation + SonarQube validation lane.
+No public-API or behaviour change to the inference path itself
+(token-id parity vs. bitnet.cpp from v0.1.0-mvp is preserved).
 
 ### Fixed
 * `willamette run` no longer panics with `decoded bytes are not valid
@@ -24,6 +47,20 @@ defined in [`README.md`](README.md).
 * `Tokenizer::decode_lossy(ids) -> String` — replaces a trailing
   incomplete UTF-8 suffix with `U+FFFD`; keeps internal multi-byte
   characters intact.
+* `sonar-project.properties` and
+  `.github/workflows/sonar.yml` matching the
+  `nangman-crypto-research` SonarQube pattern (quality + sonar
+  pipeline, `cargo-llvm-cov` lcov, Quality Gate).
+
+### Changed
+* `.github/workflows/ci.yml` removed; its checks (fmt, test, clippy)
+  are now performed by the `quality` job in the new SonarQube
+  workflow.
+* Clippy now passes `cargo clippy --all-targets -- -D warnings`
+  cleanly: 23 fixes (6× `manual_is_multiple_of`, 12× kernel-loop
+  `needless_range_loop` allowed at module level with rationale,
+  1× `too_many_arguments`, 1× `missing_safety_doc`,
+  1× `doc_lazy_continuation`, plus 2 test cosmetic fixes).
 
 ## [v0.1.0-mvp] — 2026-05-24
 
