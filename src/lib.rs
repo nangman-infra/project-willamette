@@ -15,6 +15,7 @@
 //! Re-enabling any of those requires verifying the real
 //! `microsoft/bitnet-b1.58-2B-4T-gguf` file first.
 
+pub mod chat;
 pub mod error;
 pub mod gguf;
 pub mod memory;

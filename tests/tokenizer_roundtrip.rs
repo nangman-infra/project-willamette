@@ -193,3 +193,82 @@ fn roundtrip_does_not_depend_on_token_id_hardcoding() {
         }
     });
 }
+
+#[test]
+fn encode_with_specials_text_only_matches_plain_encode() {
+    use project_willamette::tokenizer::PromptPart;
+
+    with_real_tokenizer(|tok| {
+        let text = "Human: hello\n\nBITNETAssistant: ";
+        let want = tok.encode(text, EncodeOptions::none()).expect("encode");
+        let got = tok
+            .encode_with_specials(&[PromptPart::Text(text)])
+            .expect("encode_with_specials");
+        assert_eq!(
+            got, want,
+            "text-only encode_with_specials must equal plain encode"
+        );
+    });
+}
+
+#[test]
+fn encode_with_specials_inserts_special_verbatim() {
+    use project_willamette::tokenizer::PromptPart;
+
+    with_real_tokenizer(|tok| {
+        let eot_id: u32 = 128009; // <|eot_id|> for LLaMA-3 family
+        let ids = tok
+            .encode_with_specials(&[
+                PromptPart::Text("Hello"),
+                PromptPart::Special(eot_id),
+                PromptPart::Text(" world"),
+            ])
+            .expect("encode_with_specials");
+        let hello = tok.encode("Hello", EncodeOptions::none()).expect("hello");
+        let world = tok.encode(" world", EncodeOptions::none()).expect("world");
+        let mut want = Vec::new();
+        want.extend(&hello);
+        want.push(eot_id);
+        want.extend(&world);
+        assert_eq!(ids, want);
+        assert!(
+            ids.iter().any(|&id| id == eot_id),
+            "eot_id must appear in the output verbatim"
+        );
+    });
+}
+
+#[test]
+fn encode_with_specials_rejects_out_of_range_special_id() {
+    use project_willamette::tokenizer::PromptPart;
+
+    with_real_tokenizer(|tok| {
+        let bogus = tok.vocab_size() as u32 + 1;
+        let err = tok
+            .encode_with_specials(&[PromptPart::Text("hi"), PromptPart::Special(bogus)])
+            .expect_err("must reject out-of-vocab id");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("out of vocab"),
+            "error should mention vocab range; got: {}",
+            msg
+        );
+    });
+}
+
+#[test]
+fn encode_with_specials_with_leading_bos_special() {
+    // Demonstrates the contract: BOS isn't auto-prepended. The caller
+    // does it explicitly with a Special part if they want it.
+    use project_willamette::tokenizer::PromptPart;
+
+    with_real_tokenizer(|tok| {
+        let bos = tok.bos_id.expect("bos id present in real model");
+        let ids = tok
+            .encode_with_specials(&[PromptPart::Special(bos), PromptPart::Text("hello")])
+            .expect("encode_with_specials");
+        assert_eq!(ids.first().copied(), Some(bos), "first id should be BOS");
+        let body = tok.encode("hello", EncodeOptions::none()).expect("hello");
+        assert_eq!(&ids[1..], &body[..]);
+    });
+}

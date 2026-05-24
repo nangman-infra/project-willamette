@@ -54,6 +54,21 @@ impl EncodeOptions {
     }
 }
 
+/// A piece of a prompt for [`Tokenizer::encode_with_specials`].
+///
+/// `Text` segments go through normal byte-level BPE. `Special`
+/// segments are inserted as a single token id verbatim — bypassing
+/// BPE entirely. This matters for chat templates that need to inject
+/// `<|end_of_text|>` (128001), `<|eot_id|>` (128009), or other
+/// special markers in the middle of an otherwise textual prompt:
+/// going through BPE would split `<|end_of_text|>` into 7 byte-level
+/// tokens instead of the 1 id the model trained on.
+#[derive(Debug, Clone, Copy)]
+pub enum PromptPart<'a> {
+    Text(&'a str),
+    Special(u32),
+}
+
 pub struct Tokenizer {
     byte_unicode: ByteUnicode,
     bpe: Bpe,
@@ -217,6 +232,42 @@ impl Tokenizer {
             ids.push(eos);
         }
 
+        Ok(ids)
+    }
+
+    /// Encode a sequence of [`PromptPart`]s — text gets full byte-level
+    /// BPE; specials are emitted as a single token id, verbatim.
+    ///
+    /// Does **not** auto-add BOS or EOS — caller is responsible (the
+    /// whole point of this API is precise control over what ends up in
+    /// the prompt). To prepend BOS, start the slice with
+    /// `PromptPart::Special(tokenizer.bos_id.unwrap())`.
+    ///
+    /// Returns [`WillametteError::UnsupportedTokenizer`] if a special id
+    /// is outside `0..vocab_size`.
+    pub fn encode_with_specials(
+        &self,
+        parts: &[PromptPart<'_>],
+    ) -> Result<Vec<u32>, WillametteError> {
+        let mut ids: Vec<u32> = Vec::new();
+        for part in parts {
+            match *part {
+                PromptPart::Text(s) => {
+                    let chunk = self.encode(s, EncodeOptions::none())?;
+                    ids.extend(chunk);
+                }
+                PromptPart::Special(id) => {
+                    if (id as usize) >= self.vocab_size() {
+                        return Err(WillametteError::UnsupportedTokenizer(format!(
+                            "encode_with_specials: special id {} out of vocab range (0..{})",
+                            id,
+                            self.vocab_size()
+                        )));
+                    }
+                    ids.push(id);
+                }
+            }
+        }
         Ok(ids)
     }
 

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use project_willamette::chat::ChatEngine;
 use project_willamette::gguf::reader::{GgufFile, GgufValue, GGUF_MAGIC};
 use project_willamette::memory::mmap::ModelMmap;
 use project_willamette::model::bitlinear::bitlinear_i2s_matvec_f32;
@@ -119,6 +120,64 @@ enum Command {
         #[arg(long, default_value_t = false)]
         no_bos: bool,
     },
+    /// Stage 9-E: ratatui-based full-screen chat TUI.
+    ///
+    /// Same engine as `chat` but with a proper history view, input
+    /// box, status bar, and slash commands. Quit with `/quit` or Ctrl-C.
+    Tui {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long, default_value_t = 2048)]
+        max_seq_len: usize,
+        #[arg(long, default_value_t = 256)]
+        max_new_tokens: usize,
+        #[arg(long)]
+        system: Option<String>,
+        #[arg(long, default_value_t = 0.7)]
+        temperature: f32,
+        #[arg(long, default_value_t = 40)]
+        top_k: usize,
+        #[arg(long, default_value_t = 0.9)]
+        top_p: f32,
+        #[arg(long, default_value_t = 1.1)]
+        repetition_penalty: f32,
+        #[arg(long, default_value_t = 0xabad_1dea_u64)]
+        seed: u64,
+    },
+    /// Stage 9: multi-turn interactive chat (stdin/stdout).
+    ///
+    /// Loads the model once, keeps a KV cache across turns, streams
+    /// each assistant response in UTF-8-safe chunks. Type `/quit` or
+    /// press Ctrl-D to exit. Other slash commands arrive in Stage 9-D.
+    Chat {
+        /// Path to the .gguf model file.
+        #[arg(long)]
+        model: PathBuf,
+        /// Token budget for the KV cache (prompt + all turns).
+        #[arg(long, default_value_t = 2048)]
+        max_seq_len: usize,
+        /// Cap on new tokens per assistant turn.
+        #[arg(long, default_value_t = 256)]
+        max_new_tokens: usize,
+        /// Optional system prompt prepended to the very first turn.
+        #[arg(long)]
+        system: Option<String>,
+        /// Sampling temperature. 0 = greedy.
+        #[arg(long, default_value_t = 0.7)]
+        temperature: f32,
+        /// Keep only the K highest-probability tokens before sampling.
+        #[arg(long, default_value_t = 40)]
+        top_k: usize,
+        /// Nucleus: keep tokens up to cumulative probability `p`.
+        #[arg(long, default_value_t = 0.9)]
+        top_p: f32,
+        /// Repetition penalty (HF convention; > 1.0 enables).
+        #[arg(long, default_value_t = 1.1)]
+        repetition_penalty: f32,
+        /// PRNG seed.
+        #[arg(long, default_value_t = 0xabad_1dea_u64)]
+        seed: u64,
+    },
     /// Stage 6-A: scalar-reference baseline benchmarks.
     ///
     /// Times one I2_S BitLinear matvec, one single-token (no cache)
@@ -179,6 +238,48 @@ fn main() -> Result<()> {
             top_k,
             no_bos,
         } => cmd_logits(&model, &prompt, top_k, no_bos),
+        Command::Chat {
+            model,
+            max_seq_len,
+            max_new_tokens,
+            system,
+            temperature,
+            top_k,
+            top_p,
+            repetition_penalty,
+            seed,
+        } => cmd_chat(
+            &model,
+            max_seq_len,
+            max_new_tokens,
+            system.as_deref(),
+            temperature,
+            top_k,
+            top_p,
+            repetition_penalty,
+            seed,
+        ),
+        Command::Tui {
+            model,
+            max_seq_len,
+            max_new_tokens,
+            system,
+            temperature,
+            top_k,
+            top_p,
+            repetition_penalty,
+            seed,
+        } => cmd_tui(
+            &model,
+            max_seq_len,
+            max_new_tokens,
+            system.as_deref(),
+            temperature,
+            top_k,
+            top_p,
+            repetition_penalty,
+            seed,
+        ),
     }
 }
 
@@ -466,6 +567,284 @@ fn cmd_run(
     println!("Generated text:   {:?}", generated_text);
     let full_text = format!("{}{}", prompt, generated_text);
     println!("Full text:        {:?}", full_text);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_chat(
+    path: &Path,
+    max_seq_len: usize,
+    max_new_tokens: usize,
+    system: Option<&str>,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+    seed: u64,
+) -> Result<()> {
+    use std::io::{BufRead, Write};
+
+    let load_start = std::time::Instant::now();
+    let mmap =
+        ModelMmap::open(path).with_context(|| format!("opening model file: {}", path.display()))?;
+    let bytes = mmap.as_bytes();
+    let gguf = GgufFile::parse(bytes).map_err(|e| anyhow::anyhow!("GGUF parse error: {}", e))?;
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata)
+        .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
+    let graph = ModelGraph::from_gguf(&gguf)
+        .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+    let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+
+    let sp = SamplingParams {
+        temperature,
+        top_k: if top_k == 0 { None } else { Some(top_k) },
+        top_p: if top_p >= 1.0 || top_p <= 0.0 {
+            None
+        } else {
+            Some(top_p)
+        },
+        repetition_penalty: if repetition_penalty <= 1.0 {
+            None
+        } else {
+            Some(repetition_penalty)
+        },
+        seed,
+    };
+
+    let mut engine = ChatEngine::new(&graph, tokenizer, sp, max_seq_len);
+    if let Some(sys) = system {
+        engine.set_system_prompt(Some(sys.to_string()));
+    }
+
+    println!("====================================================");
+    println!("Project Willamette — chat (Stage 9-A)");
+    println!("====================================================");
+    println!("Model:       {}", path.display());
+    println!(
+        "Architecture: {}  layers: {}  vocab: {}",
+        graph.config.architecture, graph.config.block_count, graph.config.vocab_size
+    );
+    println!("Loaded in:   {:.1} ms", load_ms);
+    println!(
+        "Sampling:    temp={}  top_k={}  top_p={}  rep_pen={}  seed=0x{:x}",
+        temperature, top_k, top_p, repetition_penalty, seed
+    );
+    println!(
+        "Budget:      max_seq_len={}  max_new_tokens_per_turn={}",
+        max_seq_len, max_new_tokens
+    );
+    println!(
+        "Slash commands: /help /reset /history /save <file> /sys [text|off] /quit (Ctrl-D)"
+    );
+    println!();
+
+    let stdin = std::io::stdin();
+    let mut input_line = String::new();
+    let mut stdout = std::io::stdout();
+    loop {
+        print!("You: ");
+        stdout.flush().ok();
+        input_line.clear();
+        let n = stdin
+            .lock()
+            .read_line(&mut input_line)
+            .map_err(|e| anyhow::anyhow!("stdin read failed: {}", e))?;
+        if n == 0 {
+            // EOF (Ctrl-D)
+            println!();
+            break;
+        }
+        let user_text = input_line.trim_end_matches(['\n', '\r']).trim();
+        if user_text.is_empty() {
+            continue;
+        }
+        if let Some(stripped) = user_text.strip_prefix('/') {
+            match handle_slash_command(stripped, &mut engine)? {
+                SlashOutcome::Quit => break,
+                SlashOutcome::Continue => {
+                    println!();
+                    continue;
+                }
+            }
+        }
+
+        print!("Bot: ");
+        stdout.flush().ok();
+        let turn_start = std::time::Instant::now();
+        let result = engine.send_user_message(user_text, max_new_tokens, |chunk| {
+            print!("{}", chunk);
+            std::io::stdout().flush().ok();
+        });
+        let turn_ms = turn_start.elapsed().as_secs_f64() * 1000.0;
+        println!();
+        match result {
+            Ok(response) => {
+                let toks = response.chars().count() as f64;
+                let tps = toks / (turn_ms / 1000.0).max(1e-6);
+                println!(
+                    "      [turn took {:.1} s  ~{:.1} chars/s  ctx {}/{} tokens]",
+                    turn_ms / 1000.0,
+                    tps,
+                    engine.token_position(),
+                    engine.max_seq_len()
+                );
+            }
+            Err(e) => {
+                eprintln!("[chat error] {}", e);
+                eprintln!("[hint] type /quit to exit");
+            }
+        }
+        println!();
+    }
+    println!("Goodbye.");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_tui(
+    path: &Path,
+    max_seq_len: usize,
+    max_new_tokens: usize,
+    system: Option<&str>,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+    seed: u64,
+) -> Result<()> {
+    let mmap =
+        ModelMmap::open(path).with_context(|| format!("opening model file: {}", path.display()))?;
+    let bytes = mmap.as_bytes();
+    let gguf = GgufFile::parse(bytes).map_err(|e| anyhow::anyhow!("GGUF parse error: {}", e))?;
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata)
+        .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
+    let graph = ModelGraph::from_gguf(&gguf)
+        .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+
+    let sp = SamplingParams {
+        temperature,
+        top_k: if top_k == 0 { None } else { Some(top_k) },
+        top_p: if top_p >= 1.0 || top_p <= 0.0 { None } else { Some(top_p) },
+        repetition_penalty: if repetition_penalty <= 1.0 {
+            None
+        } else {
+            Some(repetition_penalty)
+        },
+        seed,
+    };
+
+    let mut engine = ChatEngine::new(&graph, tokenizer, sp, max_seq_len);
+    if let Some(sys) = system {
+        engine.set_system_prompt(Some(sys.to_string()));
+    }
+    project_willamette::chat::run_tui(engine, max_new_tokens)
+}
+
+enum SlashOutcome {
+    Continue,
+    Quit,
+}
+
+fn handle_slash_command(cmd_line: &str, engine: &mut ChatEngine<'_, '_>) -> Result<SlashOutcome> {
+    let (cmd, rest) = match cmd_line.split_once(char::is_whitespace) {
+        Some((c, r)) => (c, r.trim()),
+        None => (cmd_line, ""),
+    };
+    match cmd {
+        "quit" | "exit" | "q" => Ok(SlashOutcome::Quit),
+        "help" | "?" => {
+            println!("Commands:");
+            println!("  /help              — this message");
+            println!("  /quit              — exit (alias /exit, /q, or Ctrl-D)");
+            println!("  /reset             — clear conversation history + KV cache");
+            println!("  /history           — print the current turn-by-turn history");
+            println!("  /save <path>       — write history as JSON lines to <path>");
+            println!("  /sys <text>        — set or replace the system prompt");
+            println!("  /sys off           — clear the system prompt");
+            println!("  /stats             — show token-position + budget usage");
+            Ok(SlashOutcome::Continue)
+        }
+        "reset" => {
+            engine.reset();
+            println!("[history cleared; KV cache reset]");
+            Ok(SlashOutcome::Continue)
+        }
+        "history" => {
+            if engine.history().is_empty() {
+                println!("[history is empty]");
+            } else {
+                for (i, msg) in engine.history().iter().enumerate() {
+                    let role = match msg.role {
+                        project_willamette::chat::Role::System => "SYS",
+                        project_willamette::chat::Role::User => "USR",
+                        project_willamette::chat::Role::Assistant => "BOT",
+                    };
+                    println!("  [{:>2}] {} | {}", i, role, msg.content);
+                }
+            }
+            Ok(SlashOutcome::Continue)
+        }
+        "save" => {
+            if rest.is_empty() {
+                println!("[usage: /save <path>]");
+                return Ok(SlashOutcome::Continue);
+            }
+            let path = PathBuf::from(rest);
+            save_history_jsonl(&path, engine.history())?;
+            println!("[wrote {} message(s) to {}]", engine.history().len(), path.display());
+            Ok(SlashOutcome::Continue)
+        }
+        "sys" => {
+            if rest.is_empty() {
+                println!("[usage: /sys <text>  or  /sys off]");
+                return Ok(SlashOutcome::Continue);
+            }
+            if rest == "off" {
+                engine.set_system_prompt(None);
+                println!("[system prompt cleared]");
+            } else {
+                engine.set_system_prompt(Some(rest.to_string()));
+                println!("[system prompt set ({} chars) — takes effect from next /reset]", rest.len());
+            }
+            Ok(SlashOutcome::Continue)
+        }
+        "stats" => {
+            println!(
+                "  position: {}/{} tokens  ({:.1}% used)",
+                engine.token_position(),
+                engine.max_seq_len(),
+                100.0 * (engine.token_position() as f64) / (engine.max_seq_len() as f64)
+            );
+            println!("  turns:    {} messages", engine.history().len());
+            Ok(SlashOutcome::Continue)
+        }
+        other => {
+            println!("[unknown command: /{} — try /help]", other);
+            Ok(SlashOutcome::Continue)
+        }
+    }
+}
+
+fn save_history_jsonl(path: &Path, history: &[project_willamette::chat::ChatMessage]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)
+        .with_context(|| format!("create save file: {}", path.display()))?;
+    for msg in history {
+        let role = match msg.role {
+            project_willamette::chat::Role::System => "system",
+            project_willamette::chat::Role::User => "user",
+            project_willamette::chat::Role::Assistant => "assistant",
+        };
+        let content_escaped = msg
+            .content
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
+        writeln!(f, "{{\"role\":\"{}\",\"content\":\"{}\"}}", role, content_escaped)?;
+    }
+    f.flush()?;
     Ok(())
 }
 
