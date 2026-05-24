@@ -11,7 +11,7 @@ use crate::model::graph::ModelGraph;
 use crate::model::kv_cache::KVCache;
 use crate::model::lm_head::compute_logits_from_graph;
 use crate::model::sampler::{Sampler, SamplingParams};
-use crate::tokenizer::{PromptPart, Tokenizer};
+use crate::tokenizer::{EncodeOptions, Tokenizer};
 
 /// Who said it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,77 +136,50 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
     where
         F: FnMut(&str),
     {
-        // Stage 9-C — apply the real BitNet chat template:
+        // v0.2.1 chat template — minimal text-bridge form.
         //
-        //   {% for message in messages %}
-        //     {% if loop.first %}{{ bos_token }}{% endif %}
-        //     {% if message['role'] == 'user' %}
-        //       Human: <content>\n\nBITNETAssistant: <eos_token>
-        //     {% elif message['role'] == 'assistant' %}
-        //       <content><eos_token>
-        //     {% endif %}
-        //   {% endfor %}
+        // We deliberately do NOT inject the GGUF chat_template's
+        // `eos_token` marker between turns. Reason: empirical testing
+        // showed that BitNet b1.58 2B-4T is a *base/foundation* model,
+        // not an instruct-tuned chat model (the bitnet.cpp upstream
+        // README:245 lists which models are instruct — this one isn't,
+        // and `general.name` in the GGUF is just `"bitnet2b"`). It
+        // therefore was never trained to interpret `<|end_of_text|>`
+        // (128001) or `<|eot_id|>` (128009) as turn boundaries.
+        // Injecting either pushed the model into degenerate completions:
         //
-        // Note the unusual position of `eos_token` — directly after
-        // "BITNETAssistant: " (i.e. BEFORE the model writes its reply).
-        // The model was trained on this; we must reproduce it byte-for-byte
-        // via PromptPart::Special(eos_id) to avoid BPE-splitting the
-        // 7-byte string "<|end_of_text|>" into 7 byte-level tokens.
-        let bos = self.tokenizer.bos_id.ok_or_else(|| {
-            WillametteError::UnsupportedTokenizer(
-                "chat: bos_token_id is not set in tokenizer metadata".to_string(),
-            )
-        })?;
-        // The GGUF metadata stores `tokenizer.ggml.eos_token_id = 128001`
-        // (`<|end_of_text|>`), which is the document-level EOS used for
-        // stopping generation. The Jinja template's `eos_token` variable,
-        // however, refers to the *chat* turn boundary — in LLaMA-3 family
-        // models (and BitNet b1.58 inherits the LLaMA-3 tokenizer), the
-        // canonical turn EOS is `<|eot_id|>` (128009). Injecting 128001
-        // before the assistant turn causes the model to predict BOS and
-        // start a fresh document; 128009 keeps it in chat mode.
-        // We use 128009 if the vocab is LLaMA-3 sized (>= 128010), else
-        // fall back to the metadata-defined EOS.
-        let chat_eos: u32 = if self.tokenizer.vocab_size() >= 128010 {
-            LLAMA3_EOT_ID
-        } else {
-            self.tokenizer.eos_id.ok_or_else(|| {
-                WillametteError::UnsupportedTokenizer(
-                    "chat: eos_token_id is not set in tokenizer metadata".to_string(),
-                )
-            })?
-        };
-
-        // Materialise the text segments (lifetimes must outlive `parts`).
-        let user_segment: String;
-        let parts: Vec<PromptPart<'_>>;
-        if self.history.is_empty() {
-            // First turn — emit BOS, then "Human: ...BITNETAssistant: ",
-            // then EOS. Optional system prompt is folded into the user
-            // message because the template has no `system` role.
-            user_segment = if let Some(sys) = &self.system_prompt {
-                format!("Human: {}\n{}\n\nBITNETAssistant: ", sys, user_text)
+        //   eos=128001 → predicts BOS and starts a fresh document
+        //                ("Title: Exploring the Wonders of Life…").
+        //   eos=128009 → emits training-corpus prefix hallucinations
+        //                ("PowerShell> Hello!", "Vietnamese> Cảm ơn!",
+        //                 "French> Bonjour!") regardless of user
+        //                language or instruction.
+        //
+        // With no boundary marker, just a `\n\nHuman:/BITNETAssistant:`
+        // text bridge, the same prompt yields the cleaner
+        // "Hello! How can I assist you today?" response. This is the
+        // best the model can do; instruction-following is genuinely
+        // beyond a base model's capability and no template choice will
+        // fix that. See CHANGELOG v0.2.1-mvp for the full story.
+        let fragment = if self.history.is_empty() {
+            if let Some(sys) = &self.system_prompt {
+                format!("{}\n\nHuman: {}\n\nBITNETAssistant: ", sys, user_text)
             } else {
                 format!("Human: {}\n\nBITNETAssistant: ", user_text)
-            };
-            parts = vec![
-                PromptPart::Special(bos),
-                PromptPart::Text(&user_segment),
-                PromptPart::Special(chat_eos),
-            ];
+            }
         } else {
-            // Subsequent turn — close the previous assistant turn with
-            // EOS, then a fresh "Human: ...BITNETAssistant: " segment,
-            // then the EOS that precedes this turn's response.
-            user_segment = format!("Human: {}\n\nBITNETAssistant: ", user_text);
-            parts = vec![
-                PromptPart::Special(chat_eos),
-                PromptPart::Text(&user_segment),
-                PromptPart::Special(chat_eos),
-            ];
-        }
+            format!("\n\nHuman: {}\n\nBITNETAssistant: ", user_text)
+        };
 
-        let prompt_tokens = self.tokenizer.encode_with_specials(&parts)?;
+        let opts = if self.history.is_empty() {
+            EncodeOptions {
+                add_bos: true,
+                add_eos: false,
+            }
+        } else {
+            EncodeOptions::none()
+        };
+        let prompt_tokens = self.tokenizer.encode(&fragment, opts)?;
         if prompt_tokens.is_empty() {
             return Err(WillametteError::GgufParse(
                 "chat: user fragment encoded to zero tokens".to_string(),
