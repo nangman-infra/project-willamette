@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Stage 11 — all-in-one launcher for Project Willamette.
+#
+# What it does, in order:
+#   1. Verify `cargo` is on PATH (and Rust ≥ 1.85 implicitly via Cargo.toml).
+#   2. Ensure the model file is present at the canonical path. Offer to
+#      download it via Hugging Face CLI if missing.
+#   3. Verify model SHA256 against the pinned digest (cheap — read once).
+#   4. Build `target/release/project-willamette` if it is missing or
+#      older than any file in `src/`. Skip when `--no-build` is given.
+#   5. Launch the requested mode (default: `tui`).
+#
+# Usage:
+#   scripts/willamette                  # full TUI (default)
+#   scripts/willamette chat             # stdin/stdout chat
+#   scripts/willamette inspect          # metadata + tensor table
+#   scripts/willamette bench            # latency benchmarks
+#   scripts/willamette --rebuild ...    # force rebuild
+#   scripts/willamette --skip-verify ...# skip SHA256 check (faster cold start)
+#
+# Anything after the mode keyword is forwarded to the binary, e.g.
+#   scripts/willamette tui --temperature 0 --max-new-tokens 64
+#
+# Pinned model facts (must match memory/project_willamette.md):
+#   repo:   microsoft/bitnet-b1.58-2B-4T-gguf
+#   file:   ggml-model-i2_s.gguf
+#   sha256: 4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162
+
+set -euo pipefail
+
+# ── repo root (this script is in scripts/) ─────────────────────────────
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
+cd "${REPO_ROOT}"
+
+MODEL_DIR="models/bitnet-b1.58-2B-4T-gguf"
+MODEL_FILE="${MODEL_DIR}/ggml-model-i2_s.gguf"
+EXPECTED_SHA256="4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162"
+HF_REPO="microsoft/bitnet-b1.58-2B-4T-gguf"
+
+BINARY="target/release/project-willamette"
+
+FORCE_REBUILD=0
+SKIP_VERIFY=0
+MODE=""
+EXTRA_ARGS=()
+
+# ── parse flags ─────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --rebuild|--force-rebuild)
+            FORCE_REBUILD=1; shift ;;
+        --no-build)
+            FORCE_REBUILD=2; shift ;;   # 2 = "never build, fail if missing"
+        --skip-verify)
+            SKIP_VERIFY=1; shift ;;
+        -h|--help)
+            sed -n '2,28p' "${BASH_SOURCE[0]}"
+            exit 0 ;;
+        --)
+            shift; EXTRA_ARGS=("$@"); break ;;
+        tui|chat|inspect|bench|run|tokenize|logits)
+            MODE="$1"; shift
+            EXTRA_ARGS=("$@"); break ;;
+        *)
+            echo "willamette: unknown argument '$1' (run --help)" >&2
+            exit 2 ;;
+    esac
+done
+
+MODE="${MODE:-tui}"
+
+# ── prerequisite: cargo ─────────────────────────────────────────────────
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "willamette: 'cargo' not found on PATH" >&2
+    echo "  Install Rust from https://rustup.rs/ first." >&2
+    exit 3
+fi
+
+# ── model presence ──────────────────────────────────────────────────────
+ensure_model() {
+    if [[ -f "${MODEL_FILE}" ]]; then
+        return 0
+    fi
+    echo "willamette: model file missing at ${MODEL_FILE}"
+    if [[ ! -t 0 ]]; then
+        echo "  Non-interactive shell — cannot prompt. Download manually:" >&2
+        echo "    huggingface-cli download ${HF_REPO} ggml-model-i2_s.gguf --local-dir ${MODEL_DIR}" >&2
+        exit 4
+    fi
+    read -r -p "  Download from Hugging Face (${HF_REPO})? [Y/n] " ans
+    case "${ans:-Y}" in
+        n|N|no|No|NO)
+            echo "  Skipped. Place the file at ${MODEL_FILE} and re-run." >&2
+            exit 4 ;;
+    esac
+    if ! command -v huggingface-cli >/dev/null 2>&1; then
+        echo "  'huggingface-cli' not found. Install via:" >&2
+        echo "    pip install --user huggingface-hub" >&2
+        exit 4
+    fi
+    mkdir -p "${MODEL_DIR}"
+    echo "willamette: downloading ${HF_REPO}/ggml-model-i2_s.gguf …"
+    huggingface-cli download "${HF_REPO}" ggml-model-i2_s.gguf \
+        --local-dir "${MODEL_DIR}" --local-dir-use-symlinks False
+}
+
+verify_model_sha256() {
+    [[ ${SKIP_VERIFY} -eq 1 ]] && return 0
+    local digest
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest="$(sha256sum "${MODEL_FILE}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        digest="$(shasum -a 256 "${MODEL_FILE}" | awk '{print $1}')"
+    else
+        echo "willamette: neither sha256sum nor shasum available — skipping verify" >&2
+        return 0
+    fi
+    if [[ "${digest}" != "${EXPECTED_SHA256}" ]]; then
+        echo "willamette: model SHA256 mismatch!" >&2
+        echo "  expected: ${EXPECTED_SHA256}" >&2
+        echo "  observed: ${digest}" >&2
+        echo "  Re-download or delete the file. Refusing to run on tampered weights." >&2
+        exit 5
+    fi
+}
+
+# ── binary build state ──────────────────────────────────────────────────
+needs_build() {
+    [[ ${FORCE_REBUILD} -eq 1 ]] && return 0
+    [[ ! -x "${BINARY}" ]] && return 0
+    # Find any source file newer than the binary.
+    local newer
+    newer="$(find src Cargo.toml Cargo.lock -newer "${BINARY}" -type f 2>/dev/null | head -1)"
+    [[ -n "${newer}" ]]
+}
+
+ensure_binary() {
+    if [[ ${FORCE_REBUILD} -eq 2 ]]; then
+        if [[ ! -x "${BINARY}" ]]; then
+            echo "willamette: --no-build was given but ${BINARY} doesn't exist" >&2
+            exit 6
+        fi
+        return 0
+    fi
+    if needs_build; then
+        echo "willamette: building release binary (cargo build --release)…"
+        cargo build --release
+    fi
+}
+
+# ── go ──────────────────────────────────────────────────────────────────
+ensure_model
+verify_model_sha256
+ensure_binary
+
+# Always pass --model so the user doesn't have to type it.
+exec "${BINARY}" "${MODE}" --model "${MODEL_FILE}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}

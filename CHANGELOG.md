@@ -25,6 +25,85 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.2.0-mvp] — 2026-05-25
+
+Minor release: first-class chat experience + ~5× decode-step speedup.
+
+The inference path's numeric semantics are unchanged from v0.1.x —
+greedy decode on the Stage 5-E reference prompts still produces
+byte-identical tokens to the pinned bitnet.cpp reference. What's new
+is the *runtime surface*: a real chat engine, a full TUI, a launcher,
+and a parallelised matvec.
+
+### Added
+* `willamette chat` — stdin/stdout multi-turn dialogue subcommand with
+  KV-cache reuse across turns, UTF-8-safe streaming output, EOS auto-
+  stop, slash commands (`/help`, `/reset`, `/history`, `/save`,
+  `/sys`, `/stats`, `/quit`).
+* `willamette tui` — ratatui full-screen chat TUI over the same engine
+  (history pane, input box, status bar, PgUp/PgDn scrolling).
+* `Tokenizer::encode_with_specials(&[PromptPart])` for mid-prompt
+  token-id injection — required to render the BitNet chat template's
+  `<|end_of_text|>` boundary verbatim instead of byte-level-BPEing it
+  into 7 tokens.
+* `PromptPart::{Text, Special}` enum.
+* `src/chat/engine.rs::ChatEngine` — turn-streaming chat runner.
+* `src/chat/tui.rs::run_tui` — terminal UI driver with a worker
+  thread + mpsc channels.
+* `scripts/willamette` — all-in-one launcher: SHA256-verifies the
+  model, optionally downloads it from Hugging Face, rebuilds the
+  binary if stale, then launches the requested mode (default TUI).
+* `bitlinear_i2s_matvec_f32_neon_i8` — int8-activation NEON kernel
+  (Stage 10-D). Code present but **not the default**: see "Changed"
+  for why.
+
+### Changed
+* **BitLinear matvec is now multi-threaded** via `rayon::par_chunks_mut`
+  with chunks of 32 output rows, each chunk owning a thread-local i8
+  scratch buffer (Stage 10-C + 10-B). On Apple M1 the decode-step
+  improves from `~656 ms / ~1.5 tok/s` (v0.1.1) to
+  `~126 ms / ~7.9 tok/s` (v0.2.0) — a 5.2× speedup. The matvec itself
+  drops from 1.87 ms to 0.64 ms (2.94×). ISA-neutral: the rayon
+  parallelism also helps the scalar fallback on multi-core x86 hosts
+  once the SSE2 kernel lands.
+* Norm weights (`attn_norm`, `attn_sub_norm`, `ffn_norm`,
+  `ffn_sub_norm` per layer, plus `output_norm`) are now pre-decoded
+  into `Vec<f32>` at `ModelGraph::from_gguf` time (Stage 10-A). The
+  forward path reads them directly — 121 fewer per-token
+  allocations.
+* `ChatEngine::send_user_message` always forwards the just-emitted
+  token into the KV cache (unlike one-shot `generate_with_cache_and_sampler`,
+  which skipped the final step). Continuity across turns now matches
+  the canonical training-time pattern.
+* Stage 10-D int8-activation path investigated and benched. On stable
+  Rust the `vdotq_s32` SDOT intrinsic is gated behind the unstable
+  `stdarch_neon_dotprod` feature, so the kernel falls back to
+  `vmull_s8`-based widening dot. Measured at 7.82 tok/s vs the f32-
+  input NEON path's 7.91 tok/s on Apple M1 (20-sample average) — a
+  small regression, not a win. The int8 kernel is therefore present
+  but gated behind
+  `RUSTFLAGS="--cfg willamette_i8_activations"`. Default stays on the
+  f32-input NEON path. We'll switch over when `stdarch_neon_dotprod`
+  stabilises.
+
+### Dependencies
+* `rayon = "1.10"` — for Stage 10-C row parallelism.
+* `ratatui = "0.29"` and `crossterm = "0.28"` — for Stage 9-E TUI.
+
+### Tests
+* `encode_with_specials` parity (text-only path equals plain
+  `encode`), special-id injection, out-of-range rejection, BOS-via-
+  `Special` prefix.
+* All 189 v0.1.1 tests still pass; total at v0.2.0 is 193 (4 new).
+
+### Performance (Apple M1, NEON, release profile, 20-run avg)
+
+| Metric | v0.1.1 | v0.2.0 | Change |
+| ------ | -----: | -----: | -----: |
+| BitLinear matvec (attn_q, 2560×2560) | 1.87 ms | 0.64 ms | **2.94× faster** |
+| Decode-step with KV cache | 656 ms | 126 ms | **5.19× faster** |
+| Tokens / second (decode) | 1.52 | 7.91 | **5.19×** |
+
 ## [v0.1.1-mvp] — 2026-05-24
 
 Patch release: bug fix in generation + SonarQube validation lane.
