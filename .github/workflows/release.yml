@@ -1,0 +1,199 @@
+name: Release
+
+# Triggered when a tag matching the SemVer-with-mvp pattern is pushed.
+# Builds a static-linked binary for each supported target, uploads
+# them as a GitHub Release alongside SHA-256 sums.
+#
+# Why static-musl on Linux: project-willamette's thesis includes
+# "humble hardware" — antiX on Pentium-M (Debian 12, glibc 2.36), a
+# RaspberryPi 3 on Raspberry Pi OS (glibc 2.31), or a modern Ubuntu
+# 24.04 (glibc 2.39). One musl-static binary boots on all three with
+# no LD_LIBRARY_PATH dance.
+
+on:
+  push:
+    tags:
+      - 'v*-mvp'
+
+permissions:
+  contents: write   # required for gh release create + upload
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 — most modern desktops, dev servers, CI runners.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            zigbuild: true
+
+          # Linux i686 — antiX / Pentium-M class. The Stage 6-B target.
+          # Same musl binary, half the address space.
+          - target: i686-unknown-linux-musl
+            os: ubuntu-latest
+            zigbuild: true
+
+          # Linux aarch64 — Raspberry Pi 4 (64-bit OS), AWS Graviton,
+          # ARM-based VPS.
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            zigbuild: true
+
+          # Linux armv7 — Raspberry Pi 3, BeagleBone, older Pi Zero 2.
+          # 32-bit ARM with hardware float.
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            zigbuild: true
+
+          # macOS Apple Silicon — M1+. Native build on the runner.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            zigbuild: false
+
+          # macOS Intel — older MacBooks. Cross-compile on the M-class runner.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            zigbuild: false
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        # `rust-toolchain.toml` pins channel = "1.94.0"; just adding the
+        # extra target is enough — rustup auto-installs the toolchain
+        # when cargo first runs.
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install Zig (for cargo-zigbuild)
+        if: matrix.zigbuild
+        # Zig provides the cross C-compiler + musl libc needed for
+        # Linux cross-builds without juggling ten apt packages per
+        # target.
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build (release)
+        run: |
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Strip binary (best-effort)
+        # Strip removes debug symbols — already mostly handled by
+        # `[profile.release].strip = true` in Cargo.toml, but the
+        # explicit `strip` call also drops the symbol table on
+        # toolchains that don't honour the manifest flag.
+        run: |
+          BIN="target/${{ matrix.target }}/release/project-willamette"
+          if [ -f "$BIN" ]; then
+            case "${{ matrix.target }}" in
+              *-apple-darwin) strip -x "$BIN" || true ;;
+              *)              strip    "$BIN" || true ;;
+            esac
+          fi
+
+      - name: Package tarball + sha256
+        id: package
+        # Rename the binary from `project-willamette` → `willamette`
+        # inside the archive so the user types `./willamette` not
+        # `./project-willamette`. The crate name stays unchanged.
+        run: |
+          set -euo pipefail
+          NAME="willamette-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp "target/${{ matrix.target }}/release/project-willamette" "dist/$NAME/willamette"
+          # Include README + license + changelog so the distribution
+          # is self-contained.
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$NAME/" 2>/dev/null || true
+          cd dist
+          tar -czf "${NAME}.tar.gz" "$NAME"
+          shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          ls -la
+          echo "archive=${NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (for the release job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          # No `name:` — pulls every artifact uploaded by the build matrix.
+          merge-multiple: true
+
+      - name: Extract this tag's CHANGELOG section
+        id: notes
+        # Pull the `## [vX.Y.Z-mvp] — DATE` block out of CHANGELOG.md
+        # so the GitHub Release notes are exactly that version's
+        # entries (not the whole file).
+        run: |
+          TAG="${{ github.ref_name }}"
+          awk -v tag="$TAG" '
+            $0 ~ "^## \\[" tag "\\]" { p = 1; print; next }
+            p && /^## \[/             { exit }
+            p                          { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG entry found for $TAG — falling back to tag message" >&2
+            echo "Release $TAG" > release-notes.md
+          fi
+          echo "----- release notes -----"
+          cat release-notes.md
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls dist
+          TAG="${{ github.ref_name }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading artifacts (--clobber)."
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              dist/*.tar.gz dist/*.sha256
+          fi
