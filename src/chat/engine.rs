@@ -7,7 +7,6 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::error::WillametteError;
 use crate::model::cached_forward::{forward_with_cache, forward_with_cache_progress};
@@ -502,14 +501,10 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         let mut pending_bytes: Vec<u8> = Vec::new();
         let mut emitted_up_to: usize = 0;
         let mut tick_flushed_up_to: usize = 0;
-        let turn_start = Instant::now();
 
         for _step in 0..max_new_tokens {
-            // Cancellation check — set by UI on Esc.
-            if let Some(p) = &self.progress {
-                if p.cancel_requested.load(Ordering::Relaxed) {
-                    break;
-                }
+            if self.cancel_requested() {
+                break;
             }
 
             let logits = compute_logits_from_graph(&last_hidden, self.graph)?;
@@ -525,13 +520,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 &mut emitted_up_to,
                 &mut response_text,
             );
-
-            // Live tok/s accounting.
-            if let Some(p) = &self.progress {
-                let emitted = p.tokens_emitted.fetch_add(1, Ordering::Relaxed) + 1;
-                let _ = emitted;
-                let _ = turn_start; // turn_start_nanos already set by begin_turn
-            }
+            self.note_token_emitted();
 
             // Stop-sequence check on the WHOLE accumulated response,
             // not just the not-yet-tick'd tail. If the model has
@@ -539,34 +528,56 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             // (already-tick'd) bytes and the still-buffered tail are
             // truncated; nothing further reaches the caller.
             if truncate_at_chat_stop_sequence(&mut response_text) {
-                // The bytes we already emitted to `tick` are unrecoverable,
-                // but anything past `tick_flushed_up_to` is still ours to
-                // discard. Just stop — history is now clean.
                 break;
             }
 
-            // Tick everything that's safely past the look-ahead window.
-            let safe_end = response_text
-                .len()
-                .saturating_sub(CHAT_STOP_LOOKAHEAD_BYTES);
-            let safe_end = floor_char_boundary(&response_text, safe_end);
-            if safe_end > tick_flushed_up_to {
-                let chunk = &response_text[tick_flushed_up_to..safe_end];
-                tick(chunk);
-                tick_flushed_up_to = safe_end;
-            }
+            flush_safe_window(&response_text, &mut tick_flushed_up_to, tick);
 
             self.sampler.observe(next);
             last_hidden = self.forward_with_optional_progress(next, self.next_pos)?;
             self.next_pos += 1;
-
-            // Update KV cache size estimate for the dashboard.
-            if let Some(p) = &self.progress {
-                p.kv_cache_bytes
-                    .store(self.estimate_kv_cache_bytes(), Ordering::Relaxed);
-            }
+            self.update_kv_cache_estimate();
         }
 
+        self.finalize_stream(
+            &mut response_text,
+            &pending_bytes,
+            emitted_up_to,
+            tick_flushed_up_to,
+            tick,
+        );
+        Ok(response_text)
+    }
+
+    fn cancel_requested(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(|p| p.cancel_requested.load(Ordering::Relaxed))
+    }
+
+    fn note_token_emitted(&self) {
+        if let Some(p) = &self.progress {
+            p.tokens_emitted.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn update_kv_cache_estimate(&self) {
+        if let Some(p) = &self.progress {
+            p.kv_cache_bytes
+                .store(self.estimate_kv_cache_bytes(), Ordering::Relaxed);
+        }
+    }
+
+    fn finalize_stream<F>(
+        &self,
+        response_text: &mut String,
+        pending_bytes: &[u8],
+        emitted_up_to: usize,
+        tick_flushed_up_to: usize,
+        tick: &mut F,
+    ) where
+        F: FnMut(&str),
+    {
         // End-of-generation: no more tokens are coming, so the
         // look-ahead buffer can't possibly grow into a stop sequence.
         // Flush whatever's left.
@@ -580,7 +591,6 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             tick("\u{FFFD}");
             response_text.push('\u{FFFD}');
         }
-        Ok(response_text)
     }
 
     /// Append the bytes of one decoded token to `pending_bytes`, then
@@ -613,6 +623,22 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         // show or remember the visual clutter.
         response_text.push_str(&strip_emoji_chars(chunk));
         *emitted_up_to = valid_end;
+    }
+}
+
+/// Tick the bytes of `response_text` that are safely past the
+/// stop-sequence look-ahead window. Updates `flushed_up_to` on success.
+fn flush_safe_window<F>(response_text: &str, flushed_up_to: &mut usize, tick: &mut F)
+where
+    F: FnMut(&str),
+{
+    let safe_end = response_text
+        .len()
+        .saturating_sub(CHAT_STOP_LOOKAHEAD_BYTES);
+    let safe_end = floor_char_boundary(response_text, safe_end);
+    if safe_end > *flushed_up_to {
+        tick(&response_text[*flushed_up_to..safe_end]);
+        *flushed_up_to = safe_end;
     }
 }
 

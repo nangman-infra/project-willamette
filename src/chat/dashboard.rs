@@ -81,23 +81,31 @@ impl DashboardState {
     /// Build the multi-line styled output for the right pane.
     pub fn render_lines(&self, sys: &SysSnapshot, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
+        self.render_hardware(&mut lines, sys, width);
+        self.render_cpu(&mut lines, sys, width);
+        self.render_memory(&mut lines, sys, width);
+        self.render_inference(&mut lines);
+        self.render_sampling(&mut lines, width);
+        self.render_model(&mut lines);
+        lines
+    }
 
-        // Section: HARDWARE
-        push_section_header(&mut lines, "HARDWARE");
+    fn render_hardware(&self, lines: &mut Vec<Line<'static>>, sys: &SysSnapshot, width: u16) {
+        push_section_header(lines, "HARDWARE");
         push_kv(
-            &mut lines,
+            lines,
             "cpu",
             truncate(&sys.cpu_brand, width.saturating_sub(7) as usize),
         );
         push_kv(
-            &mut lines,
+            lines,
             "arch",
             format!(
                 "{} · {} cores ({} phys)",
                 sys.arch, sys.logical_cores, sys.physical_cores
             ),
         );
-        push_kv(&mut lines, "kernel", self.active_kernel.clone());
+        push_kv(lines, "kernel", self.active_kernel.clone());
         for (name, active) in &self.kernel_features {
             let dot = if *active {
                 Span::styled("●", Style::default().fg(Color::Green))
@@ -111,9 +119,10 @@ impl DashboardState {
             ]));
         }
         lines.push(Line::from(""));
+    }
 
-        // Section: CPU live
-        push_section_header(&mut lines, "CPU");
+    fn render_cpu(&self, lines: &mut Vec<Line<'static>>, sys: &SysSnapshot, width: u16) {
+        push_section_header(lines, "CPU");
         lines.push(gauge_line(
             "overall",
             sys.overall_pct as f64,
@@ -126,11 +135,8 @@ impl DashboardState {
             100.0,
             width.saturating_sub(2),
         ));
-        // Per-core mini-gauges (compact).
         for (i, pct) in sys.per_core_pct.iter().enumerate() {
-            // Only show first 12 cores explicitly; collapse the rest.
             if i >= 12 {
-                let remaining = sys.per_core_pct.len() - i;
                 let max_rest = sys.per_core_pct[i..]
                     .iter()
                     .cloned()
@@ -141,24 +147,26 @@ impl DashboardState {
                     sys.per_core_pct.len() - 1,
                     max_rest
                 )));
-                let _ = remaining;
                 break;
             }
             lines.push(per_core_line(i, *pct as f64, width.saturating_sub(2)));
         }
         lines.push(Line::from(""));
+    }
 
-        // Section: MEMORY
-        push_section_header(&mut lines, "MEMORY");
-        push_kv(&mut lines, "KV", human_bytes(self.kv_cache_bytes));
-        push_kv(&mut lines, "RSS", human_bytes(sys.process_rss_bytes));
+    fn render_memory(&self, lines: &mut Vec<Line<'static>>, sys: &SysSnapshot, width: u16) {
+        push_section_header(lines, "MEMORY");
+        push_kv(lines, "KV", human_bytes(self.kv_cache_bytes));
+        push_kv(lines, "RSS", human_bytes(sys.process_rss_bytes));
         if sys.total_mem_bytes > 0 {
-            let used = sys.used_mem_bytes;
-            let total = sys.total_mem_bytes;
             push_kv(
-                &mut lines,
+                lines,
                 "sys",
-                format!("{} / {}", human_bytes(used), human_bytes(total)),
+                format!(
+                    "{} / {}",
+                    human_bytes(sys.used_mem_bytes),
+                    human_bytes(sys.total_mem_bytes)
+                ),
             );
         }
         let ctx_pct = if self.max_seq_len > 0 {
@@ -168,63 +176,53 @@ impl DashboardState {
         };
         lines.push(gauge_line("ctx", ctx_pct, 100.0, width.saturating_sub(2)));
         lines.push(Line::from(""));
+    }
 
-        // Section: INFERENCE live
-        push_section_header(&mut lines, "INFERENCE");
-        if self.generating {
-            if let Some(layer) = self.current_layer {
-                push_kv(
-                    &mut lines,
-                    "layer",
-                    format!("{:>2} / {}", layer + 1, self.n_layers),
-                );
-            } else {
-                push_kv(&mut lines, "layer", "(starting…)".to_string());
-            }
-            push_kv(&mut lines, "tok/s", format!("{:.2}", self.turn_tok_per_sec));
-            push_kv(
-                &mut lines,
-                "tokens",
-                format!("{} / {}", self.turn_tokens_emitted, self.turn_tokens_cap),
-            );
-            push_kv(
-                &mut lines,
-                "elapsed",
-                format!("{:.1} s", self.turn_elapsed_secs),
-            );
-            // ETA from rolling tok/s + remaining tokens
-            let remaining = self
-                .turn_tokens_cap
-                .saturating_sub(self.turn_tokens_emitted);
-            if self.turn_tok_per_sec > 0.0 && remaining > 0 {
-                let eta = remaining as f64 / self.turn_tok_per_sec;
-                push_kv(&mut lines, "eta", format!("~{:.0} s", eta));
-            }
-            lines.push(Line::from(Span::styled(
-                "  (Esc to cancel)",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
+    fn render_inference(&self, lines: &mut Vec<Line<'static>>) {
+        push_section_header(lines, "INFERENCE");
+        if !self.generating {
             lines.push(Line::from(Span::styled(
                 "  (idle)",
                 Style::default().fg(Color::DarkGray),
             )));
+            lines.push(Line::from(""));
+            return;
         }
-        lines.push(Line::from(""));
-
-        // Section: SAMPLING
-        push_section_header(&mut lines, "SAMPLING");
-        push_kv(&mut lines, "temp", format!("{:.2}", self.temperature));
-        push_kv(&mut lines, "top-k", self.top_k.to_string());
-        push_kv(&mut lines, "top-p", format!("{:.2}", self.top_p));
+        let layer_text = self
+            .current_layer
+            .map(|l| format!("{:>2} / {}", l + 1, self.n_layers))
+            .unwrap_or_else(|| "(starting…)".to_string());
+        push_kv(lines, "layer", layer_text);
+        push_kv(lines, "tok/s", format!("{:.2}", self.turn_tok_per_sec));
         push_kv(
-            &mut lines,
-            "rep-pen",
-            format!("{:.2}", self.repetition_penalty),
+            lines,
+            "tokens",
+            format!("{} / {}", self.turn_tokens_emitted, self.turn_tokens_cap),
         );
-        push_kv(&mut lines, "seed", format!("0x{:x}", self.seed));
+        push_kv(lines, "elapsed", format!("{:.1} s", self.turn_elapsed_secs));
+        let remaining = self
+            .turn_tokens_cap
+            .saturating_sub(self.turn_tokens_emitted);
+        if self.turn_tok_per_sec > 0.0 && remaining > 0 {
+            let eta = remaining as f64 / self.turn_tok_per_sec;
+            push_kv(lines, "eta", format!("~{:.0} s", eta));
+        }
+        lines.push(Line::from(Span::styled(
+            "  (Esc to cancel)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    fn render_sampling(&self, lines: &mut Vec<Line<'static>>, width: u16) {
+        push_section_header(lines, "SAMPLING");
+        push_kv(lines, "temp", format!("{:.2}", self.temperature));
+        push_kv(lines, "top-k", self.top_k.to_string());
+        push_kv(lines, "top-p", format!("{:.2}", self.top_p));
+        push_kv(lines, "rep-pen", format!("{:.2}", self.repetition_penalty));
+        push_kv(lines, "seed", format!("0x{:x}", self.seed));
         push_kv(
-            &mut lines,
+            lines,
             "sys",
             self.system_prompt
                 .as_deref()
@@ -232,21 +230,20 @@ impl DashboardState {
                 .unwrap_or_else(|| "(none)".to_string()),
         );
         lines.push(Line::from(""));
+    }
 
-        // Section: MODEL
-        push_section_header(&mut lines, "MODEL");
-        push_kv(&mut lines, "arch", self.architecture.clone());
-        push_kv(&mut lines, "layers", self.n_layers.to_string());
-        push_kv(&mut lines, "embd", self.n_embd.to_string());
+    fn render_model(&self, lines: &mut Vec<Line<'static>>) {
+        push_section_header(lines, "MODEL");
+        push_kv(lines, "arch", self.architecture.clone());
+        push_kv(lines, "layers", self.n_layers.to_string());
+        push_kv(lines, "embd", self.n_embd.to_string());
         push_kv(
-            &mut lines,
+            lines,
             "vocab",
             format_compact_thousands(self.vocab_size as u64),
         );
-        push_kv(&mut lines, "quant", self.quant_label.clone());
-        push_kv(&mut lines, "file", human_bytes(self.model_file_bytes));
-
-        lines
+        push_kv(lines, "quant", self.quant_label.clone());
+        push_kv(lines, "file", human_bytes(self.model_file_bytes));
     }
 }
 

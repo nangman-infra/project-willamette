@@ -592,66 +592,17 @@ fn handle_search_key(ui: &mut UiState, key: KeyEvent) -> Result<bool> {
 }
 
 fn handle_key_normal(ui: &mut UiState, key: KeyEvent, cmd_tx: &Sender<UserCmd>) -> Result<bool> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-    // Quit / cancel paths first.
     if key.code == KeyCode::Esc {
         // Esc while idle: quit (matches stdio chat convention).
         return Ok(true);
     }
 
-    // Ctrl + letter combos.
-    if ctrl {
-        match key.code {
-            KeyCode::Char('w') => {
-                ui.input.delete_word_back();
-                return Ok(false);
-            }
-            KeyCode::Char('u') => {
-                ui.input.delete_to_start();
-                return Ok(false);
-            }
-            KeyCode::Char('k') => {
-                ui.input.delete_to_end();
-                return Ok(false);
-            }
-            KeyCode::Char('a') => {
-                ui.input.move_home();
-                return Ok(false);
-            }
-            KeyCode::Char('e') => {
-                ui.input.move_end();
-                return Ok(false);
-            }
-            KeyCode::Char('r') => {
-                ui.input.begin_search();
-                return Ok(false);
-            }
-            KeyCode::Char('l') => {
-                // Clear chat_log (not history).
-                ui.chat_log.clear();
-                return Ok(false);
-            }
-            KeyCode::Char('y') => {
-                yank_last_bot_response(ui);
-                return Ok(false);
-            }
-            KeyCode::Home => {
-                ui.scroll_back = u16::MAX;
-                return Ok(false);
-            }
-            KeyCode::End => {
-                ui.scroll_back = 0;
-                return Ok(false);
-            }
-            _ => {}
-        }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && handle_ctrl_key(ui, key.code) {
+        return Ok(false);
     }
 
     match key.code {
-        KeyCode::F(1) => {
-            ui.overlay = Some(Overlay::Help);
-        }
+        KeyCode::F(1) => ui.overlay = Some(Overlay::Help),
         KeyCode::Left => ui.input.move_left(),
         KeyCode::Right => ui.input.move_right(),
         KeyCode::Home => ui.input.move_home(),
@@ -662,36 +613,54 @@ fn handle_key_normal(ui: &mut UiState, key: KeyEvent, cmd_tx: &Sender<UserCmd>) 
         KeyCode::Down => ui.input.history_next(),
         KeyCode::PageUp => ui.scroll_back = ui.scroll_back.saturating_add(10),
         KeyCode::PageDown => ui.scroll_back = ui.scroll_back.saturating_sub(10),
-        KeyCode::Tab => {
-            try_tab_complete_slash(ui);
-        }
-        KeyCode::Enter => {
-            let line = ui.input.submit();
-            persist_history_append(ui, &line);
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return Ok(false);
-            }
-            if let Some(rest) = trimmed.strip_prefix('/') {
-                return handle_slash(ui, rest, cmd_tx);
-            }
-            // Real user message.
-            ui.chat_log.push(DisplayMsg {
-                role: Role::User,
-                content: trimmed.to_string(),
-            });
-            ui.streaming.clear();
-            ui.generating = true;
-            ui.turn_start = Some(Instant::now());
-            ui.status = "generating…".to_string();
-            ui.scroll_back = 0;
-            cmd_tx
-                .send(UserCmd::Send(trimmed.to_string()))
-                .map_err(|e| anyhow::anyhow!("send: {}", e))?;
-        }
+        KeyCode::Tab => try_tab_complete_slash(ui),
+        KeyCode::Enter => return handle_enter(ui, cmd_tx),
         KeyCode::Char(c) => ui.input.insert_char(c),
         _ => {}
     }
+    Ok(false)
+}
+
+/// Returns true if the Ctrl-key combo was consumed.
+fn handle_ctrl_key(ui: &mut UiState, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char('w') => ui.input.delete_word_back(),
+        KeyCode::Char('u') => ui.input.delete_to_start(),
+        KeyCode::Char('k') => ui.input.delete_to_end(),
+        KeyCode::Char('a') => ui.input.move_home(),
+        KeyCode::Char('e') => ui.input.move_end(),
+        KeyCode::Char('r') => ui.input.begin_search(),
+        KeyCode::Char('l') => ui.chat_log.clear(),
+        KeyCode::Char('y') => yank_last_bot_response(ui),
+        KeyCode::Home => ui.scroll_back = u16::MAX,
+        KeyCode::End => ui.scroll_back = 0,
+        _ => return false,
+    }
+    true
+}
+
+fn handle_enter(ui: &mut UiState, cmd_tx: &Sender<UserCmd>) -> Result<bool> {
+    let line = ui.input.submit();
+    persist_history_append(ui, &line);
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+    if let Some(rest) = trimmed.strip_prefix('/') {
+        return handle_slash(ui, rest, cmd_tx);
+    }
+    ui.chat_log.push(DisplayMsg {
+        role: Role::User,
+        content: trimmed.to_string(),
+    });
+    ui.streaming.clear();
+    ui.generating = true;
+    ui.turn_start = Some(Instant::now());
+    ui.status = "generating…".to_string();
+    ui.scroll_back = 0;
+    cmd_tx
+        .send(UserCmd::Send(trimmed.to_string()))
+        .map_err(|e| anyhow::anyhow!("send: {}", e))?;
     Ok(false)
 }
 
