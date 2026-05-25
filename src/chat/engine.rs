@@ -75,6 +75,55 @@ const CHAT_STOP_SEQUENCES: &[&str] = &[
     "AI (",
 ];
 
+/// Byte length of the longest entry in [`CHAT_STOP_SEQUENCES`].
+/// Used as the size of the look-ahead buffer in
+/// [`ChatEngine::stream_assistant_response`] so a stop sequence is
+/// detected and truncated *before* its bytes ever reach the caller's
+/// `tick` callback. We round up from 16 ("BITNETAssistant:".len()) to
+/// 24 to give a safety margin for any future-added longer sequence.
+pub(crate) const CHAT_STOP_LOOKAHEAD_BYTES: usize = 24;
+
+/// Predicate for emoji / pictograph Unicode codepoints.
+///
+/// Strips most pictographs without touching CJK letters, math
+/// symbols, currency, etc. Ranges covered (some intentionally
+/// over-cover related symbol blocks):
+///
+/// * `U+1F300..U+1F9FF` — Misc Symbols and Pictographs, Emoticons,
+///   Transport & Map, Geometric Shapes Extended, Supplemental
+///   Symbols, Pictographs Extended-A. Includes skin-tone modifiers.
+/// * `U+1FA00..U+1FAFF` — Symbols and Pictographs Extended-A/B.
+/// * `U+1F1E6..U+1F1FF` — Regional Indicator Symbols (flag halves).
+/// * `U+2600..U+27BF` — Misc Symbols + Dingbats (✨, ✅, ⚡, …).
+/// * `U+200D` — Zero-width joiner (binds compound emoji).
+/// * `U+FE00..U+FE0F` — Variation selectors (text vs emoji form).
+pub(crate) fn is_emoji_char(c: char) -> bool {
+    let cp = c as u32;
+    matches!(
+        cp,
+        // Misc Symbols & Pictographs through Supplemental Symbols
+        // — covers Emoticons U+1F600.. AND skin tones U+1F3FB..U+1F3FF
+        // which sit inside this range.
+        0x1F300..=0x1F9FF
+            // Symbols and Pictographs Extended-A/B
+            | 0x1FA00..=0x1FAFF
+            // Regional Indicator Symbols (flag halves)
+            | 0x1F1E6..=0x1F1FF
+            // Misc Symbols + Dingbats (✨ ✅ ⚡ etc.)
+            | 0x2600..=0x27BF
+            // Zero-width joiner
+            | 0x200D
+            // Variation selectors (text-vs-emoji presentation flips)
+            | 0xFE00..=0xFE0F
+    )
+}
+
+/// Return a copy of `text` with every emoji/pictograph character
+/// removed. Leaves CJK, Latin, control characters untouched.
+pub(crate) fn strip_emoji_chars(text: &str) -> String {
+    text.chars().filter(|c| !is_emoji_char(*c)).collect()
+}
+
 /// Find the earliest start-of-stop-sequence in `text`, or `None`.
 ///
 /// Pure function — exposed at module scope so unit tests can exercise
@@ -295,10 +344,22 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         Ok(last_hidden)
     }
 
-    /// Greedy / sampled token loop with UTF-8-safe streaming and EOS
-    /// stop. Always forwards the just-emitted non-EOS token into the
-    /// cache so the next turn sees the full response (unlike one-shot
-    /// generation which can skip the last forward).
+    /// Greedy / sampled token loop with three guarantees:
+    ///
+    /// 1. **UTF-8 safety** — multi-byte codepoints split across BPE
+    ///    tokens stay buffered until complete.
+    /// 2. **No emoji clutter** — pictograph Unicode codepoints are
+    ///    filtered out of both the live stream and the recorded
+    ///    history. The model still emits the underlying tokens (so
+    ///    the KV cache stays in sync with what the model thinks it
+    ///    said) but the *visible* output is text-only.
+    /// 3. **No turn-boundary leak** — every emit is delayed by
+    ///    [`CHAT_STOP_LOOKAHEAD_BYTES`] so we can scan for a
+    ///    hallucinated `User:` / `BITNETAssistant:` / etc. *before*
+    ///    those bytes reach the caller's `tick` callback. When a
+    ///    stop sequence is detected we truncate the response and
+    ///    discard the still-buffered tail — neither the screen nor
+    ///    the history shows the leak.
     fn stream_assistant_response<F>(
         &mut self,
         mut last_hidden: Vec<f32>,
@@ -311,6 +372,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         let mut response_text = String::new();
         let mut pending_bytes: Vec<u8> = Vec::new();
         let mut emitted_up_to: usize = 0;
+        let mut tick_flushed_up_to: usize = 0;
 
         for _step in 0..max_new_tokens {
             let logits = compute_logits_from_graph(&last_hidden, self.graph)?;
@@ -320,20 +382,34 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 break;
             }
 
-            self.emit_token_bytes(
+            self.append_token_bytes(
                 next,
                 &mut pending_bytes,
                 &mut emitted_up_to,
                 &mut response_text,
-                tick,
             );
 
-            // Detect the base model fabricating a follow-up turn boundary
-            // (`User:`, `BITNETAssistant:`, etc.). Truncate the response
-            // so the recorded history stays clean, even though the
-            // boundary string itself has already streamed to `tick`.
+            // Stop-sequence check on the WHOLE accumulated response,
+            // not just the not-yet-tick'd tail. If the model has
+            // started fabricating a turn boundary, both the visible
+            // (already-tick'd) bytes and the still-buffered tail are
+            // truncated; nothing further reaches the caller.
             if truncate_at_chat_stop_sequence(&mut response_text) {
+                // The bytes we already emitted to `tick` are unrecoverable,
+                // but anything past `tick_flushed_up_to` is still ours to
+                // discard. Just stop — history is now clean.
                 break;
+            }
+
+            // Tick everything that's safely past the look-ahead window.
+            let safe_end = response_text
+                .len()
+                .saturating_sub(CHAT_STOP_LOOKAHEAD_BYTES);
+            let safe_end = floor_char_boundary(&response_text, safe_end);
+            if safe_end > tick_flushed_up_to {
+                let chunk = &response_text[tick_flushed_up_to..safe_end];
+                tick(chunk);
+                tick_flushed_up_to = safe_end;
             }
 
             self.sampler.observe(next);
@@ -341,8 +417,15 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             self.next_pos += 1;
         }
 
-        // Flush any trailing incomplete UTF-8 suffix as U+FFFD so the
-        // caller can see something was there.
+        // End-of-generation: no more tokens are coming, so the
+        // look-ahead buffer can't possibly grow into a stop sequence.
+        // Flush whatever's left.
+        if tick_flushed_up_to < response_text.len() {
+            tick(&response_text[tick_flushed_up_to..]);
+        }
+        // Trailing incomplete UTF-8 suffix (Korean / emoji / CJK split
+        // mid-codepoint) shows as U+FFFD so the user knows something
+        // was cut off.
         if emitted_up_to < pending_bytes.len() {
             tick("\u{FFFD}");
             response_text.push('\u{FFFD}');
@@ -351,16 +434,15 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
     }
 
     /// Append the bytes of one decoded token to `pending_bytes`, then
-    /// emit the largest valid-UTF-8 prefix that hasn't already been
-    /// emitted. Multi-byte codepoints split across BPE tokens stay
-    /// buffered until completed.
-    fn emit_token_bytes<F: FnMut(&str)>(
+    /// append the emoji-stripped valid-UTF-8 prefix into
+    /// `response_text`. Does NOT call `tick`; the caller does that
+    /// after the look-ahead window slides forward.
+    fn append_token_bytes(
         &self,
         next: u32,
         pending_bytes: &mut Vec<u8>,
         emitted_up_to: &mut usize,
         response_text: &mut String,
-        tick: &mut F,
     ) {
         let Ok(more) = self.tokenizer.decode_to_bytes(&[next]) else {
             return;
@@ -376,15 +458,33 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         // SAFETY: bytes[..valid_end] is valid UTF-8 by `Utf8Error::valid_up_to`.
         let chunk =
             unsafe { std::str::from_utf8_unchecked(&pending_bytes[*emitted_up_to..valid_end]) };
-        tick(chunk);
-        response_text.push_str(chunk);
+        // Filter emoji codepoints. The model still emitted the
+        // underlying tokens (cache stays in sync); we just don't
+        // show or remember the visual clutter.
+        response_text.push_str(&strip_emoji_chars(chunk));
         *emitted_up_to = valid_end;
     }
 }
 
+/// Snap `idx` down to the nearest UTF-8 character boundary in `s`.
+/// Equivalent to the unstable `str::floor_char_boundary` — provided
+/// inline so we don't need nightly.
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 #[cfg(test)]
 mod stop_sequence_tests {
-    use super::{find_chat_stop_sequence, truncate_at_chat_stop_sequence};
+    use super::{
+        find_chat_stop_sequence, floor_char_boundary, is_emoji_char, strip_emoji_chars,
+        truncate_at_chat_stop_sequence,
+    };
 
     #[test]
     fn no_stop_in_clean_text() {
@@ -503,6 +603,84 @@ mod stop_sequence_tests {
         // or ' (' immediately after, so 'Humans' is safe.
         assert_eq!(find_chat_stop_sequence("Humans need food"), None);
         assert_eq!(find_chat_stop_sequence("Users of the system"), None);
+    }
+
+    // ── emoji filter tests ──
+
+    #[test]
+    fn is_emoji_char_basic_pictographs() {
+        // 😊 U+1F60A (Emoticons block)
+        assert!(is_emoji_char('\u{1F60A}'));
+        // 👍 U+1F44D
+        assert!(is_emoji_char('\u{1F44D}'));
+        // 🤖 U+1F916
+        assert!(is_emoji_char('\u{1F916}'));
+        // ✨ U+2728 (Dingbats)
+        assert!(is_emoji_char('\u{2728}'));
+        // 🏻 U+1F3FB (skin tone modifier)
+        assert!(is_emoji_char('\u{1F3FB}'));
+        // 🇰 U+1F1F0 (regional indicator)
+        assert!(is_emoji_char('\u{1F1F0}'));
+    }
+
+    #[test]
+    fn is_emoji_char_leaves_text_alone() {
+        // ASCII
+        assert!(!is_emoji_char('a'));
+        assert!(!is_emoji_char('!'));
+        // CJK
+        assert!(!is_emoji_char('한'));
+        assert!(!is_emoji_char('国'));
+        assert!(!is_emoji_char('日'));
+        // Math/currency
+        assert!(!is_emoji_char('∑'));
+        assert!(!is_emoji_char('€'));
+    }
+
+    #[test]
+    fn strip_emoji_removes_trailing_clutter() {
+        let raw = "Hello! How can I assist you today? 😊👍🏻💬📚✨";
+        assert_eq!(
+            strip_emoji_chars(raw),
+            "Hello! How can I assist you today? "
+        );
+    }
+
+    #[test]
+    fn strip_emoji_preserves_korean() {
+        let raw = "안녕하세요 👋 친구!";
+        assert_eq!(strip_emoji_chars(raw), "안녕하세요  친구!");
+    }
+
+    #[test]
+    fn strip_emoji_handles_zwj_sequences() {
+        // 👨‍💻 = U+1F468 + U+200D + U+1F4BB ("man technologist")
+        let raw = "Hi 👨\u{200D}💻 there";
+        assert_eq!(strip_emoji_chars(raw), "Hi  there");
+    }
+
+    // ── floor_char_boundary tests ──
+
+    #[test]
+    fn floor_char_boundary_on_ascii_is_identity() {
+        let s = "hello";
+        assert_eq!(floor_char_boundary(s, 3), 3);
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn floor_char_boundary_snaps_back_inside_codepoint() {
+        // "한" = U+D55C = 0xED 0x95 0x9C (3 bytes)
+        let s = "한국";
+        // Byte 1 is inside the first '한' codepoint — must snap to 0.
+        assert_eq!(floor_char_boundary(s, 1), 0);
+        assert_eq!(floor_char_boundary(s, 2), 0);
+        // Byte 3 is the start of '국' — already a boundary.
+        assert_eq!(floor_char_boundary(s, 3), 3);
+        assert_eq!(floor_char_boundary(s, 4), 3);
+        assert_eq!(floor_char_boundary(s, 5), 3);
+        assert_eq!(floor_char_boundary(s, 6), 6);
     }
 
     #[test]
