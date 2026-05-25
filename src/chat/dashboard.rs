@@ -150,11 +150,7 @@ impl DashboardState {
 
         // Section: MEMORY
         push_section_header(&mut lines, "MEMORY");
-        push_kv(
-            &mut lines,
-            "KV",
-            human_bytes(self.kv_cache_bytes),
-        );
+        push_kv(&mut lines, "KV", human_bytes(self.kv_cache_bytes));
         push_kv(&mut lines, "RSS", human_bytes(sys.process_rss_bytes));
         if sys.total_mem_bytes > 0 {
             let used = sys.used_mem_bytes;

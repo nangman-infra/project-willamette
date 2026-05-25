@@ -711,11 +711,7 @@ fn try_tab_complete_slash(ui: &mut UiState) {
         ui.input.clear();
         ui.input.insert_str(&new_buf);
     } else if matches.len() > 1 {
-        let suggestions: Vec<String> = matches
-            .iter()
-            .take(6)
-            .map(|s| format!("/{}", s))
-            .collect();
+        let suggestions: Vec<String> = matches.iter().take(6).map(|s| format!("/{}", s)).collect();
         ui.flash(suggestions.join("  "));
     } else {
         ui.flash(format!("no completion for /{}", partial_cmd));
