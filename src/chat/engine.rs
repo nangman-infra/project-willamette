@@ -5,13 +5,70 @@
 //! (the mmap-backed model bytes) and `'g` (the borrow of the graph)
 //! must outlive the engine.
 
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
 use crate::error::WillametteError;
-use crate::model::cached_forward::forward_with_cache;
+use crate::model::cached_forward::{forward_with_cache, forward_with_cache_progress};
 use crate::model::graph::ModelGraph;
 use crate::model::kv_cache::KVCache;
 use crate::model::lm_head::compute_logits_from_graph;
 use crate::model::sampler::{Sampler, SamplingParams};
 use crate::tokenizer::{EncodeOptions, Tokenizer};
+
+/// Shared atomic state between the engine (worker thread) and the
+/// TUI (UI thread). High-frequency updates (layer-by-layer, token-by-
+/// token) flow through these atomics rather than the `mpsc` channel
+/// so the UI can poll at its own redraw cadence without flooding.
+#[derive(Debug, Default)]
+pub struct WorkerProgress {
+    /// 0..n_layers while inside a forward, or `u32::MAX` when idle.
+    pub current_layer: AtomicU32,
+    /// Tokens emitted in the *current* turn (resets per turn).
+    pub tokens_emitted: AtomicU32,
+    /// Cap for the current turn (= max_new_tokens). 0 when idle.
+    pub tokens_cap: AtomicU32,
+    /// UNIX epoch nanoseconds when the current turn started. 0 = idle.
+    pub turn_start_nanos: AtomicU64,
+    /// Most-recently-computed KV cache size in bytes.
+    pub kv_cache_bytes: AtomicU64,
+    /// Cancel flag — set by UI when the user presses Esc mid-turn.
+    /// The engine checks before each new token and exits cleanly.
+    pub cancel_requested: AtomicBool,
+}
+
+impl WorkerProgress {
+    pub fn new() -> Self {
+        Self {
+            current_layer: AtomicU32::new(u32::MAX),
+            tokens_emitted: AtomicU32::new(0),
+            tokens_cap: AtomicU32::new(0),
+            turn_start_nanos: AtomicU64::new(0),
+            kv_cache_bytes: AtomicU64::new(0),
+            cancel_requested: AtomicBool::new(false),
+        }
+    }
+
+    /// Reset for the start of a new turn.
+    pub fn begin_turn(&self, cap: u32) {
+        self.current_layer.store(u32::MAX, Ordering::Relaxed);
+        self.tokens_emitted.store(0, Ordering::Relaxed);
+        self.tokens_cap.store(cap, Ordering::Relaxed);
+        self.cancel_requested.store(false, Ordering::Relaxed);
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        self.turn_start_nanos.store(now_nanos, Ordering::Relaxed);
+    }
+
+    /// Mark the worker as idle (turn finished or aborted).
+    pub fn end_turn(&self) {
+        self.current_layer.store(u32::MAX, Ordering::Relaxed);
+        self.turn_start_nanos.store(0, Ordering::Relaxed);
+    }
+}
 
 /// Who said it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +228,11 @@ pub struct ChatEngine<'g, 'a> {
     /// Optional system prompt; sits in front of the first user turn
     /// when present.
     system_prompt: Option<String>,
+    /// Optional shared progress + cancel state. Stdio chat leaves
+    /// this as `None`; the TUI installs an `Arc<WorkerProgress>` so
+    /// it can show layer-by-layer + tok/s and trigger mid-turn
+    /// cancellation.
+    progress: Option<Arc<WorkerProgress>>,
 }
 
 impl<'g, 'a> ChatEngine<'g, 'a> {
@@ -194,7 +256,46 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             next_pos: 0,
             max_seq_len,
             system_prompt: None,
+            progress: None,
         }
+    }
+
+    /// Install a shared progress / cancel state. Used by the TUI to
+    /// observe layer-wise progress and request mid-turn cancellation.
+    pub fn set_worker_progress(&mut self, progress: Arc<WorkerProgress>) {
+        self.progress = Some(progress);
+    }
+
+    /// Cheap accessors for the dashboard.
+    pub fn config_n_layers(&self) -> u32 {
+        self.graph.config.block_count
+    }
+    pub fn config_n_embd(&self) -> u32 {
+        self.graph.config.embedding_length
+    }
+    pub fn config_vocab_size(&self) -> u32 {
+        self.graph.config.vocab_size
+    }
+    pub fn config_architecture(&self) -> &str {
+        &self.graph.config.architecture
+    }
+    pub fn config_kv_dim(&self) -> u32 {
+        self.graph.config.kv_dim
+    }
+    pub fn sampler(&self) -> &Sampler {
+        &self.sampler
+    }
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+    /// Estimate KV cache memory in bytes given the current cache
+    /// position. Two f32 tensors per layer per token (K and V),
+    /// each of length kv_dim.
+    pub fn estimate_kv_cache_bytes(&self) -> u64 {
+        let layers = self.graph.layers.len() as u64;
+        let kv_dim = self.graph.config.kv_dim as u64;
+        let pos = self.next_pos as u64;
+        layers * kv_dim * pos * 4 * 2
     }
 
     /// Replace the engine's sampling configuration (history reset
@@ -283,9 +384,18 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             )));
         }
 
+        if let Some(p) = &self.progress {
+            p.begin_turn(max_new_tokens as u32);
+        }
+
         let last_hidden = self.prefill_prompt_tokens(&prompt_tokens)?;
-        let response_text =
-            self.stream_assistant_response(last_hidden, max_new_tokens, &mut tick)?;
+        let result = self.stream_assistant_response(last_hidden, max_new_tokens, &mut tick);
+
+        if let Some(p) = &self.progress {
+            p.end_turn();
+        }
+
+        let response_text = result?;
 
         self.history.push(ChatMessage {
             role: Role::User,
@@ -344,6 +454,25 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         Ok(last_hidden)
     }
 
+    /// Forward a single token while updating the optional
+    /// `WorkerProgress.current_layer` after each transformer layer
+    /// completes. Wraps the bare `forward_with_cache` for the
+    /// no-progress case and `forward_with_cache_progress` for the
+    /// observed case.
+    fn forward_with_optional_progress(
+        &mut self,
+        token: u32,
+        position: u32,
+    ) -> Result<Vec<f32>, WillametteError> {
+        if let Some(progress) = self.progress.clone() {
+            forward_with_cache_progress(self.graph, &mut self.cache, token, position, |layer_idx| {
+                progress.current_layer.store(layer_idx, Ordering::Relaxed);
+            })
+        } else {
+            forward_with_cache(self.graph, &mut self.cache, token, position)
+        }
+    }
+
     /// Greedy / sampled token loop with three guarantees:
     ///
     /// 1. **UTF-8 safety** — multi-byte codepoints split across BPE
@@ -373,8 +502,16 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         let mut pending_bytes: Vec<u8> = Vec::new();
         let mut emitted_up_to: usize = 0;
         let mut tick_flushed_up_to: usize = 0;
+        let turn_start = Instant::now();
 
         for _step in 0..max_new_tokens {
+            // Cancellation check — set by UI on Esc.
+            if let Some(p) = &self.progress {
+                if p.cancel_requested.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+
             let logits = compute_logits_from_graph(&last_hidden, self.graph)?;
             let next = self.sampler.sample(&logits)?;
 
@@ -388,6 +525,13 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 &mut emitted_up_to,
                 &mut response_text,
             );
+
+            // Live tok/s accounting.
+            if let Some(p) = &self.progress {
+                let emitted = p.tokens_emitted.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = emitted;
+                let _ = turn_start; // turn_start_nanos already set by begin_turn
+            }
 
             // Stop-sequence check on the WHOLE accumulated response,
             // not just the not-yet-tick'd tail. If the model has
@@ -413,8 +557,14 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             }
 
             self.sampler.observe(next);
-            last_hidden = forward_with_cache(self.graph, &mut self.cache, next, self.next_pos)?;
+            last_hidden = self.forward_with_optional_progress(next, self.next_pos)?;
             self.next_pos += 1;
+
+            // Update KV cache size estimate for the dashboard.
+            if let Some(p) = &self.progress {
+                p.kv_cache_bytes
+                    .store(self.estimate_kv_cache_bytes(), Ordering::Relaxed);
+            }
         }
 
         // End-of-generation: no more tokens are coming, so the

@@ -99,6 +99,16 @@ impl Sampler {
         self.history.push(id);
     }
 
+    /// Read-only view of the sampling configuration.
+    pub fn params(&self) -> &SamplingParams {
+        &self.params
+    }
+
+    /// Clone of the sampling configuration (cheap; small struct).
+    pub fn params_clone(&self) -> SamplingParams {
+        self.params.clone()
+    }
+
     /// Sample one token from the supplied logits. The function does
     /// NOT mutate `logits`; it operates on an internal copy.
     pub fn sample(&mut self, logits: &[f32]) -> Result<u32, WillametteError> {

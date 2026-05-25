@@ -55,6 +55,21 @@ pub fn forward_with_cache(
     token_id: u32,
     position: u32,
 ) -> Result<Vec<f32>, WillametteError> {
+    forward_with_cache_progress(graph, cache, token_id, position, |_| {})
+}
+
+/// Same as [`forward_with_cache`] but calls `on_layer(layer_idx)`
+/// after each transformer block finishes. Used by the TUI to update
+/// the layer-progress indicator in the dashboard. The overhead is
+/// one closure call per layer (≤ 30 calls/token for BitNet b1.58 2B)
+/// — well below the matvec cost.
+pub fn forward_with_cache_progress<F: FnMut(u32)>(
+    graph: &ModelGraph<'_>,
+    cache: &mut KVCache,
+    token_id: u32,
+    position: u32,
+    mut on_layer: F,
+) -> Result<Vec<f32>, WillametteError> {
     let cfg = &graph.config;
     let n_embd = cfg.embedding_length as usize;
     let kv_dim = cfg.kv_dim as usize;
@@ -197,6 +212,8 @@ pub fn forward_with_cache(
                 )));
             }
         }
+        // Layer complete — notify observer if one is attached.
+        on_layer(layer.index);
     }
 
     let mut final_hidden = vec![0.0_f32; n_embd];
