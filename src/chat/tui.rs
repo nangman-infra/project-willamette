@@ -443,6 +443,57 @@ fn handle_slash(ui: &mut UiState, cmd: &str, cmd_tx: &Sender<UserCmd>) -> Result
     }
 }
 
+/// Push one message into `lines`, applying markdown rendering to BOT
+/// messages and plain Span styling to USR / SYS messages. When
+/// `with_cursor` is true (only used for the in-flight streaming
+/// response), a small green `▌` cursor is appended to the final line
+/// so the user can see generation is live.
+fn append_message_lines(
+    lines: &mut Vec<Line<'static>>,
+    role: Role,
+    content: &str,
+    with_cursor: bool,
+) {
+    let role_span = Span::styled(
+        format!(" {} ", role.label()),
+        Style::default()
+            .fg(Color::Black)
+            .bg(role.color())
+            .add_modifier(Modifier::BOLD),
+    );
+
+    // BOT body goes through the markdown renderer; USR/SYS are plain.
+    let mut body_lines: Vec<Line<'static>> = if matches!(role, Role::Bot) {
+        super::markdown::render_markdown_lines(content)
+    } else {
+        vec![Line::from(vec![Span::raw(content.to_string())])]
+    };
+    if body_lines.is_empty() {
+        body_lines.push(Line::from(""));
+    }
+
+    // First body line gets the role badge prepended.
+    let first = body_lines.remove(0);
+    let mut first_spans: Vec<Span<'static>> = vec![role_span, Span::raw(" ".to_string())];
+    first_spans.extend(first.spans);
+    lines.push(Line::from(first_spans));
+
+    // Subsequent body lines align under the body (4-space indent to
+    // sit roughly under the first content character).
+    for body_line in body_lines {
+        let mut spans: Vec<Span<'static>> = vec![Span::raw("      ".to_string())];
+        spans.extend(body_line.spans);
+        lines.push(Line::from(spans));
+    }
+
+    if with_cursor {
+        if let Some(last) = lines.last_mut() {
+            last.spans
+                .push(Span::styled(" ▌", Style::default().fg(Color::Green)));
+        }
+    }
+}
+
 fn render(f: &mut ratatui::Frame, ui: &UiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -456,28 +507,11 @@ fn render(f: &mut ratatui::Frame, ui: &UiState) {
     // ── History area ──
     let mut lines: Vec<Line> = Vec::new();
     for msg in &ui.history {
-        let role_span = Span::styled(
-            format!(" {} ", msg.role.label()),
-            Style::default()
-                .fg(Color::Black)
-                .bg(msg.role.color())
-                .add_modifier(Modifier::BOLD),
-        );
-        let body_span = Span::raw(format!(" {}", msg.content));
-        lines.push(Line::from(vec![role_span, body_span]));
+        append_message_lines(&mut lines, msg.role, &msg.content, false);
         lines.push(Line::from(""));
     }
     if !ui.streaming.is_empty() || ui.generating {
-        let role_span = Span::styled(
-            " BOT ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        );
-        let body_span = Span::raw(format!(" {}", ui.streaming));
-        let cursor = Span::styled(" ▌", Style::default().fg(Color::Green));
-        lines.push(Line::from(vec![role_span, body_span, cursor]));
+        append_message_lines(&mut lines, Role::Bot, &ui.streaming, true);
     }
 
     let pct = if ui.max_seq_len > 0 {

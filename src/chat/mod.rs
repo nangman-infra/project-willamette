@@ -28,6 +28,7 @@
 //! * Slash-command parsing — that lives in the harness (Stage 9-D).
 
 pub mod engine;
+pub(crate) mod markdown;
 pub mod tui;
 
 pub use engine::{ChatEngine, ChatMessage, Role};
