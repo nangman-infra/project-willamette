@@ -25,6 +25,94 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.4.0-mvp] — 2026-05-25
+
+Minor release: humble-hardware friendly distribution.
+
+Two pieces of the original thesis ("medium-sized public LLMs on
+CPU-only humble hardware") land here. (1) The runtime now picks its
+own BitLinear kernel based on the host CPU, with a single source of
+truth — the dashboard, bench banner, and the matvec dispatcher can
+no longer drift apart. (2) Every tag push produces cross-compiled
+static binaries for six targets, so a Pentium-M antiX user no
+longer needs gcc, make, rustup, and 4 minutes of compile time —
+they download a 5-ish MB tarball and run.
+
+### Added
+
+#### Pre-built release binaries (`.github/workflows/release.yml`)
+
+* Triggered on any `v*-mvp` tag push.
+* Six build targets:
+  * `x86_64-unknown-linux-musl` — modern Linux desktops, CI, dev
+    servers.
+  * `i686-unknown-linux-musl` — Pentium-M / antiX class (the Stage
+    6-B validation host).
+  * `aarch64-unknown-linux-musl` — RPi 4 64-bit, AWS Graviton,
+    ARM VPS.
+  * `armv7-unknown-linux-musleabihf` — RPi 3, BeagleBone, Pi
+    Zero 2.
+  * `aarch64-apple-darwin` — Apple Silicon native.
+  * `x86_64-apple-darwin` — Intel Macs (cross-compiled on the
+    M-class runner).
+* Linux builds go through `cargo-zigbuild` with Zig 0.13, producing
+  musl-static binaries. One artifact runs on antiX (glibc 2.36),
+  Raspberry Pi OS (glibc 2.31), and Ubuntu 24.04 (glibc 2.39)
+  without an LD\_LIBRARY\_PATH dance. Stripped after build.
+* Each archive is `willamette-<tag>-<target>.tar.gz` — the binary
+  is renamed `willamette` inside the tarball (crate name remains
+  `project-willamette` for cargo) so the user types `./willamette`.
+* Each artifact ships with a SHA-256 sum, plus README + license +
+  CHANGELOG so the tarball is self-contained.
+* A second job pulls every artifact, slices the matching CHANGELOG
+  section as the release notes, and either creates the release or
+  `--clobber`-uploads to one already created by the manual 8-step
+  flow.
+
+#### `src/model/dispatch.rs` — runtime CPU dispatch module
+
+* `Kernel` enum with three variants (`Scalar`, `AArch64Neon`,
+  `X86Sse2`).
+* `active_kernel()` — `OnceLock`-cached, single CPU-ID read.
+* `Kernel::label()` returns the same string used in the TUI
+  dashboard, the bench banner, and (future) log lines.
+* `detected_features()` is the source of the dashboard's per-SIMD
+  ●/○ list (currently `neon` + `dotprod` on aarch64; `sse2` +
+  `sse4.1` + `avx2` on x86 / x86_64).
+
+### Changed
+
+* `bitlinear::bitlinear_i2s_matvec_f32` now branches on
+  `dispatch::active_kernel()`. The aarch64 NEON path is unchanged
+  numerically — byte-parity tests (`kv_cache`, `multi_token`,
+  `forward`) all green.
+* `chat/tui.rs::initial_dashboard_state` and `main.rs::cmd_bench`
+  both consume `dispatch::active_kernel().label()` /
+  `dispatch::detected_features()`. The old per-call-site arch
+  detection in those two files is gone (~80 lines removed).
+* `src/model/mod.rs` exports the new `dispatch` module.
+
+### Tests
+
+* Suite total: **279** (was 276).
+* `+3` in `model::dispatch::tests`:
+  * `active_kernel_is_stable_across_calls` — OnceLock correctness.
+  * `label_is_non_empty` — every variant has a non-empty label so
+    the dashboard never renders a blank line.
+  * Plus an aarch64-gated case that confirms `Kernel::AArch64Neon`
+    is picked when the host has NEON (it always does on Apple
+    Silicon / Cortex-A57+), and an x86-gated case that confirms
+    `sse2` shows up in `detected_features()`.
+
+### What's intentionally NOT in this release
+
+* **Stage 6-B SSE2 kernel itself.** `Kernel::X86Sse2` is defined,
+  the detection slot is in place, and dispatch falls through to
+  Scalar with a clear comment for the next contributor. The actual
+  intrinsic implementation (`pmaddubsw` / `pmaddwd`) is Phase 3 —
+  separate work that needs benchmark numbers from the antiX host
+  before / after to be honest about the speedup claim.
+
 ## [v0.3.1-mvp] — 2026-05-25
 
 Patch release. Three user-reported usability bugs in the v0.3.0 chat
