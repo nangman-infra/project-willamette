@@ -23,7 +23,15 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ## [Unreleased]
 
-_No changes yet._
+### Changed
+* README rewritten around the project thesis: medium-sized public
+  LLMs (1B – 13B) run on CPU-only humble hardware via a two-piece
+  `willamette-prep` (offline) + `willamette` (online) split.
+  BitNet b1.58 is reframed as the proven starting point, not the
+  destination. Status table replaced with a "works today" /
+  "not yet, but on the roadmap" split that matches v0.2.3 reality.
+* `.gitignore` excludes `_internal/` for un-tracked private
+  planning notes.
 
 ## [v0.2.3-mvp] — 2026-05-25
 

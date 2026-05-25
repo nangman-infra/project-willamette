@@ -23,3 +23,10 @@
 
 # Local environment overrides.
 .env
+
+# Internal planning / vision / risk notes — kept alongside the repo
+# for the author's reference but deliberately NOT git-tracked. These
+# capture in-flight strategy, half-formed ideas, and decisions that
+# should stay private to the project owner until they crystallise
+# into actual code or public docs.
+/_internal/

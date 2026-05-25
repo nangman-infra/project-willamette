@@ -1,37 +1,86 @@
 # Project Willamette
 
-Rust-native, mmap-backed inference runtime for the **real**
-[microsoft/BitNet-b1.58-2B-4T](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T)
-1.58-bit ternary LLM, packaged as
-`microsoft/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf`.
+**Thesis:** medium-sized publicly-released LLMs (1B – 13B parameters)
+run on **CPU-only humble hardware** — older laptops, low-RAM thin
+clients, retro x86, Raspberry-Pi-class ARM — without a GPU. The
+proof is two binaries: an offline **`willamette-prep`** that bakes
+a model down to a hardware-aware form, and an online
+**`willamette`** runtime that just executes the baked form. The
+runtime is Rust, uses zero-copy `mmap`, and targets ARM + x86_64 +
+i686 (eventually MMX-era), validated on emulators.
 
-* **No fake weights, no fake logits, no synthetic inference paths** — every
-  forward pass reads packed I2_S ternary weights from the real GGUF and
-  goes through the same operations llama.cpp / bitnet.cpp does (verified
-  byte-by-byte; see [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md)).
-* **Zero-copy mmap** for the 1.1 GiB model file. No bulk f32 dequant,
-  no full-model expansion — the packed 2-bit codes stay in their
-  32-bytes-per-128-elements blocks at all times.
-* **Source-pinned semantics** — every layout, dtype constant, and forward
-  step is cited against a pinned commit of `microsoft/BitNet`; see
-  [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md).
-* **MVP status, not a general LLM runtime.** Read
-  [`LIMITATIONS.md`](LIMITATIONS.md) before extrapolating.
+Starting point: [microsoft/BitNet-b1.58-2B-4T](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T)
+in its `ggml-model-i2_s.gguf` form (1.58-bit ternary weights) — the
+one model fully working end-to-end today. Destination: a runtime
+that, given any preprocessed mid-sized GGUF, runs it on the same
+humble-hardware envelope. **BitNet is how the runtime got proven;
+it is not the only model we will ever support.**
 
-## Status: v0.1.0 MVP
+Engineering rules every change is held to (full list in
+[§ Project rules](#project-rules-carried-forward-to-every-contribution)):
+
+* **No fake weights, no fake logits, no synthetic inference paths.**
+* **Zero-copy mmap** — packed weights stay in their on-disk blocks.
+* **Source-pinned semantics** — every layout / dtype constant cites a
+  pinned upstream commit (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)).
+* **No unverified SIMD merges** — runtime feature detection only; no
+  silent `target-cpu=native`.
+
+## Two-piece architecture
+
+```text
+┌─ heavy / one-time, beefy machine ──┐         ┌─ light / per-inference, humble machine ──┐
+│                                    │         │                                          │
+│   public model (HF, GGUF, etc.)    │         │   willamette-prep'd model artifact       │
+│            │                       │         │            │                             │
+│            ▼                       │         │            ▼                             │
+│   willamette-prep                  │ ──────▶ │   willamette  (this binary, today)       │
+│   ── analyze activations           │         │   ── mmap, run, chat                     │
+│   ── quantise + re-layout          │         │   ── CPU only, no model conversion       │
+│   ── windowing / sparse tables     │         │                                          │
+│   ── target-ISA aware blocking     │         │                                          │
+└────────────────────────────────────┘         └──────────────────────────────────────────┘
+       NOT BUILT YET                                      WORKING TODAY (v0.2.3)
+```
+
+The split is the same pattern TensorFlow Lite / Core ML / ONNX
+Runtime / `bitnet.cpp`'s `quantize` use: the expensive once-per-model
+work runs where compute is cheap, and the on-device runtime stays
+small. `willamette-prep` is the next major piece of work; what
+exists today is the runtime side, hardcoded to BitNet b1.58 2B.
+
+## Status: v0.2.3-mvp
+
+What works **today**, on the path toward the thesis:
 
 | Property | Value |
 | -------- | ----- |
-| Target model | `microsoft/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf` |
+| Working model | `microsoft/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf` (1.1 GiB ternary) |
 | Model SHA256 | `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162` |
+| Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
-| Apple Silicon NEON | ✅ implemented + validated (Stage 6-C) |
-| x86 AVX2 / SSE2 | ⏳ pending — no x86 host to validate (Stage 6-B) |
-| Generic scalar fallback | ✅ on every platform |
-| GPU | ❌ out of scope for MVP |
-| Other GGUF quant types | ❌ only `I2_S` for BitNet b1.58 |
-| Reference parity (bitnet.cpp) | ✅ byte-identical generated text on 4 prompts |
-| Tests | 189 passing, 0 warnings (`cargo test --release`) |
+| Apple Silicon NEON kernel | ✅ implemented + validated |
+| Multi-core CPU parallelism | ✅ `rayon` per-row BitLinear matvec |
+| Norm-weight + scratch caching | ✅ Stage 10-A / 10-B |
+| Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui) |
+| All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
+| Tests | **242** passing, 0 warnings (`cargo test --release`) |
+| SonarQube Quality Gate | ✅ OK — `new_coverage` 100 %, `new_violations` 0 |
+
+What does **not** work yet but is on the roadmap toward the thesis:
+
+| Property | Value |
+| -------- | ----- |
+| Model coverage beyond BitNet b1.58 (Llama / Mistral / Phi / …) | ❌ runtime hardcoded to BitNet b1.58 |
+| Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ only `I2_S` |
+| `willamette-prep` (offline preprocessor) | ❌ not started |
+| x86_64 AVX2 / SSE2 SIMD kernel | ⏳ Stage 6-B pending — needs x86 host validation |
+| i686 / MMX kernel | ❌ not started |
+| KV cache int8 quantisation | ❌ — biggest immediately-available memory win |
+| LLM-in-a-Flash style mmap windowing | ❌ |
+| Emulator-based humble-hardware benchmark pipeline (QEMU / 86Box) | ❌ |
+| Generic scalar fallback (every supported ISA) | ✅ correctness-only; ports cleanly |
+| GPU | ⛔ explicitly out of scope by thesis (CPU only) |
 
 ## Quick start
 
