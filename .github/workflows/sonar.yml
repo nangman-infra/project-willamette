@@ -99,20 +99,51 @@ jobs:
         shell: bash {0}  # NOT `bash -e` — we want to keep printing even after a jq parse fail
         run: |
           set +e
-          # Wait briefly for the analysis to finish processing on the
-          # Sonar server; the scan-action returns as soon as the report
-          # is uploaded, not when the gate is computed.
-          for i in 1 2 3 4 5 6; do
-            status_json=$(curl -sS -u "${SONAR_TOKEN}:" \
-              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=project-willamette")
-            overall=$(echo "${status_json}" | jq -r '.projectStatus.status // "PENDING"' 2>/dev/null)
-            if [ -n "${overall}" ] && [ "${overall}" != "PENDING" ] && [ "${overall}" != "NONE" ] && [ "${overall}" != "null" ]; then
+          # Step 1: locate the CE task URL the scanner wrote out. The
+          # scan-action returns as soon as the report is uploaded — we
+          # have to wait for Sonar's compute engine to actually process
+          # it before the gate result is available.
+          report_file=".scannerwork/report-task.txt"
+          if [ ! -f "${report_file}" ]; then
+            echo "[gate breakdown] ${report_file} missing — scan never ran?"
+            exit 0
+          fi
+          ce_task_url=$(grep '^ceTaskUrl=' "${report_file}" | cut -d= -f2-)
+          if [ -z "${ce_task_url}" ]; then
+            echo "[gate breakdown] no ceTaskUrl in ${report_file}"
+            exit 0
+          fi
+          echo "[gate breakdown] polling CE task: ${ce_task_url}"
+
+          # Step 2: poll the CE task until it leaves PENDING/IN_PROGRESS.
+          # Use Bearer auth — the SonarQube Cloud API rejects basic
+          # auth and just serves the SPA's HTML on /api/* otherwise.
+          analysis_id=""
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            task_json=$(curl -sS -H "Authorization: Bearer ${SONAR_TOKEN}" "${ce_task_url}")
+            task_status=$(echo "${task_json}" | jq -r '.task.status // "UNKNOWN"' 2>/dev/null)
+            if [ "${task_status}" = "SUCCESS" ]; then
+              analysis_id=$(echo "${task_json}" | jq -r '.task.analysisId // ""' 2>/dev/null)
               break
             fi
-            echo "[gate breakdown] still computing (attempt $i; raw response prefix: $(echo "${status_json}" | head -c 80))"
+            if [ "${task_status}" = "FAILED" ] || [ "${task_status}" = "CANCELED" ]; then
+              echo "[gate breakdown] CE task ended in ${task_status}"
+              echo "${task_json}" | jq . 2>/dev/null || echo "${task_json}" | head -c 400
+              exit 0
+            fi
+            echo "[gate breakdown] CE task ${task_status} (attempt $i)"
             sleep 5
           done
-          echo "Overall Quality Gate: ${overall:-UNKNOWN}"
+
+          # Step 3: query the gate result using the resolved analysis id.
+          if [ -z "${analysis_id}" ]; then
+            echo "[gate breakdown] CE task never reached SUCCESS — bailing"
+            exit 0
+          fi
+          status_json=$(curl -sS -H "Authorization: Bearer ${SONAR_TOKEN}" \
+            "${SONAR_HOST_URL}/api/qualitygates/project_status?analysisId=${analysis_id}")
+          overall=$(echo "${status_json}" | jq -r '.projectStatus.status // "UNKNOWN"' 2>/dev/null)
+          echo "Overall Quality Gate: ${overall}"
           echo
           echo "Failed conditions (if any):"
           echo "${status_json}" | jq -r '
