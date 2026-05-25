@@ -422,23 +422,35 @@ fn ui_loop(
         let timeout = tick_period.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).map_err(|e| anyhow::anyhow!("poll: {}", e))? {
             let evt = event::read().map_err(|e| anyhow::anyhow!("read: {}", e))?;
-            match evt {
-                Event::Key(key) => {
-                    if handle_key(ui, key, &cmd_tx)? {
-                        let _ = cmd_tx.send(UserCmd::Shutdown);
-                        return Ok(());
-                    }
-                }
-                Event::Mouse(m) => handle_mouse(ui, m),
-                Event::Paste(text) => {
-                    ui.input.insert_str(&text);
-                }
-                _ => {}
+            if dispatch_event(ui, evt, &cmd_tx)? {
+                let _ = cmd_tx.send(UserCmd::Shutdown);
+                return Ok(());
             }
         }
         if last_tick.elapsed() >= tick_period {
             last_tick = Instant::now();
         }
+    }
+}
+
+/// Dispatch one crossterm `Event` to the right handler.
+/// Returns `true` if the user requested quit.
+fn dispatch_event(
+    ui: &mut UiState,
+    evt: Event,
+    cmd_tx: &Sender<UserCmd>,
+) -> Result<bool> {
+    match evt {
+        Event::Key(key) => handle_key(ui, key, cmd_tx),
+        Event::Mouse(m) => {
+            handle_mouse(ui, m);
+            Ok(false)
+        }
+        Event::Paste(text) => {
+            ui.input.insert_str(&text);
+            Ok(false)
+        }
+        _ => Ok(false),
     }
 }
 
