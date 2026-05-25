@@ -33,6 +33,56 @@ within ±10 % (warm-cache decode-step variance).
 | OS | Debian 12 bookworm + antiX kernel `5.10.224-antix.1-486-smp` |
 | Toolchain | i686-unknown-linux-musl, cross-built on the CI runner |
 
+## 2026-05-25 — v0.5.0-mvp SSE2 kernel landed
+
+### antix1 — Pentium-M SSE2 (`Kernel::X86Sse2`)
+
+First Stage 6-B measurement. Same host (antix1, Pentium-M 2.0 GHz),
+same model file, same bench command. Built locally via
+`cargo build --release` (7m 13s on 2 GB RAM, no OOM); the published
+`v0.5.0-mvp` cross-compiled artifact matches this binary.
+
+```
+./target/release/project-willamette bench --model ~/models/ggml-model-i2_s.gguf --decode-steps 3
+```
+
+| Measurement | Value | vs. scalar |
+| --- | --- | --- |
+| `dispatch::active_kernel().label()` | `i686 SSE2` | (was `i686 scalar`) |
+| BitLinear matvec (attn_q, 2560 × 2560 ternary) | **24.3 ms** | 2.49× faster |
+| BitLinear matvec throughput | 269 M elements / sec | 2.49× |
+| Single-token forward (30 layers, no cache) | **8.87 s** | 2.45× faster |
+| Decode-step forward (KV cache, avg of 3) | **8.15 s** | 2.66× faster |
+| Decode-step throughput | **0.12 tok/s** | 2.4× |
+
+Parity: `cargo test --test bitlinear_sse2` runs the 8 layer-0
+BitLinear weights end-to-end against the scalar reference;
+`max |Δ| < 1e-2` holds across all of them (same tolerance the NEON
+test uses). Verified on antix1, 8/8 pass.
+
+#### Why 2.5×, not 8× (the SIMD width)?
+
+The pure-SSE2 i8 → i32 → f32 sign-extension sequence
+(`unpacklo_epi8` + `srai_epi16` + `unpacklo_epi16` + `srai_epi32`
++ `cvtepi32_ps`) costs four μops per 4-element chunk; the actual
+mask-add is one μop. The kernel is also memory-bandwidth bound
+on the Pentium-M's modest 533 MT/s DDR2 — 269 M f32 reads per
+second × 4 bytes = 1.08 GB/s sustained, which is in the right
+ballpark for a single in-order issue port pulling f32 input plus
+ternary weight bytes through L1.
+
+The next obvious step is an **i8 activation path**: quantize `x`
+once per matvec call into `i8`, then use the `pmullw` /
+`pmaddwd` pattern to compute the dot product in 8-wide i16 lanes,
+producing i32 partial sums. That mirrors the NEON `vmull_s8`
+kernel and roughly halves the L1 traffic for the activations. We
+don't ship it in v0.5.0 — first cut keeps the same numerical
+shape as scalar and proves the dispatch route works.
+
+### antix1 — Pentium-M scalar (`Kernel::Scalar`, v0.4.1-mvp)
+
+Kept as the "before" reference for any future kernel.
+
 ## 2026-05-25 — v0.4.1-mvp baselines
 
 ### Apple M1 — NEON (`Kernel::AArch64Neon`)

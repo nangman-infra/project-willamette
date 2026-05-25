@@ -25,6 +25,91 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.5.0-mvp] — 2026-05-25
+
+Minor release: Stage 6-B SSE2 BitLinear kernel lands. First time
+`dispatch::Kernel::X86Sse2` actually routes traffic — the v0.4.0
+slot is now filled with a working implementation, verified for
+both parity and speed on a real Pentium-M host.
+
+### Added
+
+#### `src/model/bitlinear_sse2.rs` — SSE2 BitLinear matvec
+
+* Numerically equivalent to `bitlinear_i2s_matvec_f32_scalar`
+  within the same `max |Δ| < 1e-2` tolerance the NEON parity test
+  already enforces. Validated on antix1 (Pentium-M Banias/Dothan,
+  family 6 model 13, i686 / SSE2 ceiling): all 8 layer-0
+  BitLinear weights (attn_q/k/v/output, ffn_gate/up/down,
+  zero-input check) pass.
+* Same two-accumulator shape as scalar
+  (`out[j] = scale · (Σ_pos x[i] − Σ_neg x[i])`) — no
+  multiplication by ±1.0, only mask-add. SIMD strategy:
+    1. Per 128-element block, unpack 32 packed bytes into a
+       stack-resident `[i8; 128]` using the column-stride-32 map
+       (`c0→gp`, `c1→32+gp`, `c2→64+gp`, `c3→96+gp`).
+    2. Walk in 4-float chunks. Sign-extend each ternary `i8`
+       to `i32` via the pure-SSE2 sequence
+       `unpacklo_epi8`+`srai_epi16`+`unpacklo_epi16`+`srai_epi32`
+       (no SSE4 `_mm_cvtepi8_epi32` — Pentium-M doesn't have it),
+       then `cvtepi32_ps` to `f32`.
+    3. `_mm_cmpeq_epi32` builds the +1 / −1 masks;
+       `_mm_and_ps(x, mask)` does the conditional add into a
+       4-lane positive / negative accumulator.
+    4. Horizontal-sum (pure SSE2, no `_mm_hadd_ps`) and combine
+       at the end of each row.
+* `#[target_feature(enable = "sse2")]` on the kernel; sound
+  because `dispatch::select_kernel` gates the call on
+  `is_x86_feature_detected!("sse2")`.
+
+#### `tests/bitlinear_sse2.rs` — parity contract
+
+* Mirror of `tests/bitlinear_simd.rs` (NEON). cfg-gated on
+  `target_arch = "x86"` / `"x86_64"`.
+* SKIPs gracefully if the real GGUF isn't present or if the host
+  doesn't advertise SSE2 (so the suite still passes on synthetic
+  test runners that lack the model file).
+
+#### Performance — antix1 measurement (v0.5.0 vs v0.4.1)
+
+| Measurement | scalar | SSE2 | speed-up |
+| --- | ---: | ---: | ---: |
+| BitLinear matvec (2560 × 2560) | 60.5 ms | **24.3 ms** | **2.49×** |
+| Matvec throughput | 108 M e/s | 269 M e/s | 2.49× |
+| Single-token forward (30 layers) | 21.7 s | **8.87 s** | **2.45×** |
+| Decode-step (KV cache, avg of 3) | 21.65 s | **8.15 s** | **2.66×** |
+| tok/s | 0.05 | **0.12** | **2.4×** |
+
+Full numbers + reproduction recipe in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Still slow in
+absolute terms (0.12 tok/s = ~8 s/token on a 21-year-old CPU),
+but the dispatch path is real, parity is enforced, and there is
+a documented next-step (i8 activation path) for further gains.
+
+### Changed
+
+* `dispatch::select_kernel` returns `Kernel::X86Sse2` on x86 /
+  x86_64 hosts that report SSE2 (previously always fell through
+  to `Scalar`).
+* `bitlinear::bitlinear_i2s_matvec_f32` has a new `X86Sse2` arm
+  that routes to the unsafe kernel; aarch64 NEON arm and scalar
+  fallback are untouched.
+
+### Tests
+
+* Suite total: **279 lib + 8 SSE2 integration = 287** (was 279).
+  The 8 SSE2 cases only run on x86 hosts with the model file
+  present; the lib suite is unchanged.
+
+### Compatibility
+
+* No ABI / API changes. Existing v0.4.1-mvp users on x86 / x86_64
+  get the 2.4× speed-up automatically by upgrading — no flags, no
+  recompile knobs.
+* aarch64 / Apple Silicon path identical to v0.4.1.
+* Pre-built binaries are still produced by `.github/workflows/release.yml`
+  for the same 6 targets.
+
 ## [v0.4.1-mvp] — 2026-05-25
 
 Patch release. The v0.4.0-mvp `release.yml` workflow built 5/6
