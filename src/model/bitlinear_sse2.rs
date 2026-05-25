@@ -53,9 +53,19 @@
 #![allow(clippy::needless_range_loop)] // mirrors bitlinear.rs / bitlinear_neon.rs — explicit row × block × chunk indexing is clearer than iterator chains in this hot kernel.
 
 #[cfg(target_arch = "x86")]
-use core::arch::x86::*;
+use core::arch::x86::{
+    __m128, __m128i, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_castsi128_ps, _mm_cmpeq_epi32,
+    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setr_ps,
+    _mm_setzero_ps, _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16,
+    _mm_unpacklo_epi8,
+};
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::*;
+use core::arch::x86_64::{
+    __m128, __m128i, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_castsi128_ps, _mm_cmpeq_epi32,
+    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setr_ps,
+    _mm_setzero_ps, _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16,
+    _mm_unpacklo_epi8,
+};
 
 use crate::error::WillametteError;
 use crate::gguf::tensor::TensorView;
