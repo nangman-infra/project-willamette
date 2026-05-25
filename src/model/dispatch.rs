@@ -94,6 +94,12 @@ pub fn active_kernel() -> Kernel {
 /// kernel-features (●/○) display. Order is meaningful (top-to-bottom
 /// in the UI).
 pub fn detected_features() -> Vec<(&'static str, bool)> {
+    // `mut` is conditionally used — on aarch64 / x86 / x86_64 we
+    // `push` into `out`; on armv7 / generic the cfg blocks below
+    // expand to nothing and `out` is returned empty. The `#[allow]`
+    // keeps `RUSTFLAGS=-D warnings` builds happy on targets where
+    // no SIMD slots are advertised.
+    #[allow(unused_mut)]
     let mut out: Vec<(&'static str, bool)> = Vec::new();
 
     #[cfg(target_arch = "aarch64")]

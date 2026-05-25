@@ -25,6 +25,38 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.4.1-mvp] — 2026-05-25
+
+Patch release. The v0.4.0-mvp `release.yml` workflow built 5/6
+targets successfully but the `armv7-unknown-linux-musleabihf` job
+failed at the build step with `error: variable does not need to be
+mutable` on `src/model/dispatch.rs:97`. On armv7 / armv7-musleabihf
+none of the cfg arms inside `detected_features()` activate, so the
+`let mut out` is genuinely unused-mut on that target — and the
+workflow's `RUSTFLAGS=-D warnings` promoted that to an error.
+
+That blocked the `Publish GitHub Release` job (`needs: build`)
+across the board, so v0.4.0-mvp ended up with a git tag but no
+artifacts on GitHub. This patch fixes the build and re-runs the
+distribution pipeline.
+
+### Fixed
+
+* `src/model/dispatch.rs:97` — `#[allow(unused_mut)]` on the
+  `out` vec inside `detected_features()`. On targets that have
+  SIMD slots compiled in (aarch64 / x86 / x86_64) the `mut` is
+  used; on armv7 and generic targets it isn't, and the cfg arms
+  that would have used it expand to nothing. The allow narrows
+  the exception to one variable; everywhere else still benefits
+  from `-D unused-mut`.
+
+### Distribution
+
+* This is the first release with `release.yml` actually publishing
+  to GitHub Releases. v0.4.0-mvp's tag is left in place as a
+  historical marker (no artifacts attached); future users should
+  pull v0.4.1-mvp or later.
+
 ## [v0.4.0-mvp] — 2026-05-25
 
 Minor release: humble-hardware friendly distribution.
