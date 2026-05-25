@@ -23,15 +23,105 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [v0.3.0-mvp] — 2026-05-25
+
+Minor release: operator-grade chat TUI.
+
+The v0.2.x TUI was usable but missing the editing baseline every
+modern terminal AI tool provides — arrow keys, history recall,
+search, mid-turn cancel, paste, real cursor — and gave no
+visibility into engine / system state. v0.3.0 fills both gaps
+in one cycle.
+
+### Added
+
+#### Right-pane live perf dashboard
+* New `src/chat/sysmon.rs` — 1 Hz polling of `sysinfo` over a
+  daemon thread, normalised process CPU %, per-core %, memory.
+* New `src/chat/dashboard.rs` — pure render fn producing six
+  sections: HARDWARE, CPU, MEMORY, INFERENCE, SAMPLING, MODEL.
+  Gauges with traffic-light coloring (green ≤ 60 %, yellow ≤ 85 %,
+  red > 85 %). Per-core display collapses cores ≥ 13.
+* Dashboard lives at terminal width ≥ 72; narrower widths fall
+  back to single-pane.
+
+#### Readline-grade input editor
+* New `src/chat/input_editor.rs` — pure data structure, fully
+  unit-tested (19 inline tests).
+* Cursor movement: ← →, Home, End, Ctrl-A / Ctrl-E.
+* Deletion: Backspace, Delete, Ctrl-W (word), Ctrl-U (to start),
+  Ctrl-K (to end).
+* History: ↑ / ↓ to recall previous prompts (ring buffer cap 1000).
+* Reverse search: Ctrl-R opens overlay; type to filter newest-
+  first; Enter loads, Esc cancels, Ctrl-R steps to next older
+  match.
+* UTF-8 atomic: cursor moves snap to char boundaries, multi-byte
+  CJK / emoji codepoints never split.
+* Persisted history at `~/.config/willamette/history`,
+  cap 1000 entries, append-on-submit, oldest evicted.
+
+#### Inference observability
+* Layer-progress display: `forward_with_cache_progress` calls an
+  optional `on_layer(layer_idx)` callback after each transformer
+  block; the TUI shows "layer 17 / 30" updating live.
+* Live tok/s: rolling token count + turn elapsed in atomics;
+  dashboard reads them every frame.
+* ETA estimation: remaining tokens ÷ live tok/s.
+
+#### Mid-turn cancel
+* Esc during generation sets `WorkerProgress.cancel_requested`
+  atomic; engine checks at each iteration and exits cleanly.
+  History truncates to whatever was emitted so KV cache stays
+  consistent for the next turn.
+
+#### Discoverability + polish
+* F1 / `/help` opens a Help overlay popup with the full keybinding
+  cheatsheet.
+* Tab completes slash commands; ambiguous prefix shows candidates.
+* Unknown slash command suggestions via Levenshtein distance ≤ 2:
+  "unknown /reser — did you mean /reset?".
+* Real terminal cursor in input area via
+  `Frame::set_cursor_position` (was: rendered `_` glyph).
+* Mouse wheel scrolling on chat log (3 lines per tick).
+* Bracketed paste support: multi-line paste arrives as a single
+  `Event::Paste(String)`, inserted at cursor.
+* Ctrl-Y "yanks" the last bot response to system clipboard via
+  OSC52 (works in iTerm2 / Kitty / Alacritty / wezterm / recent
+  xterm). Inline 30-LoC base64 encoder — no new dep.
+* Ctrl-L clears visible chat log without dropping history.
+* Ctrl-Home / Ctrl-End jump to top/bottom of chat scrollback.
+
 ### Changed
-* README rewritten around the project thesis: medium-sized public
-  LLMs (1B – 13B) run on CPU-only humble hardware via a two-piece
-  `willamette-prep` (offline) + `willamette` (online) split.
-  BitNet b1.58 is reframed as the proven starting point, not the
-  destination. Status table replaced with a "works today" /
-  "not yet, but on the roadmap" split that matches v0.2.3 reality.
-* `.gitignore` excludes `_internal/` for un-tracked private
-  planning notes.
+* `ChatEngine` gains `set_worker_progress` + nine read-only
+  accessors (config\_*, sampler, system_prompt,
+  estimate_kv_cache_bytes). Existing call sites unaffected.
+* `Sampler` exposes `params()` and `params_clone()` for the
+  dashboard.
+* Stdio `willamette chat` is unchanged — TUI features don't
+  affect the simpler stdio surface.
+
+### Dependencies
+* `sysinfo = "0.32"` (~50 KB compiled). Cross-platform CPU/memory
+  sampling. The only new dep this cycle.
+
+### Tests
+* 272 total (v0.2.3 had 242 — 30 new).
+  * 19 new in `input_editor::tests`
+  * 3 new in `sysmon::tests`
+  * 6 new in `dashboard::tests`
+  * 2 new in `tui::tests` (Levenshtein + base64)
+
+### Notes
+* No public API removal. No numeric inference change.
+* Live verification still requires a real TTY — headless tests
+  cover everything but the actual ratatui draw + mouse + paste.
+  See `_internal/VISION.md` for the planned QEMU bench harness
+  (Stage 27) that will let humble-hardware UX be measured too.
+* This release closes "what every terminal AI tool already
+  provides" gap. Next likely cycle: Phase III generalisation
+  (multi-architecture model support — Llama / Mistral / Phi).
 
 ## [v0.2.3-mvp] — 2026-05-25
 
