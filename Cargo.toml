@@ -25,6 +25,7 @@ regex = "1"              # byte-level BPE pre-tokenization
 rayon = "1.10"           # Stage 10-C: BitLinear matvec row parallelism (ISA-neutral; M1 perf cores + multi-core SSE2/Pentium-4 friendly)
 ratatui = "0.29"         # Stage 9-E: TUI framework (re-exports crossterm)
 crossterm = "0.28"       # Stage 9-E: terminal raw mode + event polling
+sysinfo = "0.32"         # v0.3.0: cross-platform CPU/memory polling for the dashboard pane
 
 [profile.release]
 opt-level = 3
