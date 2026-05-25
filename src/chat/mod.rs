@@ -27,8 +27,11 @@
 //!   bridge that the model handles well in practice.
 //! * Slash-command parsing — that lives in the harness (Stage 9-D).
 
+pub(crate) mod dashboard;
 pub mod engine;
+pub(crate) mod input_editor;
 pub(crate) mod markdown;
+pub(crate) mod sysmon;
 pub mod tui;
 
 pub use engine::{ChatEngine, ChatMessage, Role};
