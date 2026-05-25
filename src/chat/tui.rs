@@ -145,8 +145,16 @@ struct UiState {
     progress: Arc<WorkerProgress>,
     /// When the current turn started (for elapsed / tok/s computation).
     turn_start: Option<Instant>,
-    /// Scroll offset on the chat history pane (lines from bottom).
-    scroll_back: u16,
+    /// Wrapped-line offset on the chat pane, measured from the top.
+    /// Larger value = viewport shifted further down. ratatui's
+    /// `Paragraph::scroll((n, 0))` uses the same convention: "skip
+    /// the first n lines."
+    scroll_offset: u16,
+    /// True = the renderer pins the viewport to the last line every
+    /// frame, so newly arriving tokens stay in view. Flipped to false
+    /// the moment the user scrolls up; flipped back to true on End /
+    /// Ctrl-End or when they scroll down past the last line.
+    follow_bottom: bool,
     /// Modal overlay state.
     overlay: Option<Overlay>,
     /// Transient flash message (cleared after timeout).
@@ -177,7 +185,8 @@ impl UiState {
             dashboard,
             progress,
             turn_start: None,
-            scroll_back: 0,
+            scroll_offset: 0,
+            follow_bottom: true,
             overlay: None,
             transient: None,
             history_path,
@@ -412,6 +421,9 @@ fn ui_loop(
         terminal
             .draw(|f| render(f, ui))
             .map_err(|e| anyhow::anyhow!("draw: {}", e))?;
+        // ^ `render` takes &mut: it may clamp scroll_offset to the
+        // measured maximum (so PageDown spam can't strand the view
+        // past the last line) and toggle follow_bottom on/off.
 
         // Drain token events.
         if drain_token_events(ui, &evt_rx) {
@@ -484,18 +496,16 @@ fn drain_token_events(ui: &mut UiState, evt_rx: &Receiver<TokenEvent>) -> bool {
 
 fn apply_token_event(ui: &mut UiState, evt: TokenEvent) {
     match evt {
-        TokenEvent::Chunk(c) => {
-            ui.streaming.push_str(&c);
-            // Auto-scroll to bottom when new content arrives — but
-            // only if the user wasn't manually scrolled up.
-            if ui.scroll_back == 0 { /* stay at bottom */
-            } else { /* user is reading older */
-            }
-        }
+        TokenEvent::Chunk(c) => ui.streaming.push_str(&c),
         TokenEvent::Done { secs, chars } => finish_bot_turn(ui, secs, chars),
         TokenEvent::Failed(msg) => fail_bot_turn(ui, msg),
         TokenEvent::StateChanged { token_position } => ui.token_position = token_position,
     }
+    // Auto-scroll happens in render_chat_pane: when follow_bottom is
+    // true, it overrides scroll_offset with the maximum value so the
+    // newest line is always visible. We don't touch scroll_offset
+    // here — the renderer needs the area width / line count to know
+    // the right max, and that info isn't available until render time.
 }
 
 fn finish_bot_turn(ui: &mut UiState, secs: f64, chars: usize) {
@@ -570,8 +580,8 @@ fn handle_key_while_generating(ui: &mut UiState, key: KeyEvent) -> Result<bool> 
             ui.flash("cancel requested");
         }
         // Scroll while generating is fine.
-        KeyCode::PageUp => ui.scroll_back = ui.scroll_back.saturating_add(10),
-        KeyCode::PageDown => ui.scroll_back = ui.scroll_back.saturating_sub(10),
+        KeyCode::PageUp => scroll_up_by(ui, 10),
+        KeyCode::PageDown => scroll_down_by(ui, 10),
         _ => {}
     }
     Ok(false)
@@ -611,8 +621,8 @@ fn handle_key_normal(ui: &mut UiState, key: KeyEvent, cmd_tx: &Sender<UserCmd>) 
         KeyCode::Delete => ui.input.delete(),
         KeyCode::Up => ui.input.history_prev(),
         KeyCode::Down => ui.input.history_next(),
-        KeyCode::PageUp => ui.scroll_back = ui.scroll_back.saturating_add(10),
-        KeyCode::PageDown => ui.scroll_back = ui.scroll_back.saturating_sub(10),
+        KeyCode::PageUp => scroll_up_by(ui, 10),
+        KeyCode::PageDown => scroll_down_by(ui, 10),
         KeyCode::Tab => try_tab_complete_slash(ui),
         KeyCode::Enter => return handle_enter(ui, cmd_tx),
         KeyCode::Char(c) => ui.input.insert_char(c),
@@ -632,8 +642,8 @@ fn handle_ctrl_key(ui: &mut UiState, code: KeyCode) -> bool {
         KeyCode::Char('r') => ui.input.begin_search(),
         KeyCode::Char('l') => ui.chat_log.clear(),
         KeyCode::Char('y') => yank_last_bot_response(ui),
-        KeyCode::Home => ui.scroll_back = u16::MAX,
-        KeyCode::End => ui.scroll_back = 0,
+        KeyCode::Home => scroll_to_top(ui),
+        KeyCode::End => scroll_to_bottom(ui),
         _ => return false,
     }
     true
@@ -657,7 +667,8 @@ fn handle_enter(ui: &mut UiState, cmd_tx: &Sender<UserCmd>) -> Result<bool> {
     ui.generating = true;
     ui.turn_start = Some(Instant::now());
     ui.status = "generating…".to_string();
-    ui.scroll_back = 0;
+    // New turn — pin to bottom so the user sees the response stream in.
+    scroll_to_bottom(ui);
     cmd_tx
         .send(UserCmd::Send(trimmed.to_string()))
         .map_err(|e| anyhow::anyhow!("send: {}", e))?;
@@ -666,10 +677,35 @@ fn handle_enter(ui: &mut UiState, cmd_tx: &Sender<UserCmd>) -> Result<bool> {
 
 fn handle_mouse(ui: &mut UiState, m: MouseEvent) {
     match m.kind {
-        MouseEventKind::ScrollUp => ui.scroll_back = ui.scroll_back.saturating_add(3),
-        MouseEventKind::ScrollDown => ui.scroll_back = ui.scroll_back.saturating_sub(3),
+        MouseEventKind::ScrollUp => scroll_up_by(ui, 3),
+        MouseEventKind::ScrollDown => scroll_down_by(ui, 3),
         _ => {}
     }
+}
+
+/// Scroll the chat pane up by `n` wrapped lines. Detaches the viewport
+/// from the bottom so newly arriving tokens won't yank the user back.
+fn scroll_up_by(ui: &mut UiState, n: u16) {
+    ui.follow_bottom = false;
+    ui.scroll_offset = ui.scroll_offset.saturating_sub(n);
+}
+
+/// Scroll down by `n` wrapped lines. If the user goes past the last
+/// line, render_chat_pane will promote them to follow_bottom = true
+/// — we don't know `max_scroll` from here (no area info).
+fn scroll_down_by(ui: &mut UiState, n: u16) {
+    ui.follow_bottom = false;
+    ui.scroll_offset = ui.scroll_offset.saturating_add(n);
+}
+
+fn scroll_to_top(ui: &mut UiState) {
+    ui.follow_bottom = false;
+    ui.scroll_offset = 0;
+}
+
+fn scroll_to_bottom(ui: &mut UiState) {
+    ui.follow_bottom = true;
+    // scroll_offset gets clamped to max_scroll inside render_chat_pane.
 }
 
 // ── slash commands (with tab completion + typo suggestion) ──────────
@@ -892,7 +928,7 @@ fn persist_history_append(ui: &UiState, line: &str) {
 
 // ── rendering ───────────────────────────────────────────────────────
 
-fn render(f: &mut ratatui::Frame, ui: &UiState) {
+fn render(f: &mut ratatui::Frame, ui: &mut UiState) {
     let area = f.area();
 
     // Outer vertical: main area + status (1) + input (3).
@@ -919,10 +955,14 @@ fn render(f: &mut ratatui::Frame, ui: &UiState) {
     };
 
     render_chat_pane(f, ui, main_chunks[0]);
-    if main_chunks.len() > 1 {
-        render_dashboard_pane(f, ui, main_chunks[1]);
-    }
+    let dash_area_opt = (main_chunks.len() > 1).then(|| main_chunks[1]);
 
+    // Chat pane is the only renderer that needs &mut; everything below
+    // is read-only.
+    let ui: &UiState = ui;
+    if let Some(da) = dash_area_opt {
+        render_dashboard_pane(f, ui, da);
+    }
     render_status_bar(f, ui, outer[1]);
     render_input_box(f, ui, outer[2]);
     render_keyhint(f, ui, outer[3]);
@@ -934,7 +974,7 @@ fn render(f: &mut ratatui::Frame, ui: &UiState) {
     }
 }
 
-fn render_chat_pane(f: &mut ratatui::Frame, ui: &UiState, area: Rect) {
+fn render_chat_pane(f: &mut ratatui::Frame, ui: &mut UiState, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for msg in &ui.chat_log {
         append_message_lines(&mut lines, msg.role, &msg.content, false);
@@ -960,9 +1000,29 @@ fn render_chat_pane(f: &mut ratatui::Frame, ui: &UiState, area: Rect) {
                 .title(title)
                 .title_style(Style::default().add_modifier(Modifier::BOLD)),
         )
-        .wrap(Wrap { trim: false })
-        .scroll((ui.scroll_back, 0));
-    f.render_widget(para, area);
+        .wrap(Wrap { trim: false });
+
+    // ratatui's Paragraph.scroll((n, 0)) means "skip the first n
+    // wrapped lines". So the bottom-pinning offset is
+    // (total_wrapped_lines - viewport_height), saturated at zero.
+    let inner_w = area.width.saturating_sub(2); // borders eat 2 cells
+    let inner_h = area.height.saturating_sub(2);
+    let total_lines = para.line_count(inner_w) as u16;
+    let max_scroll = total_lines.saturating_sub(inner_h);
+
+    // Reconcile follow_bottom ↔ scroll_offset:
+    //   * follow_bottom = true  → renderer always shows the last line
+    //   * follow_bottom = false → user is reading older content
+    // If a key/wheel handler bumped scroll_offset past max_scroll
+    // (e.g. PageDown spam), promote them back to follow mode.
+    if ui.follow_bottom || ui.scroll_offset >= max_scroll {
+        ui.follow_bottom = true;
+        ui.scroll_offset = max_scroll;
+    } else {
+        ui.scroll_offset = ui.scroll_offset.min(max_scroll);
+    }
+
+    f.render_widget(para.scroll((ui.scroll_offset, 0)), area);
 }
 
 fn render_dashboard_pane(f: &mut ratatui::Frame, ui: &UiState, area: Rect) {
@@ -1030,10 +1090,15 @@ fn render_input_box(f: &mut ratatui::Frame, ui: &UiState, area: Rect) {
     );
     f.render_widget(para, area);
 
-    // Real terminal cursor at the right position.
+    // Real terminal cursor at the right position. Both the prompt
+    // prefix and the buffer-up-to-cursor are measured in *display
+    // columns* (terminal cells), so Korean / CJK / emoji glyphs that
+    // occupy 2 cells each don't make the cursor land mid-glyph and
+    // cause subsequent input to overlap the previous character.
     if !ui.generating && ui.input.search().is_none() {
-        let prefix_w = prompt_prefix.chars().count() as u16;
-        let cursor_x = area.x + 1 + prefix_w + ui.input.cursor_char() as u16;
+        use unicode_width::UnicodeWidthStr;
+        let prefix_w = UnicodeWidthStr::width(prompt_prefix) as u16;
+        let cursor_x = area.x + 1 + prefix_w + ui.input.cursor_display_col() as u16;
         let cursor_y = area.y + 1;
         f.set_cursor_position((cursor_x, cursor_y));
     }

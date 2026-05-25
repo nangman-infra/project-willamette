@@ -113,8 +113,18 @@ impl InputEditor {
 
     /// Cursor offset in *characters* — what the renderer needs to
     /// position the screen cursor. Always `<= buffer.chars().count()`.
+    #[allow(dead_code)]
     pub fn cursor_char(&self) -> usize {
         self.buffer[..self.cursor_byte].chars().count()
+    }
+
+    /// Cursor offset in *display columns* (terminal cells). Korean,
+    /// CJK, and emoji glyphs occupy 2 cells; ASCII occupies 1. The TUI
+    /// uses this — not cursor_char — to place the screen cursor, so
+    /// that subsequent CJK input doesn't overlap the previous glyph.
+    pub fn cursor_display_col(&self) -> usize {
+        use unicode_width::UnicodeWidthStr;
+        UnicodeWidthStr::width(&self.buffer[..self.cursor_byte])
     }
 
     /// Convenience predicate — used by tests and forthcoming UI
@@ -419,6 +429,42 @@ mod tests {
         assert_eq!(e.buffer(), "hi");
         assert_eq!(e.cursor_byte(), 2);
         assert_eq!(e.cursor_char(), 2);
+    }
+
+    #[test]
+    fn cursor_display_col_ascii_is_one_per_char() {
+        let mut e = InputEditor::new();
+        e.insert_str("hello");
+        assert_eq!(e.cursor_display_col(), 5);
+    }
+
+    #[test]
+    fn cursor_display_col_korean_is_two_per_char() {
+        // 한글 글자는 터미널에서 2 cells 폭. cursor_char() == 2
+        // 인데 cursor_display_col() == 4 가 되어야 다음 입력이
+        // 이전 글자 위에 겹치지 않는다.
+        let mut e = InputEditor::new();
+        e.insert_str("안녕");
+        assert_eq!(e.cursor_char(), 2);
+        assert_eq!(e.cursor_display_col(), 4);
+    }
+
+    #[test]
+    fn cursor_display_col_mixed_ascii_and_cjk() {
+        let mut e = InputEditor::new();
+        e.insert_str("hi 안녕"); // 2 + 1 + 2*2 = 7
+        assert_eq!(e.cursor_display_col(), 7);
+    }
+
+    #[test]
+    fn cursor_display_col_advances_with_each_codepoint() {
+        let mut e = InputEditor::new();
+        e.insert_char('안');
+        assert_eq!(e.cursor_display_col(), 2);
+        e.insert_char('녕');
+        assert_eq!(e.cursor_display_col(), 4);
+        e.move_left();
+        assert_eq!(e.cursor_display_col(), 2);
     }
 
     #[test]
