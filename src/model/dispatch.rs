@@ -140,14 +140,17 @@ fn select_kernel() -> Kernel {
         }
     }
 
-    // x86 / x86_64 SSE2 detection: the kernel itself doesn't exist
-    // yet (Stage 6-B). Until then we return Scalar but advertise
-    // `sse2` in `detected_features()` so the dashboard makes the
-    // upcoming capability visible.
-    //
-    // Once `bitlinear_sse2::matvec` lands, swap this arm to return
-    // `Kernel::X86Sse2` and add a route in
-    // `bitlinear::bitlinear_i2s_matvec_f32`.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        // Stage 6-B: route to the SSE2 BitLinear kernel when the host
+        // reports the feature. Pentium-M / antiX i686 falls here.
+        // bitlinear::bitlinear_i2s_matvec_f32 holds the matching
+        // `Kernel::X86Sse2` arm.
+        if std::arch::is_x86_feature_detected!("sse2") {
+            return Kernel::X86Sse2;
+        }
+    }
+
     Kernel::Scalar
 }
 

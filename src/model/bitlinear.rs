@@ -98,9 +98,15 @@ pub fn bitlinear_i2s_matvec_f32(
                 super::bitlinear_neon::bitlinear_i2s_matvec_f32_neon(weight, input, output)
             }
         }
-        // X86Sse2 currently never returned by select_kernel (Stage 6-B
-        // hasn't landed) but the arm exists so adding the SSE2 kernel
-        // is a single-line change in dispatch.rs.
+        // Stage 6-B: x86 / x86_64 SSE2 BitLinear matvec. Routed when
+        // `dispatch::select_kernel` saw SSE2 advertised on this host.
+        // `target_feature(enable = "sse2")` on the callee permits the
+        // compiler to emit SSE2 ops; the runtime detection in
+        // dispatch::select_kernel is what makes the unsafe call sound.
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        super::dispatch::Kernel::X86Sse2 => unsafe {
+            super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2(weight, input, output)
+        },
         _ => bitlinear_i2s_matvec_f32_scalar(weight, input, output),
     }
 }
