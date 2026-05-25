@@ -50,6 +50,7 @@
 
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #![allow(unsafe_op_in_unsafe_fn)] // intrinsic block reads tighter without a per-call unsafe.
+#![allow(clippy::needless_range_loop)] // mirrors bitlinear.rs / bitlinear_neon.rs — explicit row × block × chunk indexing is clearer than iterator chains in this hot kernel.
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
