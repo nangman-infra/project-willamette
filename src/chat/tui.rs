@@ -435,11 +435,7 @@ fn ui_loop(
 
 /// Dispatch one crossterm `Event` to the right handler.
 /// Returns `true` if the user requested quit.
-fn dispatch_event(
-    ui: &mut UiState,
-    evt: Event,
-    cmd_tx: &Sender<UserCmd>,
-) -> Result<bool> {
+fn dispatch_event(ui: &mut UiState, evt: Event, cmd_tx: &Sender<UserCmd>) -> Result<bool> {
     match evt {
         Event::Key(key) => handle_key(ui, key, cmd_tx),
         Event::Mouse(m) => {

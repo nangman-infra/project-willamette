@@ -1,0 +1,10 @@
+[toolchain]
+# Pin Rust toolchain so CI fmt / clippy and local dev agree.
+# Bumping this version is intentional — do it explicitly when you're
+# ready to re-format / re-lint across the whole codebase. Drift
+# between CI's `stable` (whatever the latest release happens to be)
+# and the developer's installed toolchain has cost us four CI fixes
+# in the v0.3.0 cycle alone.
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
