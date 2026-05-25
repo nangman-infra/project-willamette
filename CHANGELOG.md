@@ -25,6 +25,88 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.3.1-mvp] — 2026-05-25
+
+Patch release. Three user-reported usability bugs in the v0.3.0 chat
+TUI, plus a CI / refactor cleanup pass against the Sonar Quality Gate.
+
+### Fixed
+
+* **Korean / CJK input no longer overlaps the previous character.**
+  The screen cursor was placed at `prefix + cursor_char()`, but
+  `cursor_char()` counts codepoints while ratatui draws each Hangul
+  / CJK / emoji glyph in two terminal cells. Subsequent input landed
+  mid-glyph and visually overlapped. Replaced with a new
+  `InputEditor::cursor_display_col()` backed by the `unicode-width`
+  crate; the prompt prefix is now measured the same way for
+  symmetry. (`src/chat/input_editor.rs`, `src/chat/tui.rs`.)
+* **Auto-scroll: the chat pane now sticks to the bottom while
+  streaming.** Once the wrapped-line count exceeded the viewport
+  height the user only ever saw the first lines — newly streamed
+  tokens scrolled off-screen. Added a `follow_bottom` flag on
+  `UiState`; the renderer pins `scroll_offset` to
+  `total_lines - viewport_h` every frame when it's set, using
+  `Paragraph::line_count` (ratatui's `unstable-rendered-line-info`
+  feature). Scrolling up turns it off; Ctrl-End or scrolling down
+  past the last line turns it back on.
+* **Scroll keys + wheel were inverted.** `Paragraph::scroll((n, 0))`
+  is a top-skip count, not a "lines from bottom" offset, so PageUp /
+  wheel-up moved the view down and vice versa; Ctrl-Home pinned to
+  the bottom; Ctrl-End pinned to the top. Renamed
+  `UiState::scroll_back` → `scroll_offset` to match ratatui's
+  convention and routed all four entry points (PageUp/Down,
+  Ctrl-Home/End, wheel ↑/↓, mid-stream PageUp/Down) through helpers
+  (`scroll_up_by`, `scroll_down_by`, `scroll_to_top`,
+  `scroll_to_bottom`) that also flip `follow_bottom` correctly.
+
+### Changed
+
+#### CI hygiene
+* `rust-toolchain.toml` pins channel `1.94.0` so CI's `stable` (which
+  follows the latest release) stops drifting away from local fmt /
+  clippy output. The v0.3.0 cycle alone cost four "Rust 1.95 fmt /
+  clippy drift" CI fixes — the pin removes that cost permanently.
+* Quality Gate breakdown step now uses the CE-task → analysisId →
+  project_status flow with `Authorization: Bearer …` (the previous
+  `-u TOKEN:` basic-auth call silently returned the SonarQube SPA
+  HTML on the API endpoints, so gate failures only surfaced as an
+  opaque `FAILED` exit). Diagnostic output now lists each failed
+  condition by metric + threshold.
+
+#### Refactor (no behaviour change)
+* Five functions split to clear `rust:S3776` Cognitive Complexity
+  ≤ 15: `chat/dashboard.rs::render_lines` (18 → six section
+  helpers), `chat/engine.rs::stream_assistant_response` (19 → emit
+  / cancel / finalize helpers + free-fn `flush_safe_window`),
+  `chat/tui.rs::handle_key_normal` (18 → `handle_ctrl_key` +
+  `handle_enter`), `chat/tui.rs::handle_slash` (18 →
+  `handle_slash_sys` + `handle_unknown_slash` +
+  `nearest_slash_command`), and `model/cached_forward.rs::
+  forward_with_cache_progress` (26 → `validate_cache_inputs`,
+  `forward_one_layer`, `scaled_dot_product_attention`,
+  `apply_ffn_block`, `check_finite_hidden` + a private `LayerCtx`
+  struct for per-token scalars).
+* Byte-parity vs `bitnet.cpp` preserved on the hot path: verified
+  by `tests/kv_cache.rs` (3), `tests/multi_token.rs` (5),
+  `tests/forward.rs` (3).
+* `is_aarch64_feature_detected!` macro now triple-cfg-gated for
+  aarch64 / x86_64 / other so x86 CI hosts build the active_kernel
+  string without referencing the macro.
+
+### Tests
+
+* Suite total: **276** (was 272 at v0.3.0-mvp).
+* `+4` new in `chat::input_editor::tests` covering
+  `cursor_display_col` on ASCII, Hangul, mixed, and per-codepoint
+  advancement.
+
+### Dependencies
+
+* `unicode-width = "0.2"` — explicit dep (was transitive via
+  ratatui); used by both `chat/input_editor.rs` and `chat/tui.rs`.
+* `ratatui` now opts into the `unstable-rendered-line-info` feature
+  for `Paragraph::line_count`.
+
 ## [v0.3.0-mvp] — 2026-05-25
 
 Minor release: operator-grade chat TUI.
