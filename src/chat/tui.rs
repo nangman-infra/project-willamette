@@ -280,44 +280,11 @@ pub fn run_tui(mut engine: ChatEngine<'_, '_>, max_new_tokens: usize) -> Result<
 }
 
 fn initial_dashboard_state(engine: &ChatEngine<'_, '_>, max_new_tokens: usize) -> DashboardState {
-    let arch = std::env::consts::ARCH;
-    // The `is_aarch64_feature_detected!` and `is_x86_feature_detected!`
-    // macros are themselves arch-gated — they only expand to anything
-    // useful when the *compile* target matches. Wrap each in `cfg` so
-    // the file builds on every supported host (CI runs x86_64 Linux).
-    let active_kernel: String = {
-        #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                "aarch64 NEON".to_string()
-            } else {
-                "aarch64 scalar".to_string()
-            }
-        }
-        #[cfg(target_arch = "x86_64")]
-        {
-            "x86_64 scalar".to_string()
-        }
-        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-        {
-            format!("{} scalar", arch)
-        }
-    };
-    let _ = arch; // suppress unused-variable warning on x86_64/aarch64 branches.
-
-    // Detect optional SIMD features for display dots.
-    let mut features: Vec<(&'static str, bool)> = Vec::new();
-    #[cfg(target_arch = "aarch64")]
-    {
-        features.push(("neon", std::arch::is_aarch64_feature_detected!("neon")));
-        // dotprod is unstable in std arch detection; just mark as unknown.
-        features.push(("dotprod", false));
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        features.push(("sse2", std::arch::is_x86_feature_detected!("sse2")));
-        features.push(("avx2", std::arch::is_x86_feature_detected!("avx2")));
-    }
+    // Single source of truth for both the dashboard label and the
+    // matvec dispatch — see `src/model/dispatch.rs`. Whatever runs
+    // on the matvec hot path is what gets displayed here.
+    let active_kernel = crate::model::dispatch::active_kernel().label().to_string();
+    let features = crate::model::dispatch::detected_features();
 
     let sampler = engine.sampler();
     let sp = sampler.params_clone();

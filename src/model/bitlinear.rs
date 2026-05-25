@@ -69,32 +69,40 @@ pub fn bitlinear_i2s_matvec_f32(
     input: &[f32],
     output: &mut [f32],
 ) -> Result<(), WillametteError> {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Stage 10-D finding: an int8-activation kernel
-        // (`bitlinear_i2s_matvec_f32_neon_i8`) was implemented and is
-        // numerically correct (greedy decode produces identical
-        // tokens to scalar on Stage 5-E reference prompts). But on
-        // stable Rust the `vdotq_s32` SDOT instruction is gated
-        // behind the unstable `stdarch_neon_dotprod` feature, forcing
-        // a `vmull_s8`-based widening dot product. Across 20-sample
-        // decode-step averages on Apple M1 the int8 path ran at 7.82
-        // tok/sec vs the f32-input NEON path's 7.91 tok/sec — a
-        // measured regression. We keep the int8 code present (use it
-        // by enabling RUSTFLAGS="--cfg willamette_i8_activations"
-        // when nightly dotprod stabilises) and default to f32-NEON.
-        if std::arch::is_aarch64_feature_detected!("neon") {
+    // Single source of truth for kernel selection — see
+    // `src/model/dispatch.rs`. The first call resolves CPU features
+    // once and caches the choice; subsequent calls are an atomic
+    // pointer load. Dashboard `active_kernel` label comes from the
+    // same place, so they can't drift apart.
+    match super::dispatch::active_kernel() {
+        #[cfg(target_arch = "aarch64")]
+        super::dispatch::Kernel::AArch64Neon => {
+            // Stage 10-D finding: an int8-activation kernel
+            // (`bitlinear_i2s_matvec_f32_neon_i8`) was implemented and is
+            // numerically correct (greedy decode produces identical
+            // tokens to scalar on Stage 5-E reference prompts). But on
+            // stable Rust the `vdotq_s32` SDOT instruction is gated
+            // behind the unstable `stdarch_neon_dotprod` feature, forcing
+            // a `vmull_s8`-based widening dot product. Across 20-sample
+            // decode-step averages on Apple M1 the int8 path ran at 7.82
+            // tok/sec vs the f32-input NEON path's 7.91 tok/sec — a
+            // measured regression. Default is f32-NEON; switch to the
+            // int8 path with `RUSTFLAGS="--cfg willamette_i8_activations"`
+            // once nightly dotprod stabilises.
             #[cfg(willamette_i8_activations)]
             return unsafe {
                 super::bitlinear_neon::bitlinear_i2s_matvec_f32_neon_i8(weight, input, output)
             };
             #[cfg(not(willamette_i8_activations))]
-            return unsafe {
+            unsafe {
                 super::bitlinear_neon::bitlinear_i2s_matvec_f32_neon(weight, input, output)
-            };
+            }
         }
+        // X86Sse2 currently never returned by select_kernel (Stage 6-B
+        // hasn't landed) but the arm exists so adding the SSE2 kernel
+        // is a single-line change in dispatch.rs.
+        _ => bitlinear_i2s_matvec_f32_scalar(weight, input, output),
     }
-    bitlinear_i2s_matvec_f32_scalar(weight, input, output)
 }
 
 /// Scalar reference matvec (pre-Stage 6 path). Always available; used

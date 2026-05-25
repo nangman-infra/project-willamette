@@ -904,29 +904,10 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
 
     let n_embd = graph.config.embedding_length as usize;
-    let host_arch = if cfg!(target_arch = "aarch64") {
-        "aarch64 (Apple Silicon / ARM64)"
-    } else if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else {
-        "unknown"
-    };
-
-    // Report which BitLinear backend the matvec dispatcher will pick.
-    let backend = {
-        #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                "aarch64 NEON (Stage 6-C)"
-            } else {
-                "scalar fallback (Stage 6-A)"
-            }
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            "scalar fallback (Stage 6-A)"
-        }
-    };
+    // Both fields come from the dispatch module so the bench banner
+    // can never disagree with what the matvec loop actually calls.
+    let host_arch = std::env::consts::ARCH;
+    let backend = project_willamette::model::dispatch::active_kernel().label();
 
     println!("==================================================");
     println!("Bench (Stage 6 — BitLinear matvec timings)");

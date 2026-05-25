@@ -10,6 +10,7 @@ pub mod bitlinear_neon;
 pub mod block;
 pub mod cached_forward;
 pub mod config;
+pub mod dispatch;
 pub mod ffn;
 pub mod forward;
 pub mod generate;
