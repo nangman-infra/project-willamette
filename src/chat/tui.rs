@@ -732,50 +732,53 @@ fn handle_slash(ui: &mut UiState, cmd: &str, cmd_tx: &Sender<UserCmd>) -> Result
             ui.chat_log.clear();
             Ok(false)
         }
-        "sys" => {
-            if rest.is_empty() {
-                ui.flash("usage: /sys <text>  or  /sys off");
-                return Ok(false);
-            }
-            let payload = if rest == "off" {
-                None
-            } else {
-                Some(rest.to_string())
-            };
-            cmd_tx
-                .send(UserCmd::SetSys(payload.clone()))
-                .map_err(|e| anyhow::anyhow!("sys: {}", e))?;
-            ui.dashboard.system_prompt = payload.clone();
-            ui.chat_log.push(DisplayMsg {
-                role: Role::System,
-                content: if payload.is_some() {
-                    format!(
-                        "[system prompt set ({} chars) — takes effect after next /reset]",
-                        rest.len()
-                    )
-                } else {
-                    "[system prompt cleared]".to_string()
-                },
-            });
-            Ok(false)
-        }
+        "sys" => handle_slash_sys(ui, rest, cmd_tx),
         other => {
-            // Typo suggestion via Levenshtein distance.
-            let mut best: Option<(&&str, usize)> = None;
-            for known in KNOWN_SLASH_COMMANDS {
-                let d = levenshtein(other, known);
-                if d <= 2 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
-                    best = Some((known, d));
-                }
-            }
-            if let Some((sugg, _)) = best {
-                ui.flash(format!("unknown /{} — did you mean /{}?", other, sugg));
-            } else {
-                ui.flash(format!("unknown /{} (try /help)", other));
-            }
+            handle_unknown_slash(ui, other);
             Ok(false)
         }
     }
+}
+
+fn handle_slash_sys(ui: &mut UiState, rest: &str, cmd_tx: &Sender<UserCmd>) -> Result<bool> {
+    if rest.is_empty() {
+        ui.flash("usage: /sys <text>  or  /sys off");
+        return Ok(false);
+    }
+    let payload = (rest != "off").then(|| rest.to_string());
+    cmd_tx
+        .send(UserCmd::SetSys(payload.clone()))
+        .map_err(|e| anyhow::anyhow!("sys: {}", e))?;
+    ui.dashboard.system_prompt = payload.clone();
+    let content = match &payload {
+        Some(_) => format!(
+            "[system prompt set ({} chars) — takes effect after next /reset]",
+            rest.len()
+        ),
+        None => "[system prompt cleared]".to_string(),
+    };
+    ui.chat_log.push(DisplayMsg {
+        role: Role::System,
+        content,
+    });
+    Ok(false)
+}
+
+fn handle_unknown_slash(ui: &mut UiState, other: &str) {
+    let suggestion = nearest_slash_command(other);
+    match suggestion {
+        Some(sugg) => ui.flash(format!("unknown /{} — did you mean /{}?", other, sugg)),
+        None => ui.flash(format!("unknown /{} (try /help)", other)),
+    }
+}
+
+fn nearest_slash_command(input: &str) -> Option<&'static str> {
+    KNOWN_SLASH_COMMANDS
+        .iter()
+        .map(|known| (*known, levenshtein(input, known)))
+        .filter(|(_, d)| *d <= 2)
+        .min_by_key(|(_, d)| *d)
+        .map(|(name, _)| name)
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
