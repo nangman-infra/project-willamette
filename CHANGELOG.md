@@ -25,6 +25,74 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.2.3-mvp] — 2026-05-25
+
+Patch release: three TUI / chat readability fixes after real-session
+feedback on v0.2.2.
+
+### Fixed
+* **Emoji clutter in chat output.** The base model often writes
+  trailing pictograph clusters (`😊👍🏻💬📚✨` etc.) lifted from
+  social-media training data. They show up everywhere and don't
+  add information. `is_emoji_char(char)` covers the major emoji
+  blocks (plus ZWJ + variation selectors); `strip_emoji_chars`
+  filters them from both the live tick stream and the recorded
+  history. The model still emits the underlying tokens so the KV
+  cache stays in sync with what it thinks it said; we just hide
+  the visual noise.
+* **`User:` leak on screen.** v0.2.2's stop-sequence detection
+  worked at the *history* level — next turn's prefill saw clean
+  text — but the bytes that triggered detection (`User:`,
+  `BITNETAssistant:`, …) had already streamed to the caller's
+  `tick` callback and were visible on screen for the truncated
+  turn. v0.2.3 holds back a 24-byte look-ahead buffer, sliding
+  it forward each step; if a stop sequence appears in the
+  buffered tail, the tail is discarded before it can be ticked.
+  Trade-off: ~24 bytes (3-6 words) of streaming latency. The
+  surface output is now genuinely clean.
+
+### Added
+* **Markdown rendering in the TUI.** `src/chat/markdown.rs` —
+  new ~160-LoC inline renderer maps `**bold**`,
+  `` `inline code` ``, `# heading`, `- bullet`, `1. numbered`,
+  with leading whitespace preserved, onto `ratatui::Line`/`Span`
+  styled output. BOT messages and the live streaming response
+  both go through it; USR / SYS bubbles stay plain text.
+* `append_message_lines` helper in `src/chat/tui.rs` — the role
+  badge is prepended to the first body line; continuation lines
+  align under the badge; the streaming path appends a green `▌`
+  cursor so the user can see generation is live.
+* `floor_char_boundary` inline helper in `src/chat/engine.rs` —
+  the unstable `str::floor_char_boundary` is unavailable on
+  stable Rust, so we provide our own. Used by the look-ahead
+  buffer to snap the safe-emit boundary onto a UTF-8 char so we
+  never tick a half-codepoint.
+
+### Tests
+* Total: **242** (v0.2.2 had 221 — 21 new this cycle).
+  * 14 new in `src/chat/markdown.rs::tests` — bold, inline code,
+    bullet (`-` and `*`), numbered, multidigit, heading,
+    indented bullet, indent preservation, plain pass-through,
+    unclosed-bold-stays-literal, period-in-version-not-list,
+    multiple lines, realistic Korean-history multi-line.
+  * 7 new in `src/chat/engine.rs::stop_sequence_tests` —
+    `is_emoji_char` for pictographs and CJK preservation,
+    `strip_emoji_chars` for trailing clutter / Korean
+    interleave / ZWJ sequences, `floor_char_boundary` on ASCII
+    and Korean.
+* Coverage: SonarQube `new_coverage` stays at 100 % on v0.2.x
+  new code; the new modules are unit-tested in-CI without the
+  real model file.
+
+### Notes
+* No public-API change. No CLI flag change. No numeric inference
+  change. Reference parity with pinned bitnet.cpp on Stage 5-E
+  prompts is preserved.
+* `--no-emoji` / `--no-markdown` CLI flags intentionally not
+  added — the cleaner output is the right default for a chat
+  surface. If a future use-case ever needs them they're easy to
+  graft onto `ChatArgs`.
+
 ## [v0.2.2-mvp] — 2026-05-25
 
 Patch release: chat usability + honest in-CI coverage.
