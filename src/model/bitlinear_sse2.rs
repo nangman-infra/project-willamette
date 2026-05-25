@@ -55,16 +55,14 @@
 #[cfg(target_arch = "x86")]
 use core::arch::x86::{
     __m128, __m128i, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_castsi128_ps, _mm_cmpeq_epi32,
-    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setr_ps,
-    _mm_setzero_ps, _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16,
-    _mm_unpacklo_epi8,
+    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setzero_ps,
+    _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
     __m128, __m128i, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_castsi128_ps, _mm_cmpeq_epi32,
-    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setr_ps,
-    _mm_setzero_ps, _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16,
-    _mm_unpacklo_epi8,
+    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setzero_ps,
+    _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
 
 use crate::error::WillametteError;
@@ -253,6 +251,10 @@ unsafe fn hsum_ps(v: __m128) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_arch = "x86")]
+    use core::arch::x86::_mm_setr_ps;
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::_mm_setr_ps;
 
     #[test]
     fn code_to_ternary_matches_scalar_helper() {
