@@ -272,17 +272,29 @@ pub fn run_tui(mut engine: ChatEngine<'_, '_>, max_new_tokens: usize) -> Result<
 
 fn initial_dashboard_state(engine: &ChatEngine<'_, '_>, max_new_tokens: usize) -> DashboardState {
     let arch = std::env::consts::ARCH;
-    let active_kernel = if arch == "aarch64" {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            "aarch64 NEON".to_string()
-        } else {
-            "aarch64 scalar".to_string()
+    // The `is_aarch64_feature_detected!` and `is_x86_feature_detected!`
+    // macros are themselves arch-gated — they only expand to anything
+    // useful when the *compile* target matches. Wrap each in `cfg` so
+    // the file builds on every supported host (CI runs x86_64 Linux).
+    let active_kernel: String = {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                "aarch64 NEON".to_string()
+            } else {
+                "aarch64 scalar".to_string()
+            }
         }
-    } else if arch == "x86_64" {
-        "x86_64 scalar".to_string()
-    } else {
-        format!("{} scalar", arch)
+        #[cfg(target_arch = "x86_64")]
+        {
+            "x86_64 scalar".to_string()
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            format!("{} scalar", arch)
+        }
     };
+    let _ = arch; // suppress unused-variable warning on x86_64/aarch64 branches.
 
     // Detect optional SIMD features for display dots.
     let mut features: Vec<(&'static str, bool)> = Vec::new();
