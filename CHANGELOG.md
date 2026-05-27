@@ -25,6 +25,93 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.6.0-mvp] — 2026-05-27
+
+Minor release: synthetic GGUF builder for humble-hardware throughput
+benchmarks + scaling data + thesis sweet-spot redefinition.
+
+### Why this release exists
+
+Microsoft only published the 2 B variant of BitNet b1.58. Every
+community reproduction at 70 M – 200 M (e.g. `nijil-k/Bitnet-1.58b-
+Nous-Llama2-70M`, `Chris4K/bitnet-gpt2-1.58bit`) is a Llama 2 / GPT-2
+architecture + BitLinear finetune in `f32` safetensors — none of them
+parse as BitNet b1.58 GGUF, so we can't compare ourselves to them
+directly. To measure throughput in the same scale band as
+TinyLlama / TinyStories 110 M (Karpathy's model the EXO Labs Pentium
+II 350 MHz demo runs), we need to build a BitNet b1.58 GGUF at that
+size ourselves. This release ships the builder.
+
+### Added
+
+#### `willamette synth-gguf` CLI subcommand
+* New `src/synth.rs` library module — `Preset::{Tiny, Small, Medium}`
+  + `build_gguf(preset, random_weights)` writing a complete BitNet
+  b1.58 GGUF byte buffer.
+* `Tiny` ≈ 73 KB (the existing in-CI synthetic, unchanged behaviour:
+  all-zero ternary weights so `tests/synthetic_model.rs`'s numerical
+  assertions still hold).
+* `Small` ≈ 7 M params (256-d embedding, 6 layers, 12 000 vocab).
+* `Medium` ≈ 110 M params (768-d embedding, 12 layers, 32 000 vocab)
+  — same scale class as `tinyllamas/stories110M.bin`.
+* `Small` / `Medium` use random ternary weights drawn from an inline
+  64-bit xorshift PRNG seeded by the preset config. Same seed → bit-
+  identical GGUF across hosts. No new external dependencies.
+* The synthetic GGUF has NO tokenizer metadata, so `inspect` and
+  `bench` work against it, but `run` / `chat` / `tui` will reject
+  it. This is by design — random ternary weights produce garbage
+  tokens. Keeping the tool inside [[feedback-no-fake]]: we never
+  claim *quality*, only *throughput*.
+
+#### 4-point scaling table
+* [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) extended with
+  Pentium-M antix1 and Mac M1 NEON measurements at the three synth
+  preset sizes plus the real 2 B model. New conclusions:
+  * On antix1, `params × tok/s ≈ 500 M` is constant across the four
+    points — clean linear scaling, BitLinear matvec dominates.
+  * The Mac M1 ÷ antix1 ratio grows 8.8× → 26.4× → 65.8× with model
+    size, because the cache hierarchy diverges once weights stop
+    fitting in antix1's 2 MB L2.
+  * Direct cross-architecture comparison vs EXO Labs' Pentium II
+    demonstration: same-cycle efficiency advantage of **2.6×** for
+    BitNet 1.58 + SSE2 over vanilla Llama 2 + no-SIMD.
+
+#### Sweet-spot redefinition
+* README and `_internal/VISION.md` updated. The old "medium 1 B – 13 B
+  on humble hardware" formulation was tier-blind. The 2026-05-27
+  measurement makes the coupling explicit: on Pentium-M-class SSE2
+  hardware the practical ceilings are **~100 M params for chat
+  speed**, **~500 M for slow-but-usable**, **~5 B for
+  demonstration**. Modern AVX2 / multi-core hosts shift every
+  threshold ~1 order of magnitude up, restoring the aspirational
+  range.
+
+### Fixed
+
+* `cmd_bench` no longer hard-codes `in_dim=2560, out_dim=2560` in
+  the matvec banner — reads from the actual `attn_q.shape` so the
+  Throughput / Time numbers are consistent on any model size.
+* `cmd_bench` no longer hard-codes token id 15339 (Llama-3
+  "Hello") as the probe — that crashed on Tiny preset's vocab=4.
+  Now clamps to 0 when vocab ≤ 15339. Doesn't change throughput on
+  the real BitNet 2B (any embedding row is fine).
+* `cmd_bench` banner reads `graph.config.block_count` instead of
+  the literal "30 layers" string.
+
+### Tests
+
+* Suite total: **284** (was 279). `+5` in `src/synth::tests` cover
+  preset dimensions, parameter-count estimation accuracy for
+  Medium, byte-stability across builds, and PRNG legal-code range.
+
+### Compatibility
+
+* No API removals. Existing `inspect` / `run` / `bench` / `chat` /
+  `tui` against the real BitNet 2B model are unchanged.
+* New CLI surface (`synth-gguf`) — that's the minor-version
+  trigger. No flag changes elsewhere.
+* aarch64 NEON and x86 SSE2 dispatch paths identical to v0.5.0.
+
 ## [v0.5.0-mvp] — 2026-05-25
 
 Minor release: Stage 6-B SSE2 BitLinear kernel lands. First time

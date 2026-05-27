@@ -1,13 +1,22 @@
 # Project Willamette
 
-**Thesis:** medium-sized publicly-released LLMs (1B – 13B parameters)
-run on **CPU-only humble hardware** — older laptops, low-RAM thin
-clients, retro x86, Raspberry-Pi-class ARM — without a GPU. The
-proof is two binaries: an offline **`willamette-prep`** that bakes
-a model down to a hardware-aware form, and an online
-**`willamette`** runtime that just executes the baked form. The
-runtime is Rust, uses zero-copy `mmap`, and targets ARM + x86_64 +
-i686 (eventually MMX-era), validated on emulators.
+**Thesis:** mid-sized publicly-released LLMs run on **CPU-only
+humble hardware** — older laptops, low-RAM thin clients, retro x86,
+Raspberry-Pi-class ARM — without a GPU. The proof is two binaries:
+an offline **`willamette-prep`** that bakes a model down to a
+hardware-aware form, and an online **`willamette`** runtime that
+just executes the baked form. The runtime is Rust, uses zero-copy
+`mmap`, and targets ARM + x86_64 + i686 (eventually MMX-era),
+validated on real hardware (antiX on Pentium-M today) and on
+emulators (QEMU / 86Box).
+
+> **Sweet spot is hardware-dependent.** On Pentium-M-class SSE2
+> hardware (the verified floor at 2026-05-27) the measured ceiling
+> is roughly **100 M params for chat speed (≥ 5 tok/s)**, **500 M
+> for "slow but usable" (≥ 1 tok/s)**, **5 B for demonstration
+> (≥ 0.1 tok/s)**. Modern AVX2 / multi-core moves every threshold an
+> order of magnitude up. Full scaling table and the EXO Pentium-II
+> comparison: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 Starting point: [microsoft/BitNet-b1.58-2B-4T](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T)
 in its `ggml-model-i2_s.gguf` form (1.58-bit ternary weights) — the
