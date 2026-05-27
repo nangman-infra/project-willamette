@@ -1,6 +1,6 @@
 [package]
 name = "project-willamette"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "Rust-native, mmap-backed runtime for the official microsoft/BitNet-b1.58-2B-4T 1.58-bit GGUF."
 license = "MIT OR Apache-2.0"

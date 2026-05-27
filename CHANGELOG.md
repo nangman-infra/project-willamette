@@ -25,6 +25,34 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.7.1-mvp] — 2026-05-27
+
+Patch release. v0.7.0-mvp's prebuilt binaries are fine (i8 kernel
+works; greedy output verified), but the v0.7.0 tag commit's CI
+Quality Checks were red: the `matvec_column_stride_32_mapping` unit
+test broke when i8 became the x86 default. This patch carries the
+fix so the release tag points at a green commit.
+
+### Fixed
+
+* `model::bitlinear::tests::matvec_column_stride_32_mapping` now calls
+  `bitlinear_i2s_matvec_f32_scalar` directly instead of the dispatch
+  entry point. The test mixes activation magnitudes 1.0 … 1000.0 to
+  read out each ternary code's contribution exactly; with i8 the
+  default x86 kernel, absmax int8 quantisation rounds the 1.0 entry
+  to 0 next to the 1000.0 entry — correct i8 behaviour, but it
+  defeats a *mapping*-correctness check. The check is kernel-agnostic
+  (column-stride-32 unpacking), so scalar is the right reference. The
+  i8 path's numerical fidelity stays covered by
+  `tests/bitlinear_sse2_i8.rs`. Only on x86 (Mac/aarch64 kept NEON
+  f32 as default, so it passed there).
+
+### Unchanged from v0.7.0
+
+* i8 activation kernel is the x86 default (2.2× over f32 on
+  Pentium-M, byte-identical greedy output). No kernel or dispatch
+  change in this patch — test-only.
+
 ## [v0.7.0-mvp] — 2026-05-27
 
 Minor release: SSE2 int8 activation kernel, now the x86 default —
