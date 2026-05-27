@@ -33,6 +33,50 @@ within ±10 % (warm-cache decode-step variance).
 | OS | Debian 12 bookworm + antiX kernel `5.10.224-antix.1-486-smp` |
 | Toolchain | i686-unknown-linux-musl, cross-built on the CI runner |
 
+## 2026-05-27 — Sparsity experiment (negative result, kept on purpose)
+
+BitNet ternary weights are ~42% zero, and a zero contributes nothing
+to the dot product, so skipping zeros *seems* like free speed. We
+tested it. It isn't — at least not on antix1 with a scalar sparse
+kernel.
+
+### Ternary distribution (`willamette analyze`, real 2B)
+
+| value | count | fraction |
+| --- | ---: | ---: |
+| -1 | 602,163,685 | 28.89% |
+| **0** | 879,693,294 | **42.21%** |
+| +1 | 602,187,821 | 28.90% |
+
+42% zeros = the theoretical ceiling on what skipping could save.
+
+### Dense i8 vs CSR-sparse scalar matvec (attn_q, 50.4% non-zero)
+
+| host | dense | sparse | result |
+| --- | ---: | ---: | --- |
+| Mac M1 (NEON) | 0.82 ms | 2.92 ms | sparse **3.55× slower** |
+| antix1 (SSE2 i8) | 15.54 ms | 15.75 ms | sparse **1.01× slower (tie)** |
+
+The dense kernel processes 100% of elements but 16-wide SIMD and
+regularly; the sparse kernel processes ~50% but one-at-a-time scalar
+with irregular gather. On antix1 the "half the work" win and the
+"scalar + irregular" loss almost exactly cancel → a tie. On the M1's
+fast NEON, dense wins outright.
+
+### What it tells us
+
+* **Skipping zeros does not help on antix1** with a scalar sparse
+  kernel — net zero. Not worth the added format complexity here.
+* **But the trend is real**: Mac 3.55× → antix1 1.01×. The slower /
+  simpler the CPU's SIMD, the more sparse closes the gap. On a CPU
+  *below* antix1 (Pentium II, 486, no SIMD), sparse would likely
+  *win* — the dense SIMD advantage that beats it here would be gone.
+* So sparse isn't dead; it's a **"lowest-tier hardware" optimization**
+  that needs a host below antix1 to pay off. Revisit when a Pentium-II
+  / SIMD-less machine is in hand (2nd-tier hardware track).
+
+i8 (the dense default, scalar→i8 ≈ 5.4×) stays the antix1 optimum.
+
 ## 2026-05-27 — i8 activation kernel (now the x86 default)
 
 profiling (below) showed BitLinear matvec is **96.35%** of decode-step
