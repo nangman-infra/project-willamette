@@ -105,6 +105,15 @@ pub fn bitlinear_i2s_matvec_f32(
         // dispatch::select_kernel is what makes the unsafe call sound.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         super::dispatch::Kernel::X86Sse2 => unsafe {
+            // Default is the f32 mask-add kernel (bit-close to scalar).
+            // `--cfg willamette_i8_activations` switches to the int8
+            // activation path — faster on memory-bandwidth-bound hosts
+            // (Pentium-M profiling: matvec is 96 % of runtime) at the
+            // cost of activation-quantisation error. Same opt-in shape
+            // as the NEON arm above. Bench both with / without the cfg.
+            #[cfg(willamette_i8_activations)]
+            return super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2_i8(weight, input, output);
+            #[cfg(not(willamette_i8_activations))]
             super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2(weight, input, output)
         },
         _ => bitlinear_i2s_matvec_f32_scalar(weight, input, output),

@@ -54,15 +54,21 @@
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::{
-    __m128, __m128i, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_castsi128_ps, _mm_cmpeq_epi32,
-    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setzero_ps,
-    _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
+    __m128, __m128i, _mm_add_epi32, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_and_si128,
+    _mm_castsi128_ps, _mm_cmpeq_epi32, _mm_cmpeq_epi8, _mm_cvtsi32_si128, _mm_cvtss_f32,
+    _mm_loadu_ps, _mm_loadu_si128, _mm_madd_epi16, _mm_movehl_ps, _mm_or_si128, _mm_set1_epi16,
+    _mm_set1_epi32, _mm_set1_epi8, _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_ps,
+    _mm_srai_epi16, _mm_srai_epi32, _mm_storeu_si128, _mm_sub_epi8, _mm_unpackhi_epi8,
+    _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m128, __m128i, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_castsi128_ps, _mm_cmpeq_epi32,
-    _mm_cvtsi32_si128, _mm_cvtss_f32, _mm_loadu_ps, _mm_movehl_ps, _mm_set1_epi32, _mm_setzero_ps,
-    _mm_shuffle_ps, _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
+    __m128, __m128i, _mm_add_epi32, _mm_add_ps, _mm_add_ss, _mm_and_ps, _mm_and_si128,
+    _mm_castsi128_ps, _mm_cmpeq_epi32, _mm_cmpeq_epi8, _mm_cvtsi32_si128, _mm_cvtss_f32,
+    _mm_loadu_ps, _mm_loadu_si128, _mm_madd_epi16, _mm_movehl_ps, _mm_or_si128, _mm_set1_epi16,
+    _mm_set1_epi32, _mm_set1_epi8, _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_ps,
+    _mm_srai_epi16, _mm_srai_epi32, _mm_storeu_si128, _mm_sub_epi8, _mm_unpackhi_epi8,
+    _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
 
 use crate::error::WillametteError;
@@ -246,6 +252,137 @@ unsafe fn hsum_ps(v: __m128) -> f32 {
     let shuf2 = _mm_movehl_ps(sums, sums);
     let final_ = _mm_add_ss(sums, shuf2);
     _mm_cvtss_f32(final_)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// i8 activation path (Stage 6-B follow-up)
+//
+// Mirror of `bitlinear_neon::bitlinear_i2s_matvec_f32_neon_i8`. Instead
+// of keeping the activation in f32 and doing a masked f32 add, we
+// quantise the activation to i8 once (absmax-per-vector scale) and run
+// the dot product entirely in integer lanes. Two wins on Pentium-M:
+//
+//   1. No per-element i8 → i32 → f32 sign-extend + convert in the
+//      inner loop (that conversion is a big chunk of the f32 kernel's
+//      96 %-of-runtime cost — see docs/BENCHMARKS.md profiling).
+//   2. 16 i8 lanes per 128-bit register vs 4 f32 lanes.
+//
+// Ternary weights mean no real multiply: the product is just the
+// activation, its negation, or zero — selected by compare-masks.
+// Accumulation widens i8 → i16 (sign-extended) and folds into i32 via
+// `_mm_madd_epi16(_, 1)`, which can't overflow across a 128-block.
+//
+// Numerical note: this path is NOT bit-identical to the f32 mask-add
+// kernel — the activation is quantised to int8 (the same lossy step
+// the production bitnet.cpp CPU path takes). Equivalence is checked at
+// the documented tolerance in `tests/bitlinear_sse2_i8.rs`.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Quantise an f32 activation vector to i8 via absmax-per-vector scale.
+/// Returns `s` such that `f32_x ≈ s * i8_x`. Identical logic to the
+/// NEON path's `quantize_input_absmax_i8` (kept local to avoid coupling
+/// the two arch modules).
+fn quantize_input_absmax_i8(input: &[f32], out: &mut [i8]) -> f32 {
+    let mut max_abs = 0.0_f32;
+    for &v in input {
+        let a = v.abs();
+        if a > max_abs {
+            max_abs = a;
+        }
+    }
+    if max_abs == 0.0 {
+        for slot in out.iter_mut() {
+            *slot = 0;
+        }
+        return 1.0;
+    }
+    let inv_scale = 127.0_f32 / max_abs;
+    for (i, &v) in input.iter().enumerate() {
+        out[i] = (v * inv_scale).round().clamp(-127.0, 127.0) as i8;
+    }
+    max_abs / 127.0
+}
+
+/// SSE2 BitLinear matvec with int8 activations. Same contract / shape
+/// validation as the f32 entry point.
+///
+/// # Safety
+///
+/// Caller must ensure `is_x86_feature_detected!("sse2")`.
+#[target_feature(enable = "sse2")]
+pub unsafe fn bitlinear_i2s_matvec_f32_sse2_i8(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), WillametteError> {
+    let (in_dim, out_dim) = validate_inputs(weight, input, output)?;
+    let bytes_per_row = in_dim / 4;
+    let blocks_per_row = in_dim / QK_I2_S;
+    let w_scale = weight.i2s_scale()?;
+    let packed = weight.data;
+
+    // Quantise the activation once for the whole matvec.
+    let mut act = vec![0_i8; in_dim];
+    let input_scale = quantize_input_absmax_i8(input, &mut act);
+    let combined = w_scale * input_scale;
+
+    for j in 0..out_dim {
+        let row_offset = j * bytes_per_row;
+        let mut dot: i32 = 0;
+        for bk in 0..blocks_per_row {
+            let block_offset = row_offset + bk * PACKED_BYTES_PER_BLOCK;
+            let col_base = bk * QK_I2_S;
+            let unpacked =
+                unpack_block(&packed[block_offset..block_offset + PACKED_BYTES_PER_BLOCK]);
+            dot += dot_i8_ternary(&unpacked, &act[col_base..col_base + QK_I2_S]);
+        }
+        output[j] = combined * dot as f32;
+    }
+    Ok(())
+}
+
+/// Integer dot product of one 128-element block: ternary weights
+/// (`-1 / 0 / +1`) against i8 activations, returning i32. `weight` and
+/// `act` are both `QK_I2_S` long.
+///
+/// # Safety
+///
+/// SSE2 feature gate is the caller's responsibility.
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn dot_i8_ternary(weight: &[i8; QK_I2_S], act: &[i8]) -> i32 {
+    let ones = _mm_set1_epi8(1);
+    let neg_ones = _mm_set1_epi8(-1);
+    let zero = _mm_setzero_si128();
+    let ones16 = _mm_set1_epi16(1);
+    let mut acc = _mm_setzero_si128();
+
+    let mut i = 0;
+    while i + 16 <= QK_I2_S {
+        let w = _mm_loadu_si128(weight.as_ptr().add(i) as *const __m128i);
+        let x = _mm_loadu_si128(act.as_ptr().add(i) as *const __m128i);
+
+        // product = +x where w==+1, -x where w==-1, 0 where w==0.
+        // Activation is clamped to [-127, 127], so negate never hits
+        // the i8 -128 overflow corner.
+        let pos = _mm_cmpeq_epi8(w, ones);
+        let neg = _mm_cmpeq_epi8(w, neg_ones);
+        let neg_x = _mm_sub_epi8(zero, x);
+        let prod = _mm_or_si128(_mm_and_si128(x, pos), _mm_and_si128(neg_x, neg));
+
+        // Sign-extend i8 → i16 (low + high halves), then fold to i32.
+        // madd_epi16(v, 1) = pairwise i16 adds → i32, overflow-free
+        // across a 128-element block (max |sum| ≤ 128·127 < 2^31).
+        let lo = _mm_srai_epi16(_mm_unpacklo_epi8(prod, prod), 8);
+        let hi = _mm_srai_epi16(_mm_unpackhi_epi8(prod, prod), 8);
+        acc = _mm_add_epi32(acc, _mm_madd_epi16(lo, ones16));
+        acc = _mm_add_epi32(acc, _mm_madd_epi16(hi, ones16));
+        i += 16;
+    }
+
+    let mut lanes = [0_i32; 4];
+    _mm_storeu_si128(lanes.as_mut_ptr() as *mut __m128i, acc);
+    lanes[0] + lanes[1] + lanes[2] + lanes[3]
 }
 
 #[cfg(test)]
