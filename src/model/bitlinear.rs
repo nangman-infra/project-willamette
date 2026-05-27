@@ -431,7 +431,15 @@ mod tests {
         input[96] = 1000.0; // contributes +1 × 1000.0
 
         let mut out = vec![0.0_f32; 1];
-        bitlinear_i2s_matvec_f32(&w, &input, &mut out).unwrap();
+        // Call the scalar kernel directly, NOT the dispatch entry: this
+        // test mixes input magnitudes 1.0 … 1000.0 to read out each
+        // code's contribution exactly. The x86 default i8 kernel
+        // absmax-quantises the activation, so the 1.0 entry rounds to
+        // int8 0 next to the 1000.0 entry — correct behaviour for i8,
+        // but it would defeat this *mapping*-correctness check. The i8
+        // path's numerical fidelity is covered separately by
+        // tests/bitlinear_sse2_i8.rs.
+        bitlinear_i2s_matvec_f32_scalar(&w, &input, &mut out).unwrap();
         // Expected: 1.0 - 10.0 + 0 + 1000.0 = 991.0
         assert!(
             (out[0] - 991.0).abs() < 1e-4,
