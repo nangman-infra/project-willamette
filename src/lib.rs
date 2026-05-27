@@ -20,4 +20,5 @@ pub mod error;
 pub mod gguf;
 pub mod memory;
 pub mod model;
+pub mod synth;
 pub mod tokenizer;

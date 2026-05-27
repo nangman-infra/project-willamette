@@ -210,6 +210,47 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         decode_steps: usize,
     },
+    /// Build a synthetic BitNet b1.58 GGUF file for throughput
+    /// benchmarking on humble hardware. No tokenizer; random ternary
+    /// weights (Preset::Small / Medium) or all-zero
+    /// (Preset::Tiny). Output is NOT useful for `run` / `chat` /
+    /// `tui` — only for `inspect` and `bench`. See `src/synth.rs`.
+    SynthGguf {
+        /// Where to write the GGUF file.
+        #[arg(long)]
+        output: PathBuf,
+        /// Size preset. `medium` ≈ 110 M params (TinyLlama scale,
+        /// same class as EXO's Pentium-II demo model).
+        #[arg(long, default_value_t = SynthPreset::Medium)]
+        preset: SynthPreset,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SynthPreset {
+    Tiny,
+    Small,
+    Medium,
+}
+
+impl std::fmt::Display for SynthPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SynthPreset::Tiny => "tiny",
+            SynthPreset::Small => "small",
+            SynthPreset::Medium => "medium",
+        })
+    }
+}
+
+impl From<SynthPreset> for project_willamette::synth::Preset {
+    fn from(p: SynthPreset) -> Self {
+        match p {
+            SynthPreset::Tiny => project_willamette::synth::Preset::Tiny,
+            SynthPreset::Small => project_willamette::synth::Preset::Small,
+            SynthPreset::Medium => project_willamette::synth::Preset::Medium,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -257,6 +298,7 @@ fn main() -> Result<()> {
         } => cmd_logits(&model, &prompt, top_k, no_bos),
         Command::Chat { chat } => cmd_chat(&chat),
         Command::Tui { chat } => cmd_tui(&chat),
+        Command::SynthGguf { output, preset } => cmd_synth_gguf(&output, preset.into()),
     }
 }
 
@@ -945,7 +987,10 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     let _hidden = forward_single_token_position_zero(&graph, 15339)
         .map_err(|e| anyhow::anyhow!("forward: {}", e))?;
     let forward_ms = t.elapsed().as_secs_f64() * 1000.0;
-    println!("Single-token forward (30 layers, no cache):");
+    println!(
+        "Single-token forward ({} layers, no cache):",
+        graph.config.block_count
+    );
     println!("  Time:           {:.1} ms", forward_ms);
     println!("  Throughput:     {:.2} tokens/sec", 1000.0 / forward_ms);
     println!();
@@ -1068,4 +1113,39 @@ fn truncate(s: &str, max: usize) -> String {
         let body: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{}…", body)
     }
+}
+
+fn cmd_synth_gguf(output: &Path, preset: project_willamette::synth::Preset) -> Result<()> {
+    let cfg = preset.config();
+    let est = project_willamette::synth::estimated_params(&cfg);
+
+    println!("==================================================");
+    println!("Synthetic BitNet b1.58 GGUF builder");
+    println!("==================================================");
+    println!("Preset:           {}", preset.name());
+    println!("Estimated params: {} ({:.1} M)", est, est as f64 / 1e6);
+    println!(
+        "Layers:           {}  n_embd: {}  n_ff: {}  heads: {}  vocab: {}",
+        cfg.n_layers, cfg.n_embd, cfg.n_ff, cfg.head_count, cfg.vocab_size
+    );
+
+    // Tiny preset keeps the all-zero weights so the existing test
+    // suite's numerical assertions stay valid. Small / Medium are
+    // explicitly for throughput measurement and need real ternary
+    // distribution to exercise the matvec data path.
+    let random_weights = !matches!(preset, project_willamette::synth::Preset::Tiny);
+    let bytes = project_willamette::synth::build_gguf(preset, random_weights);
+    std::fs::write(output, &bytes)
+        .with_context(|| format!("write synthetic GGUF to {}", output.display()))?;
+    println!(
+        "Output:           {} ({:.1} MB)",
+        output.display(),
+        bytes.len() as f64 / 1e6
+    );
+    println!(
+        "Note:             No tokenizer in this file. `inspect` and `bench` work; \
+         `run`/`chat`/`tui` will not — random ternary weights produce garbage tokens \
+         by construction (see src/synth.rs)."
+    );
+    Ok(())
 }
