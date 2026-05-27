@@ -73,11 +73,20 @@ impl Kernel {
                 _ => "scalar (generic)",
             },
             Kernel::AArch64Neon => "aarch64 NEON",
-            Kernel::X86Sse2 => match std::env::consts::ARCH {
-                "x86_64" => "x86_64 SSE2",
-                "x86" => "i686 SSE2",
-                _ => "x86 SSE2",
-            },
+            // Variant suffix reflects which SSE2 kernel bitlinear.rs
+            // routes to: i8 activation path by default, f32 mask-add
+            // under `--cfg willamette_sse2_f32`.
+            Kernel::X86Sse2 => {
+                let f32_path = cfg!(willamette_sse2_f32);
+                match (std::env::consts::ARCH, f32_path) {
+                    ("x86_64", false) => "x86_64 SSE2 (i8)",
+                    ("x86_64", true) => "x86_64 SSE2 (f32)",
+                    ("x86", false) => "i686 SSE2 (i8)",
+                    ("x86", true) => "i686 SSE2 (f32)",
+                    (_, false) => "x86 SSE2 (i8)",
+                    (_, true) => "x86 SSE2 (f32)",
+                }
+            }
         }
     }
 }

@@ -105,16 +105,21 @@ pub fn bitlinear_i2s_matvec_f32(
         // dispatch::select_kernel is what makes the unsafe call sound.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         super::dispatch::Kernel::X86Sse2 => unsafe {
-            // Default is the f32 mask-add kernel (bit-close to scalar).
-            // `--cfg willamette_i8_activations` switches to the int8
-            // activation path — faster on memory-bandwidth-bound hosts
-            // (Pentium-M profiling: matvec is 96 % of runtime) at the
-            // cost of activation-quantisation error. Same opt-in shape
-            // as the NEON arm above. Bench both with / without the cfg.
-            #[cfg(willamette_i8_activations)]
-            return super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2_i8(weight, input, output);
-            #[cfg(not(willamette_i8_activations))]
-            super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2(weight, input, output)
+            // i8 activation kernel is the DEFAULT on x86. Measured on
+            // antix1 (Pentium-M): 2.2× faster than the f32 mask-add
+            // path (docs/BENCHMARKS.md), and greedy decode on the real
+            // 2B model produces byte-identical tokens to f32 (20/20 on
+            // "The capital of France is" — int8 quantisation never
+            // flipped an argmax). Unlike NEON (where i8 was slower so
+            // f32 stays default), x86 i8 wins outright.
+            //
+            // The f32 mask-add kernel (bit-close to scalar) stays
+            // available under `--cfg willamette_sse2_f32` for
+            // debugging / numerical reference.
+            #[cfg(willamette_sse2_f32)]
+            return super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2(weight, input, output);
+            #[cfg(not(willamette_sse2_f32))]
+            super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2_i8(weight, input, output)
         },
         _ => bitlinear_i2s_matvec_f32_scalar(weight, input, output),
     }

@@ -43,4 +43,5 @@ strip = true
 # Declared cfgs that are intentionally optional (not Cargo features).
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(willamette_i8_activations)",
+    "cfg(willamette_sse2_f32)",
 ] }
