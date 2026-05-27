@@ -25,6 +25,73 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.7.0-mvp] — 2026-05-27
+
+Minor release: SSE2 int8 activation kernel, now the x86 default —
+2.2× faster on Pentium-M with byte-identical greedy output.
+
+### Why
+
+Profiling on antix1 (Pentium-M) showed BitLinear matvec is **96.35%**
+of decode-step runtime, and a large part of that was the f32 kernel's
+per-element `i8 → i32 → f32` sign-extend + convert in the inner loop.
+
+### Added
+
+* `bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2_i8` — int8 activation
+  SSE2 BitLinear kernel. Quantises the activation to int8 once
+  (absmax-per-vector, same as the NEON i8 path), then runs the dot
+  product in integer lanes: ternary weights need no multiply (product
+  is `+x / -x / 0` via `cmpeq_epi8` masks + `sub_epi8` negate), i8
+  products sign-extend to i16 and fold to i32 via `madd_epi16`. 16 i8
+  lanes/instruction vs the f32 kernel's 4, no f32 convert in the loop.
+* `tests/bitlinear_sse2_i8.rs` — parity vs scalar at cosine > 0.999,
+  max-relative-error < 5% (looser than the f32 kernel's 1e-2 absolute
+  because int8 activation is lossy — the same step bitnet.cpp's
+  production CPU path takes).
+
+### Changed
+
+* **i8 is now the x86 default kernel.** `bitlinear.rs` X86Sse2 arm
+  routes to the i8 kernel by default; the f32 mask-add kernel stays
+  behind `--cfg willamette_sse2_f32` for numerical reference. Unlike
+  NEON (where i8 was slightly slower, so f32 stays default), x86 i8
+  wins on both speed and fidelity.
+* `dispatch::Kernel::X86Sse2` label now shows the active variant —
+  `"i686 SSE2 (i8)"` vs `"... (f32)"` — so the bench banner / dashboard
+  report which kernel ran.
+* Every prebuilt x86 binary (x86_64 + i686 musl) now ships the 2.2×
+  kernel automatically.
+
+### Performance (antix1, Pentium-M, measured)
+
+| Model | f32 SSE2 | i8 SSE2 | speed-up |
+| --- | ---: | ---: | ---: |
+| synth 110M decode | 4.60 tok/s | 10.1 tok/s | 2.2× |
+| real 2B decode | 0.19 tok/s | 0.41 tok/s | 2.15× |
+
+Cumulative over scalar: ≈ 5.4×. Chat-speed (≥ 5 tok/s) ceiling on
+Pentium-M moves from ~100M to ~220M params.
+
+### Fidelity
+
+Greedy decode on the real 2B model (`"The capital of France is"`, 20
+tokens, temp 0) produced **byte-identical token sequences** for f32
+and i8 — int8 quantisation never flipped an argmax. Full numbers in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+### Tests
+
+* Suite: **288** (was 284) — `+4` in `tests/bitlinear_sse2_i8.rs`
+  (x86-gated; skip without the real model file).
+
+### Compatibility
+
+* No API change. aarch64 NEON / scalar paths untouched.
+* x86 users get the speed-up by upgrading; output unchanged on the
+  verified prompt. `--cfg willamette_sse2_f32` restores the old f32
+  kernel if a bit-close-to-scalar reference is needed.
+
 ## [v0.6.0-mvp] — 2026-05-27
 
 Minor release: synthetic GGUF builder for humble-hardware throughput

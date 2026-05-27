@@ -33,6 +33,58 @@ within ±10 % (warm-cache decode-step variance).
 | OS | Debian 12 bookworm + antiX kernel `5.10.224-antix.1-486-smp` |
 | Toolchain | i686-unknown-linux-musl, cross-built on the CI runner |
 
+## 2026-05-27 — i8 activation kernel (now the x86 default)
+
+profiling (below) showed BitLinear matvec is **96.35%** of decode-step
+runtime on antix1, and a chunk of that was the f32 kernel's
+per-element `i8 → i32 → f32` sign-extend + convert. The i8 activation
+kernel removes that: quantise the activation to int8 once, run the dot
+product in integer lanes (16 i8/instr vs 4 f32/instr), no f32 convert
+in the inner loop.
+
+### Speed (antix1, Pentium-M, same session)
+
+| Model | f32 SSE2 | i8 SSE2 | speed-up |
+| --- | ---: | ---: | ---: |
+| synth 110M — matvec | 1.456 ms | 0.668 ms | 2.18× |
+| synth 110M — decode | 4.60 tok/s | **10.1 tok/s** | **2.2×** |
+| real 2B — matvec | 15.27 ms | 7.19 ms | 2.12× |
+| real 2B — decode | 0.19 tok/s | **0.41 tok/s** | **2.15×** |
+
+Cumulative: `scalar → f32 SSE2 (2.49×) → i8 SSE2 (2.2×)` ≈ **5.4×**
+over the scalar reference.
+
+### Fidelity — greedy decode is byte-identical
+
+int8 activation is lossy, so the question is whether it changes the
+*output*. It doesn't (at least here). Real 2B, prompt
+`"The capital of France is"`, 20 tokens, temperature 0:
+
+```
+f32: [12366,13,12366,374,264,3363,430,374,3967,369,
+      1202,9257,3925,11,7829,11,323,18112,13,1102]
+i8:  [12366,13,12366,374,264,3363,430,374,3967,369,
+      1202,9257,3925,11,7829,11,323,18112,13,1102]   ← identical
+```
+
+Both decode to *"Paris. Paris is a city that is known for its rich
+history, culture, and architecture. It"*. The int8 quantisation never
+flipped an argmax over 20 steps. The unit test
+`tests/bitlinear_sse2_i8.rs` backs this at the matvec level
+(cosine > 0.999, max-rel < 5% vs scalar). Caveat: one prompt — not a
+perplexity sweep.
+
+### Decision
+
+i8 is now the **x86 default** (`bitlinear.rs` X86Sse2 arm). Unlike
+NEON — where i8 was slightly *slower* so f32 stays default — x86 i8
+wins on both speed and fidelity. The f32 mask-add kernel stays behind
+`--cfg willamette_sse2_f32` for numerical reference. Every prebuilt
+x86 binary (x86_64 + i686 musl) now ships the 2.2× kernel.
+
+Effect on the sweet spot: chat speed (≥ 5 tok/s) ceiling on Pentium-M
+moves from ~100M to **~220M params**.
+
 ## 2026-05-27 — Head-to-head vs llama2.c on the SAME machine
 
 The earlier EXO comparison normalised across two different CPUs
