@@ -33,6 +33,70 @@ within ±10 % (warm-cache decode-step variance).
 | OS | Debian 12 bookworm + antiX kernel `5.10.224-antix.1-486-smp` |
 | Toolchain | i686-unknown-linux-musl, cross-built on the CI runner |
 
+## 2026-05-27 — Head-to-head vs llama2.c on the SAME machine
+
+The earlier EXO comparison normalised across two different CPUs
+(Pentium II 350 MHz vs our Pentium-M 2 GHz) with a calculated
+hardware-correction factor. This section removes that estimate
+entirely: Karpathy's `llama2.c` (the engine EXO's demo is built on)
+is a single C file, so it compiles and runs on **antix1 itself**.
+Same CPU, same SSE2 (gcc `-O3 -march=native` → `__SSE2__` confirmed),
+same model size class. Pure architecture + quantization difference.
+
+### Setup
+
+* `llama2.c` @ `karpathy/llama2.c`, `gcc -O3 -march=native -o run run.c -lm`.
+* Models from `karpathy/tinyllamas`: `stories15M` (58 MB f32),
+  `stories42M` (160 MB), `stories110M` (419 MB).
+* `./run <model>.bin -n 256 -i "Once upon a time"`, reading the
+  reported `achieved tok/s`.
+* Our side: `willamette synth-gguf --preset {small|medium}` then
+  `willamette bench --decode-steps 3`, reading decode-step tok/s.
+
+### Result (antix1, Pentium-M, SSE2 both sides)
+
+| Model size | llama2.c (vanilla Llama 2, f32) | willamette (BitNet b1.58, ternary) | willamette advantage |
+| ---: | ---: | ---: | ---: |
+| 7 M (ours) / 15 M (theirs) | 17.4 tok/s @ 15 M | 103.6 tok/s @ 7 M | params·tok/s: 2.8× |
+| 42 M | 6.50 tok/s | — | — |
+| **110 M** | **2.51 tok/s** | **4.96 tok/s** | **1.97× faster** |
+
+The clean number is the 110 M row — closest size match, both
+measured directly: **BitNet b1.58 + our SSE2 kernel is ~2× faster
+than vanilla Llama 2 f32 + gcc-autovectorized SSE2 on the same
+21-year-old-class CPU.** The earlier hardware-normalised estimate
+(2.6×) was in the right ballpark; the direct measurement lands at
+1.97×.
+
+### Why — and a corrected earlier claim
+
+An earlier revision of this doc speculated that "110 M is below the
+BitNet sweet spot, so vanilla might win there". **That was wrong, and
+the measurement says so.** At 110 M:
+
+* `stories110M.bin` (f32) is 419 MB. Our packed BitNet 110 M is
+  70.6 MB — 6× smaller on the bus.
+* Both blow past antix1's 2 MB L2, so both are memory-bandwidth
+  bound on the decode step — and the 6× smaller weight stream is
+  exactly where ternary packing pays off. The BitNet memory
+  advantage is already active at 110 M, not only at 2 B.
+
+### Honest caveats
+
+* Our synthetic 110 M has **random ternary weights** — it cannot
+  write the coherent TinyStories text `stories110M` produces. We
+  compare **throughput only**; tok/s is independent of weight
+  *values* (compute is fixed by architecture + size). We make no
+  quality claim — see [[feedback-no-fake]].
+* The architectures aren't identical: our BitNet b1.58 has the
+  extra `attn_sub_norm` / `ffn_sub_norm` RMSNorms vanilla Llama 2
+  lacks, so our forward does slightly *more* norm work per layer.
+  The 1.97× is achieved despite that, not because of a lighter
+  graph.
+* Both are single-threaded here (antix1 is 1 core). On a
+  multi-core humble host `llama2.c` has OpenMP and we have rayon;
+  that comparison is future work.
+
 ## 2026-05-27 — Scaling sweep across 4 model sizes
 
 How throughput scales with model size on the same hardware. Built via
