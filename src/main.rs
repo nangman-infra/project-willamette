@@ -961,30 +961,47 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     println!("Vocab size:       {}", graph.config.vocab_size);
     println!();
 
+    // Hard-coded token id 15339 ("Hello" in Llama-3 tokenizer) is fine
+    // for the real BitNet 2B (vocab 128256) and the synthetic Medium
+    // preset (vocab 32000), but tiny / small / future-small presets
+    // have smaller vocabs. Clamp into range — every position in the
+    // embedding table produces a valid f32 vector regardless of which
+    // row we pick. Throughput numbers are unaffected.
+    let bench_token = if graph.config.vocab_size > 15339 {
+        15339
+    } else {
+        0
+    };
+
     // ── 1) Single BitLinear I2_S matvec (attn_q in layer 0) ──
     let mut x = vec![0.0_f32; n_embd];
-    embedding_gather_f16(graph.token_embd, 15339, &mut x)
+    embedding_gather_f16(graph.token_embd, bench_token, &mut x)
         .map_err(|e| anyhow::anyhow!("embed: {}", e))?;
-    let mut q = vec![0.0_f32; n_embd];
+    let attn_q = graph.layers[0].attn_q;
+    let mv_in = attn_q.shape[0] as usize;
+    let mv_out = attn_q.shape[1] as usize;
+    let mut q = vec![0.0_f32; mv_out];
 
     // Warm-up run.
-    bitlinear_i2s_matvec_f32(graph.layers[0].attn_q, &x, &mut q)
+    bitlinear_i2s_matvec_f32(attn_q, &x, &mut q)
         .map_err(|e| anyhow::anyhow!("warm-up matvec: {}", e))?;
     let t = Instant::now();
-    bitlinear_i2s_matvec_f32(graph.layers[0].attn_q, &x, &mut q)
-        .map_err(|e| anyhow::anyhow!("matvec: {}", e))?;
+    bitlinear_i2s_matvec_f32(attn_q, &x, &mut q).map_err(|e| anyhow::anyhow!("matvec: {}", e))?;
     let matvec_ms = t.elapsed().as_secs_f64() * 1000.0;
-    println!("BitLinear matvec (attn_q, in_dim=2560, out_dim=2560):");
+    println!(
+        "BitLinear matvec (attn_q, in_dim={}, out_dim={}):",
+        mv_in, mv_out
+    );
     println!("  Time:           {:.3} ms", matvec_ms);
     println!(
         "  Throughput:     {:.2} M elements / sec",
-        (2560.0 * 2560.0) / (matvec_ms / 1000.0) / 1.0e6
+        (mv_in as f64 * mv_out as f64) / (matvec_ms / 1000.0) / 1.0e6
     );
     println!();
 
     // ── 2) Single-token full forward (no cache) ──
     let t = Instant::now();
-    let _hidden = forward_single_token_position_zero(&graph, 15339)
+    let _hidden = forward_single_token_position_zero(&graph, bench_token)
         .map_err(|e| anyhow::anyhow!("forward: {}", e))?;
     let forward_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!(
@@ -999,14 +1016,14 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     let kv_dim = graph.config.kv_dim as usize;
     let mut cache = KVCache::new(graph.layers.len(), kv_dim, decode_steps + 8);
     // Warm-up: prefill 1 token.
-    let _ = forward_with_cache(&graph, &mut cache, 15339, 0)
+    let _ = forward_with_cache(&graph, &mut cache, bench_token, 0)
         .map_err(|e| anyhow::anyhow!("prefill: {}", e))?;
 
     let mut decode_total = 0.0_f64;
     let mut samples = 0usize;
     for step in 0..decode_steps {
         let t = Instant::now();
-        let _ = forward_with_cache(&graph, &mut cache, 15339, (step + 1) as u32)
+        let _ = forward_with_cache(&graph, &mut cache, bench_token, (step + 1) as u32)
             .map_err(|e| anyhow::anyhow!("decode step: {}", e))?;
         decode_total += t.elapsed().as_secs_f64();
         samples += 1;
