@@ -7,6 +7,7 @@ pub mod attention;
 pub mod bitlinear;
 #[cfg(target_arch = "aarch64")]
 pub mod bitlinear_neon;
+pub mod bitlinear_sparse;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod bitlinear_sse2;
 pub mod block;

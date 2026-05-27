@@ -101,6 +101,14 @@ enum Command {
         #[arg(long)]
         model: PathBuf,
     },
+    /// Ternary weight distribution analysis — counts -1 / 0 / +1 across
+    /// every BitLinear (I2_S) tensor. The zero fraction is the upper
+    /// bound on what sparsity-aware skipping could save.
+    Analyze {
+        /// Path to the .gguf model file.
+        #[arg(long)]
+        model: PathBuf,
+    },
     /// Stage 2: encode + decode text using the model's GGUF tokenizer metadata.
     ///
     /// Prints token IDs, decoded text, and roundtrip status. Refuses to run if
@@ -257,6 +265,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Inspect { model } => cmd_inspect(&model),
+        Command::Analyze { model } => cmd_analyze(&model),
         Command::Tokenize {
             model,
             text,
@@ -1040,11 +1049,46 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     println!("  Time:           {:.1} ms", decode_avg_ms);
     println!("  Throughput:     {:.2} tokens/sec", 1000.0 / decode_avg_ms);
     println!();
-    println!("Tolerance vs scalar reference is documented in");
-    println!("tests/bitlinear_simd.rs (max abs diff < 1e-2 across the");
-    println!("210 BitLinear weights of layer 0). Re-run with");
-    println!("RUST_LOG=info cargo test --release bitlinear_simd to see");
-    println!("the per-tensor numbers.");
+    // ── 4) Sparse prototype: dense i8 vs CSR-sparse on attn_q ──
+    {
+        use project_willamette::model::bitlinear_sparse::{
+            quantize_input_absmax_i8, sparse_matvec_i8, SparseWeight,
+        };
+        let sparse =
+            SparseWeight::from_i2s(attn_q).map_err(|e| anyhow::anyhow!("sparse build: {}", e))?;
+        let nnz = sparse.nnz();
+        let total = mv_in * mv_out;
+        let nnz_pct = 100.0 * nnz as f64 / total as f64;
+
+        let mut act = vec![0_i8; mv_in];
+        let in_scale = quantize_input_absmax_i8(&x, &mut act);
+        let mut sp_out = vec![0.0_f32; mv_out];
+        // warm-up
+        sparse_matvec_i8(&sparse, &act, in_scale, &mut sp_out)
+            .map_err(|e| anyhow::anyhow!("sparse warm: {}", e))?;
+        let t = Instant::now();
+        sparse_matvec_i8(&sparse, &act, in_scale, &mut sp_out)
+            .map_err(|e| anyhow::anyhow!("sparse matvec: {}", e))?;
+        let sparse_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        println!();
+        println!("Sparse prototype (attn_q, CSR, scalar over non-zeros):");
+        println!("  Non-zeros:      {} / {} ({:.1}%)", nnz, total, nnz_pct);
+        println!("  Sparse matvec:  {:.3} ms", sparse_ms);
+        println!("  Dense i8 matvec: {:.3} ms (from section 1)", matvec_ms);
+        if sparse_ms < matvec_ms {
+            println!("  → sparse FASTER by {:.2}×", matvec_ms / sparse_ms);
+        } else {
+            println!(
+                "  → sparse SLOWER by {:.2}× (irregular access beat the skip)",
+                sparse_ms / matvec_ms
+            );
+        }
+    }
+
+    println!();
+    println!("Dense kernel tolerance vs scalar is documented in");
+    println!("tests/bitlinear_simd.rs / bitlinear_sse2_i8.rs.");
     Ok(())
 }
 
@@ -1130,6 +1174,66 @@ fn truncate(s: &str, max: usize) -> String {
         let body: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{}…", body)
     }
+}
+
+fn cmd_analyze(path: &Path) -> Result<()> {
+    let mmap =
+        ModelMmap::open(path).with_context(|| format!("opening model file: {}", path.display()))?;
+    let gguf =
+        GgufFile::parse(mmap.as_bytes()).map_err(|e| anyhow::anyhow!("GGUF parse error: {}", e))?;
+    let graph = ModelGraph::from_gguf(&gguf)
+        .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+
+    // Count the four 2-bit codes packed in every byte of each BitLinear
+    // tensor. Code 0b00 → -1, 0b10 → +1, 0b01 / 0b11 → 0. (The trailing
+    // 32-byte scale block per tensor is negligible: 32 B × 210 tensors.)
+    let mut neg = 0_u64;
+    let mut zero = 0_u64;
+    let mut pos = 0_u64;
+    for layer in &graph.layers {
+        for w in [
+            layer.attn_q,
+            layer.attn_k,
+            layer.attn_v,
+            layer.attn_output,
+            layer.ffn_gate,
+            layer.ffn_up,
+            layer.ffn_down,
+        ] {
+            for &b in w.data {
+                for shift in [6_u8, 4, 2, 0] {
+                    match (b >> shift) & 0b11 {
+                        0b00 => neg += 1,
+                        0b10 => pos += 1,
+                        _ => zero += 1,
+                    }
+                }
+            }
+        }
+    }
+    let total = neg + zero + pos;
+    let pct = |x: u64| 100.0 * x as f64 / total.max(1) as f64;
+
+    println!("==================================================");
+    println!("Ternary weight distribution");
+    println!("==================================================");
+    println!("Model:   {}", path.display());
+    println!("Layers:  {}", graph.config.block_count);
+    println!("Ternary values (BitLinear only): {}", total);
+    println!();
+    println!("  -1 : {:>14}  ({:.2}%)", neg, pct(neg));
+    println!("   0 : {:>14}  ({:.2}%)", zero, pct(zero));
+    println!("  +1 : {:>14}  ({:.2}%)", pos, pct(pos));
+    println!();
+    println!(
+        "Zero fraction = {:.2}%  →  upper bound on what sparsity skipping could save",
+        pct(zero)
+    );
+    println!(
+        "Nonzero      = {:.2}%  →  the work a sparse kernel would actually do",
+        pct(neg + pos)
+    );
+    Ok(())
 }
 
 fn cmd_synth_gguf(output: &Path, preset: project_willamette::synth::Preset) -> Result<()> {
