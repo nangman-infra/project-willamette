@@ -40,36 +40,69 @@ pub struct SparseWeight {
     pub signs: Vec<i8>,
 }
 
+/// Shape / dtype validation for `from_i2s`. Returns `(in_dim, out_dim)`.
+/// Extracted so the builder stays under the cognitive-complexity limit.
+fn validate_i2s_2d(weight: &TensorView<'_>) -> Result<(usize, usize), WillametteError> {
+    if weight.ggml_type != GgmlType::BitNetI2S {
+        return Err(WillametteError::UnsupportedTensorType(
+            weight.ggml_type.to_raw(),
+        ));
+    }
+    if weight.shape.len() != 2 {
+        return Err(WillametteError::GgufParse(format!(
+            "sparse from_i2s: weight {:?} not 2-D",
+            weight.name
+        )));
+    }
+    let in_dim = weight.shape[0] as usize;
+    let out_dim = weight.shape[1] as usize;
+    if in_dim == 0 || !in_dim.is_multiple_of(QK_I2_S) {
+        return Err(WillametteError::GgufParse(format!(
+            "sparse from_i2s: in_dim {} not a positive multiple of {}",
+            in_dim, QK_I2_S
+        )));
+    }
+    if in_dim > u16::MAX as usize {
+        return Err(WillametteError::GgufParse(format!(
+            "sparse from_i2s: in_dim {} exceeds u16 column index",
+            in_dim
+        )));
+    }
+    Ok((in_dim, out_dim))
+}
+
+/// Append the non-zero (column, sign) pairs of one packed row to the
+/// CSR `cols` / `signs` arrays. Uses the same column-stride-32 mapping
+/// as the dense path (`c0 → gp`, `c1 → 32+gp`, `c2 → 64+gp`,
+/// `c3 → 96+gp`).
+fn append_row_nonzeros(
+    row: &[u8],
+    blocks_per_row: usize,
+    cols: &mut Vec<u16>,
+    signs: &mut Vec<i8>,
+) {
+    for bk in 0..blocks_per_row {
+        let block_offset = bk * PACKED_BYTES_PER_BLOCK;
+        let col_base = bk * QK_I2_S;
+        for gp in 0..PACKED_BYTES_PER_BLOCK {
+            let b = row[block_offset + gp];
+            for (shift, sub) in [(6_u8, 0_usize), (4, 32), (2, 64), (0, 96)] {
+                let t = ternary_from_code((b >> shift) & 0b11);
+                if t != 0 {
+                    cols.push((col_base + sub + gp) as u16);
+                    signs.push(t);
+                }
+            }
+        }
+    }
+}
+
 impl SparseWeight {
     /// Build the sparse view from a packed I2_S tensor. This is the
     /// "offline preprocessing" step (done once, would live in
     /// willamette-prep) — drops every zero weight.
     pub fn from_i2s(weight: &TensorView<'_>) -> Result<Self, WillametteError> {
-        if weight.ggml_type != GgmlType::BitNetI2S {
-            return Err(WillametteError::UnsupportedTensorType(
-                weight.ggml_type.to_raw(),
-            ));
-        }
-        if weight.shape.len() != 2 {
-            return Err(WillametteError::GgufParse(format!(
-                "sparse from_i2s: weight {:?} not 2-D",
-                weight.name
-            )));
-        }
-        let in_dim = weight.shape[0] as usize;
-        let out_dim = weight.shape[1] as usize;
-        if in_dim == 0 || !in_dim.is_multiple_of(QK_I2_S) {
-            return Err(WillametteError::GgufParse(format!(
-                "sparse from_i2s: in_dim {} not a positive multiple of {}",
-                in_dim, QK_I2_S
-            )));
-        }
-        if in_dim > u16::MAX as usize {
-            return Err(WillametteError::GgufParse(format!(
-                "sparse from_i2s: in_dim {} exceeds u16 column index",
-                in_dim
-            )));
-        }
+        let (in_dim, out_dim) = validate_i2s_2d(weight)?;
         let scale = weight.i2s_scale()?;
         let packed = weight.data;
         let bytes_per_row = in_dim / 4;
@@ -82,21 +115,8 @@ impl SparseWeight {
 
         for j in 0..out_dim {
             let row_offset = j * bytes_per_row;
-            for bk in 0..blocks_per_row {
-                let block_offset = row_offset + bk * PACKED_BYTES_PER_BLOCK;
-                let col_base = bk * QK_I2_S;
-                for gp in 0..PACKED_BYTES_PER_BLOCK {
-                    let b = packed[block_offset + gp];
-                    // Same column-stride-32 mapping as the dense path.
-                    for (shift, sub) in [(6u8, 0usize), (4, 32), (2, 64), (0, 96)] {
-                        let t = ternary_from_code((b >> shift) & 0b11);
-                        if t != 0 {
-                            cols.push((col_base + sub + gp) as u16);
-                            signs.push(t);
-                        }
-                    }
-                }
-            }
+            let row = &packed[row_offset..row_offset + bytes_per_row];
+            append_row_nonzeros(row, blocks_per_row, &mut cols, &mut signs);
             row_starts.push(cols.len() as u32);
         }
 
