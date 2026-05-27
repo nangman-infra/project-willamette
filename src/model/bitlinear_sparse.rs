@@ -176,3 +176,115 @@ pub fn quantize_input_absmax_i8(input: &[f32], out: &mut [i8]) -> f32 {
     }
     max_abs / 127.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantize_absmax_basic() {
+        let mut out = vec![0_i8; 4];
+        let s = quantize_input_absmax_i8(&[1.0, -0.5, 0.0, 0.25], &mut out);
+        assert!((s - 1.0 / 127.0).abs() < 1e-9);
+        assert_eq!(out[0], 127); // 1.0 is the absmax → 127
+        assert_eq!(out[2], 0); // 0.0 → 0
+    }
+
+    #[test]
+    fn quantize_all_zero_returns_unit_scale() {
+        let mut out = vec![9_i8; 3];
+        let s = quantize_input_absmax_i8(&[0.0, 0.0, 0.0], &mut out);
+        assert_eq!(s, 1.0);
+        assert_eq!(out, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn sparse_matvec_known_values() {
+        // out_dim 2, in_dim 4.
+        //   row 0: +1@col0, -1@col2
+        //   row 1: +1@col1
+        let sw = SparseWeight {
+            out_dim: 2,
+            in_dim: 4,
+            scale: 1.0,
+            row_starts: vec![0, 2, 3],
+            cols: vec![0, 2, 1],
+            signs: vec![1, -1, 1],
+        };
+        let act = vec![10_i8, 5, 3, 0];
+        let mut out = vec![0.0_f32; 2];
+        sparse_matvec_i8(&sw, &act, 1.0, &mut out).unwrap();
+        assert!((out[0] - 7.0).abs() < 1e-6); // +10 -3
+        assert!((out[1] - 5.0).abs() < 1e-6); // +5
+    }
+
+    #[test]
+    fn sparse_matvec_applies_combined_scale() {
+        let sw = SparseWeight {
+            out_dim: 1,
+            in_dim: 2,
+            scale: 2.0,
+            row_starts: vec![0, 1],
+            cols: vec![0],
+            signs: vec![1],
+        };
+        let act = vec![4_i8, 0];
+        let mut out = vec![0.0_f32; 1];
+        sparse_matvec_i8(&sw, &act, 0.5, &mut out).unwrap();
+        // 2.0(weight scale) * 0.5(input scale) * (1*4) = 4.0
+        assert!((out[0] - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sparse_matvec_length_mismatch_errors() {
+        let sw = SparseWeight {
+            out_dim: 1,
+            in_dim: 4,
+            scale: 1.0,
+            row_starts: vec![0, 0],
+            cols: vec![],
+            signs: vec![],
+        };
+        let mut out = vec![0.0_f32; 1];
+        assert!(sparse_matvec_i8(&sw, &[0_i8; 3], 1.0, &mut out).is_err());
+        let mut out2 = [0.0_f32; 2];
+        assert!(sparse_matvec_i8(&sw, &[0_i8; 4], 1.0, &mut out2).is_err());
+    }
+
+    #[test]
+    fn from_i2s_on_synthetic_tiny() {
+        use crate::gguf::reader::GgufFile;
+        use crate::model::ModelGraph;
+        use crate::synth::{build_gguf, Preset};
+
+        let bytes = build_gguf(Preset::Tiny, true); // random ternary
+        let gguf = GgufFile::parse(&bytes).unwrap();
+        let graph = ModelGraph::from_gguf(&gguf).unwrap();
+        let w = graph.layers[0].attn_q;
+
+        let sparse = SparseWeight::from_i2s(w).unwrap();
+        let total = w.shape[0] as usize * w.shape[1] as usize;
+        assert!(sparse.nnz() <= total);
+        assert_eq!(sparse.row_starts.len(), sparse.out_dim + 1);
+        assert_eq!(sparse.cols.len(), sparse.nnz());
+        assert_eq!(sparse.signs.len(), sparse.nnz());
+
+        // matvec runs and stays finite.
+        let act = vec![1_i8; sparse.in_dim];
+        let mut out = vec![0.0_f32; sparse.out_dim];
+        sparse_matvec_i8(&sparse, &act, 1.0, &mut out).unwrap();
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn from_i2s_rejects_non_i2s() {
+        use crate::gguf::reader::GgufFile;
+        use crate::model::ModelGraph;
+        use crate::synth::{build_gguf, Preset};
+        let bytes = build_gguf(Preset::Tiny, false);
+        let gguf = GgufFile::parse(&bytes).unwrap();
+        let graph = ModelGraph::from_gguf(&gguf).unwrap();
+        // token_embd is F16, not I2_S → must error.
+        assert!(SparseWeight::from_i2s(graph.token_embd).is_err());
+    }
+}
