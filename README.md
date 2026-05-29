@@ -49,7 +49,7 @@ Engineering rules every change is held to (full list in
 │   ── windowing / sparse tables     │         │                                          │
 │   ── target-ISA aware blocking     │         │                                          │
 └────────────────────────────────────┘         └──────────────────────────────────────────┘
-       NOT BUILT YET                                      WORKING TODAY (v0.8.0-mvp)
+       NOT BUILT YET                                      WORKING TODAY (v0.9.0-mvp)
 ```
 
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
@@ -58,7 +58,7 @@ work runs where compute is cheap, and the on-device runtime stays
 small. `willamette-prep` is the next major piece of work; what
 exists today is the runtime side, hardcoded to BitNet b1.58 2B.
 
-## Status: v0.8.0-mvp
+## Status: v0.9.0-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -75,11 +75,12 @@ What works **today**, on the path toward the thesis:
 | **Prebuilt static binaries** | ✅ 6 targets per release — `x86_64`, `i686`, `aarch64`, `armv7` Linux musl + `aarch64`, `x86_64` macOS. See [Releases](https://github.com/nangman-infra/project-willamette/releases). |
 | Multi-core CPU parallelism | ✅ `rayon` per-row BitLinear matvec |
 | Norm-weight + scratch caching | ✅ Stage 10-A / 10-B |
+| **KV cache i8 quantisation** | ✅ **per-token absmax i8 since v0.9.0** — ~3.97× memory shrink (150 KB → 37.7 KB per token on BitNet 2B). Greedy output byte-identical to the f32 reference on Stage 5-E prompts (Apple M4 NEON + antix1 i686 SSE2). See [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md). |
 | Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui full-screen) |
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **299** passing (Mac aarch64), 303 (x86 with SSE2 paths), 0 warnings, `cargo test --release` |
+| Tests | **301** passing (Mac aarch64), 305 (x86 with SSE2 paths), 0 warnings, `cargo test --release` |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
 | Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 
@@ -93,7 +94,7 @@ What does **not** work yet but is on the roadmap toward the thesis:
 | AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
 | LUT (TL1/TL2) kernel | ❌ needs SSSE3+ (`pshufb`) → not for Pentium-M; for SSSE3+ hosts later |
 | MMX-era / sub-SSE2 kernel | ❌ not started |
-| KV cache int8 quantisation | ❌ — biggest immediately-available memory win |
+| KV cache int8 quantisation | ✅ landed in v0.9.0 (see Status table above) |
 | LLM-in-a-Flash style mmap windowing | ❌ |
 | Emulator-based humble-hardware benchmark pipeline (QEMU / 86Box) | ❌ |
 | Generic scalar fallback (every supported ISA) | ✅ correctness-only; ports cleanly |
@@ -109,7 +110,7 @@ humble hardware:
 No toolchain, no compile time. Pick the tarball matching your host:
 
 ```bash
-TAG=v0.8.0-mvp
+TAG=v0.9.0-mvp
 TARGET=i686-unknown-linux-musl   # also: x86_64-unknown-linux-musl,
                                  #       aarch64-unknown-linux-musl,
                                  #       armv7-unknown-linux-musleabihf,

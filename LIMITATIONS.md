@@ -1,6 +1,6 @@
-# Limitations — Project Willamette v0.7.1-mvp
+# Limitations — Project Willamette v0.9.0-mvp
 
-*Last revised 2026-05-29 (Phase III step 2 — BitNet family registry).*
+*Last revised 2026-05-29 (KV cache i8 quantisation).*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
@@ -70,7 +70,7 @@ the scaling curve, not at the exact numbers.
 | Multi-threading | `rayon` per-row BitLinear matvec parallelism (Stage 10-C); on antix1 (1 core) this is a no-op. |
 | GPU (CUDA / Metal / Vulkan / ROCm) | not implemented (out of scope by thesis). |
 | Batched / multi-token-per-step decoding | the multi-token path exists for prompt prefill, but per-step decode is single-token. |
-| Memory-pinned KV cache | the KV cache lives in normal heap memory and grows linearly with context length; no swap / eviction |
+| KV cache memory | **per-token absmax i8** since v0.9.0 — 3.97× smaller than the prior f32 layout (37.7 KB/token vs 150 KB/token on BitNet 2B). Lifts the practical chat-history ceiling on antix1 from ~3 K to ~13 K tokens. See [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md). Lives in normal heap memory; no swap / eviction. |
 
 On x86 hosts Willamette currently falls back to the scalar reference,
 which clocks roughly **0.2 tokens/sec on a 2.4 B parameter model**.
@@ -83,6 +83,17 @@ NEON-vs-scalar matvec results differ by `~1e-3` absolute per element
 greedy / sampling argmax matches scalar for all four reference
 prompts — but it is NOT bit-identical. Anyone diffing intermediate
 hidden states across backends should expect small float deltas.
+
+Since v0.9.0 the KV cache stores i8 per-token absmax quantised K and
+V tensors, so the *cached* forward path is also no longer bit-equal
+to the no-cache reference (per-element drift on the order of
+`absmax / 254`). The contract is now **cosine ≥ 0.999 on the
+post-`output_norm` hidden** plus **byte-identical greedy
+token-id sequences**; both are enforced by `tests/kv_cache.rs`.
+The Stage 5-E reference prompt "The capital of France is" produces
+`[12366, 13, 12366] = " Paris. Paris"` byte-identical on Apple M4
+NEON and antix1 i686 SSE2 i8 paths — i8 KV did not flip any argmax
+on the reference set.
 
 Reference parity vs. bitnet.cpp is verified at the **byte level for
 generated text** and at the **token-id level for prompt tokens**.

@@ -25,6 +25,98 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 _No changes yet._
 
+## [v0.9.0-mvp] — 2026-05-29
+
+Minor release. **KV cache moves from f32 to per-token absmax i8**,
+shrinking the dominant piece of dynamic memory by ~3.97×. The
+prior f32 cache cost 150 KB per token on BitNet 2B; the new i8 cache
+costs 37.7 KB. At full 4096-token context the resident KV cache
+drops from ~614 MB to ~154 MB — about 460 MB freed on every host,
+which translates on antix1 (Pentium-M, 2 GB) to a practical chat-
+history ceiling lift from ~3 K to ~13 K tokens (past the model's
+own 4096-position embedding limit). Design + measurements:
+[`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md).
+
+### Added
+
+* `KVCache::read_into(layer_idx, &mut Vec<f32>, &mut Vec<f32>)` —
+  caller-managed dequant buffers. Production caller
+  (`cached_forward::forward_one_layer`) allocates one pair per
+  forward call and reuses across the 30 transformer blocks.
+* `KVCache::resident_bytes()` — actual i8 + scale bytes resident,
+  per cache instance. Used by `ChatEngine::estimate_kv_cache_bytes`.
+* `docs/KV_CACHE_QUANT.md` — full design doc covering the memory
+  math, the API change, the fidelity contract, and the out-of-scope
+  schemes (i8-direct attention dot, Q4 group quant, per-head
+  scales) with the reason each was deferred.
+
+### Changed
+
+* `src/model/kv_cache.rs` — internal storage now `Vec<i8>` +
+  `Vec<f32>` (scales) for K and V independently. `append()` does
+  per-token absmax quantisation; the worst-case per-element error
+  is `absmax / 254`. Zero vectors round-trip exactly.
+* `src/model/cached_forward.rs::forward_one_layer` — replaces the
+  `let (cached_k, cached_v) = cache.read(...)` borrow with
+  `cache.read_into(layer_idx, scratch_k, scratch_v)`. Signature
+  grows by two `&mut Vec<f32>` parameters; the surrounding
+  `forward_with_cache_progress` allocates the scratch pair once
+  per call.
+* `src/chat/engine.rs::estimate_kv_cache_bytes` — now reads
+  `self.cache.resident_bytes()` instead of the old
+  `layers · kv_dim · pos · 4 · 2` formula (which is wrong by 4×
+  under the new layout).
+
+### Removed
+
+* `KVCache::read(layer_idx) -> (&[f32], &[f32])`. There is no
+  contiguous f32 slice in the new layout to borrow; the replacement
+  is `read_into`. Production had one call site, all migrated.
+
+### Fidelity
+
+The cached forward is no longer bit-equal to the no-cache
+reference — i8 round-trip drifts the hidden state on the order of
+`absmax / 254`. The new contract is **cosine ≥ 0.999** on the
+post-`output_norm` hidden (enforced by `tests/kv_cache.rs::cache_*`)
+plus **byte-identical greedy token-id sequence** vs the no-cache
+path (enforced by
+`tests/kv_cache.rs::greedy_with_cache_matches_greedy_no_cache_for_2_steps`).
+The Stage 5-E reference prompt `"The capital of France is"`
+generates `[12366, 13, 12366] = " Paris. Paris"` — byte-identical
+on Apple M4 (NEON) and antix1 (i686 SSE2 i8). i8 KV did not flip
+any argmax across the reference set.
+
+[[feedback-no-fake]]: bit-equality vs the no-cache path is *not*
+claimed any more. The fidelity contract above is what is measured
+and enforced.
+
+### Tests
+
+* Suite total: **301** (was 299) — `+8` in
+  `model::kv_cache::tests`:
+  * `new_cache_has_zero_position` (updated for new `read_into` API)
+  * `append_then_dequantise_round_trips_within_absmax_tol`
+  * `zero_vector_round_trips_exactly`
+  * `append_to_capacity_then_errors` (updated)
+  * `append_rejects_wrong_length`, `append_rejects_invalid_layer_idx`
+  * `reset_clears_position_but_keeps_capacity` (updated)
+  * `resident_bytes_matches_layout`
+* `tests/kv_cache.rs` integration cases moved from bit-equal asserts
+  to cosine-fidelity asserts on `multi_token_forward` vs
+  `forward_with_cache`. The greedy-equivalence case is unchanged.
+
+### Compatibility
+
+* **Public API break** within 0.x: `KVCache::read` removed.
+  Consistent with the 0.x minor-bump convention (see
+  `CHANGELOG.md` preamble). Only one production caller existed; all
+  call sites updated atomically.
+* Microsoft 2B reference greedy output is byte-identical on the
+  Stage 5-E prompts (Mac NEON, antix1 SSE2 i8). The BitNet-family
+  fine-tunes (Aramis French, Bifrost Solana coding) verified in
+  v0.8.0 also continue to run end-to-end on antix1.
+
 ## [v0.8.0-mvp] — 2026-05-29
 
 Minor release. **Phase III step 2** — generic
