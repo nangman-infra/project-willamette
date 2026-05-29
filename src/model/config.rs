@@ -41,28 +41,54 @@ pub struct BitNetConfig {
 }
 
 impl BitNetConfig {
+    /// Canonical Microsoft 2B architecture string. Kept for callers
+    /// that want to write a synthetic GGUF (`src/synth.rs`). Real
+    /// loaders go through the registry (see `from_gguf_metadata`).
     pub const ARCHITECTURE: &'static str = "bitnet-b1.58";
 
+    /// Read a `BitNetConfig` from parsed GGUF metadata. Resolves
+    /// `general.architecture` through the
+    /// [`crate::model::architecture::registry`] — accepts any string
+    /// claimed by a registered impl (today: `bitnet-b1.58`,
+    /// `bitnet-25`, `bitnet`). Returns `UnsupportedArchitecture` for
+    /// anything else.
     pub fn from_gguf_metadata(meta: &HashMap<String, GgufValue>) -> Result<Self, WillametteError> {
-        let arch = required_str(meta, "general.architecture")?.to_string();
-        if arch != Self::ARCHITECTURE {
-            return Err(WillametteError::UnsupportedArchitecture(arch));
-        }
+        let arch_string = required_str(meta, "general.architecture")?.to_string();
+        let arch = crate::model::architecture::resolve(&arch_string).ok_or(
+            WillametteError::UnsupportedArchitecture(arch_string.clone()),
+        )?;
+        arch.config_from_meta(&arch_string, meta)
+    }
 
-        let block_count = required_u32(meta, "bitnet-b1.58.block_count")?;
-        let embedding_length = required_u32(meta, "bitnet-b1.58.embedding_length")?;
-        let feed_forward_length = required_u32(meta, "bitnet-b1.58.feed_forward_length")?;
-        let context_length = required_u32(meta, "bitnet-b1.58.context_length")?;
+    /// Read a `BitNetConfig` using an explicit metadata-key prefix.
+    /// Used by the architecture trait — every `ModelArchitecture`
+    /// impl in the BitNet family delegates here after deciding which
+    /// prefix to apply (`bitnet-b1.58.*`, `bitnet-25.*`, `bitnet.*`).
+    ///
+    /// `arch_string` is the value of `general.architecture` and is
+    /// stored on the returned `BitNetConfig` so downstream code can
+    /// see which alias was loaded.
+    pub fn from_gguf_metadata_with_prefix(
+        arch_string: &str,
+        prefix: &str,
+        meta: &HashMap<String, GgufValue>,
+    ) -> Result<Self, WillametteError> {
+        let arch = arch_string.to_string();
+        let key = |suffix: &str| format!("{prefix}.{suffix}");
 
-        let head_count = required_u32(meta, "bitnet-b1.58.attention.head_count")?;
-        let head_count_kv = required_u32(meta, "bitnet-b1.58.attention.head_count_kv")?;
-        let layer_norm_rms_epsilon =
-            required_f32(meta, "bitnet-b1.58.attention.layer_norm_rms_epsilon")?;
+        let block_count = required_u32(meta, &key("block_count"))?;
+        let embedding_length = required_u32(meta, &key("embedding_length"))?;
+        let feed_forward_length = required_u32(meta, &key("feed_forward_length"))?;
+        let context_length = required_u32(meta, &key("context_length"))?;
 
-        let rope_dimension_count = required_u32(meta, "bitnet-b1.58.rope.dimension_count")?;
-        let rope_freq_base = required_f32(meta, "bitnet-b1.58.rope.freq_base")?;
+        let head_count = required_u32(meta, &key("attention.head_count"))?;
+        let head_count_kv = required_u32(meta, &key("attention.head_count_kv"))?;
+        let layer_norm_rms_epsilon = required_f32(meta, &key("attention.layer_norm_rms_epsilon"))?;
 
-        let vocab_size = required_u32(meta, "bitnet-b1.58.vocab_size")?;
+        let rope_dimension_count = required_u32(meta, &key("rope.dimension_count"))?;
+        let rope_freq_base = required_f32(meta, &key("rope.freq_base"))?;
+
+        let vocab_size = required_u32(meta, &key("vocab_size"))?;
 
         // Cross-checks (cite REFERENCE_COMMIT.md if any of these ever fail).
         if head_count == 0 {

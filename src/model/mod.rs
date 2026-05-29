@@ -3,6 +3,7 @@
 //! See [`docs/BITNET_FORWARD_PLAN.md`](../../docs/BITNET_FORWARD_PLAN.md) for
 //! the source-pinned topology this module implements.
 
+pub mod architecture;
 pub mod attention;
 pub mod bitlinear;
 #[cfg(target_arch = "aarch64")]
