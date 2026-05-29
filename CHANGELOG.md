@@ -23,7 +23,11 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ## [Unreleased]
 
-Minor-release candidate. **Phase III step 2** — generic
+_No changes yet._
+
+## [v0.8.0-mvp] — 2026-05-29
+
+Minor release. **Phase III step 2** — generic
 `ModelArchitecture` trait + registry so the GGUF loader accepts the
 BitNet *family* (`bitnet-b1.58`, `bitnet-25`, `bitnet`) instead of
 just the canonical Microsoft 2B string. Community fine-tunes

@@ -49,7 +49,7 @@ Engineering rules every change is held to (full list in
 │   ── windowing / sparse tables     │         │                                          │
 │   ── target-ISA aware blocking     │         │                                          │
 └────────────────────────────────────┘         └──────────────────────────────────────────┘
-       NOT BUILT YET                                      WORKING TODAY (v0.7.1-mvp)
+       NOT BUILT YET                                      WORKING TODAY (v0.8.0-mvp)
 ```
 
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
@@ -58,7 +58,7 @@ work runs where compute is cheap, and the on-device runtime stays
 small. `willamette-prep` is the next major piece of work; what
 exists today is the runtime side, hardcoded to BitNet b1.58 2B.
 
-## Status: v0.7.1-mvp
+## Status: v0.8.0-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -109,7 +109,7 @@ humble hardware:
 No toolchain, no compile time. Pick the tarball matching your host:
 
 ```bash
-TAG=v0.7.1-mvp
+TAG=v0.8.0-mvp
 TARGET=i686-unknown-linux-musl   # also: x86_64-unknown-linux-musl,
                                  #       aarch64-unknown-linux-musl,
                                  #       armv7-unknown-linux-musleabihf,
