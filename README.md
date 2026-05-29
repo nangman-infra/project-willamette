@@ -184,7 +184,7 @@ willamette --version
 
 ## Performance
 
-Numbers from Apple Silicon (M1+, aarch64, single core, default cargo
+Numbers from Apple Silicon (M4+ (current measurement host M4), aarch64, single core, default cargo
 release profile, our scalar reference vs. our NEON backend):
 
 | Operation | Scalar (Stage 6-A) | NEON (Stage 6-C) | Speed-up |

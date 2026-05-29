@@ -363,7 +363,7 @@ new file" entry added to `UPSTREAM_PIN.md`.
 * `tests/bitlinear_simd.rs` — 8 tests, one per BitLinear role in
   layer 0, comparing scalar vs NEON outputs against the real GGUF
   with realistic embedding+RMSNorm input. Tolerance: `max|Δ| < 1e-2`
-  per element (observed `max|Δ| ≈ 1e-3` in practice on Apple M1+).
+  per element (observed `max|Δ| ≈ 1e-3` in practice on Apple M-series; measured on M4).
 * Stage 5-E reference parity preserved: re-running
   `scripts/run_willamette_reference.sh` with the NEON path produces
   byte-identical generated text and identical generated token-id

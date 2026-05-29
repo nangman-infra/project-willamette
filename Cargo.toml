@@ -22,7 +22,7 @@ thiserror = "1.0"        # typed errors in src/error.rs
 clap = { version = "4", features = ["derive"] }
 byteorder = "1.5"        # GGUF little-endian primitive reads
 regex = "1"              # byte-level BPE pre-tokenization
-rayon = "1.10"           # Stage 10-C: BitLinear matvec row parallelism (ISA-neutral; M1 perf cores + multi-core SSE2/Pentium-4 friendly)
+rayon = "1.10"           # Stage 10-C: BitLinear matvec row parallelism (ISA-neutral; M-series perf cores + multi-core SSE2/Pentium-4 friendly)
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
                          # Stage 9-E: TUI framework (re-exports crossterm).
                          # `unstable-rendered-line-info` (issue ratatui#293)

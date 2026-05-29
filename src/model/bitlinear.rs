@@ -84,7 +84,7 @@ pub fn bitlinear_i2s_matvec_f32(
             // stable Rust the `vdotq_s32` SDOT instruction is gated
             // behind the unstable `stdarch_neon_dotprod` feature, forcing
             // a `vmull_s8`-based widening dot product. Across 20-sample
-            // decode-step averages on Apple M1 the int8 path ran at 7.82
+            // decode-step averages on Apple M4 the int8 path ran at 7.82
             // tok/sec vs the f32-input NEON path's 7.91 tok/sec — a
             // measured regression. Default is f32-NEON; switch to the
             // int8 path with `RUSTFLAGS="--cfg willamette_i8_activations"`

@@ -28,7 +28,7 @@ use project_willamette::model::ModelGraph;
 const MODEL_PATH: &str = "./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf";
 
 /// Observed tolerance per output dim, with a comfortable safety margin
-/// above what we actually see on Apple M1+ (typical < 1e-3 absolute).
+/// above what we actually see on Apple M-series (current host: M4) (typical < 1e-3 absolute).
 const TOL: f32 = 1e-2;
 
 fn with_real_graph<F>(f: F)

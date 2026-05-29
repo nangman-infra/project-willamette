@@ -160,11 +160,11 @@ size ourselves. This release ships the builder.
 
 #### 4-point scaling table
 * [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) extended with
-  Pentium-M antix1 and Mac M1 NEON measurements at the three synth
+  Pentium-M antix1 and Mac M4 NEON measurements at the three synth
   preset sizes plus the real 2 B model. New conclusions:
   * On antix1, `params × tok/s ≈ 500 M` is constant across the four
     points — clean linear scaling, BitLinear matvec dominates.
-  * The Mac M1 ÷ antix1 ratio grows 8.8× → 26.4× → 65.8× with model
+  * The Mac M4 ÷ antix1 ratio grows 8.8× → 26.4× → 65.8× with model
     size, because the cache hierarchy diverges once weights stop
     fitting in antix1's 2 MB L2.
   * Direct cross-architecture comparison vs EXO Labs' Pentium II
@@ -852,7 +852,7 @@ and a parallelised matvec.
 ### Changed
 * **BitLinear matvec is now multi-threaded** via `rayon::par_chunks_mut`
   with chunks of 32 output rows, each chunk owning a thread-local i8
-  scratch buffer (Stage 10-C + 10-B). On Apple M1 the decode-step
+  scratch buffer (Stage 10-C + 10-B). On Apple M4 the decode-step
   improves from `~656 ms / ~1.5 tok/s` (v0.1.1) to
   `~126 ms / ~7.9 tok/s` (v0.2.0) — a 5.2× speedup. The matvec itself
   drops from 1.87 ms to 0.64 ms (2.94×). ISA-neutral: the rayon
@@ -871,7 +871,7 @@ and a parallelised matvec.
   Rust the `vdotq_s32` SDOT intrinsic is gated behind the unstable
   `stdarch_neon_dotprod` feature, so the kernel falls back to
   `vmull_s8`-based widening dot. Measured at 7.82 tok/s vs the f32-
-  input NEON path's 7.91 tok/s on Apple M1 (20-sample average) — a
+  input NEON path's 7.91 tok/s on Apple M4 (20-sample average) — a
   small regression, not a win. The int8 kernel is therefore present
   but gated behind
   `RUSTFLAGS="--cfg willamette_i8_activations"`. Default stays on the
@@ -888,7 +888,7 @@ and a parallelised matvec.
   `Special` prefix.
 * All 189 v0.1.1 tests still pass; total at v0.2.0 is 193 (4 new).
 
-### Performance (Apple M1, NEON, release profile, 20-run avg)
+### Performance (Apple M4, NEON, release profile, 20-run avg)
 
 | Metric | v0.1.1 | v0.2.0 | Change |
 | ------ | -----: | -----: | -----: |

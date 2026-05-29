@@ -384,7 +384,7 @@ pub unsafe fn bitlinear_i2s_matvec_f32_neon(
     // owns its own MATVEC_SCRATCH (thread_local), so unpack_row +
     // neon_dot_i8_f32 run independently across cores. Chunk size 32
     // keeps per-task work above rayon's ~1-2µs overhead (each row
-    // is ~0.7µs of work on M1).
+    // is ~0.7µs of work on M4).
     //
     // SAFETY (NEON): the dispatcher in `super::bitlinear` guarantees
     // `is_aarch64_feature_detected!("neon")` on the calling thread; the

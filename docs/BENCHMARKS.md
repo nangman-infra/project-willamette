@@ -13,14 +13,24 @@ within ±10 % (warm-cache decode-step variance).
 
 ## Hosts
 
-### Mac M1 — Apple Silicon NEON reference
+### Mac M4 — Apple Silicon NEON reference
 
 | | |
 | --- | --- |
-| CPU | Apple M1 (8 cores: 4 P + 4 E) |
-| RAM | 16 GiB |
-| OS | macOS (Sequoia / Sonoma — equivalent for these numbers) |
+| CPU | Apple M4 (Mac16,10) |
+| Cores | 10 (4 P-core + 6 E-core) |
+| L2 cache | 16 MB (P-core) / 4 MB (E-core) |
+| RAM | 24 GB |
+| OS | macOS (current — equivalent for these numbers) |
 | Toolchain | rustc 1.94.0 (rust-toolchain.toml pin) |
+| ISA extensions detected | NEON, FEAT_DotProd, FEAT_I8MM, FEAT_BF16, FEAT_FP16, SME, SME2 |
+
+> Earlier revisions of this document labeled the host as "M1" by
+> mistake — corrected to M4 on 2026-05-27. Every Mac NEON measurement
+> in this file was taken on M4; the numbers themselves are correct,
+> only the chip label was wrong. M4 ≈ 1.5–2× faster than M1 in
+> single-thread, so reading our Mac figures as "M1" overstates what
+> an M1 user would observe.
 
 ### antix1 — Pentium-M humble-hardware host
 
@@ -54,13 +64,13 @@ kernel.
 
 | host | dense | sparse | result |
 | --- | ---: | ---: | --- |
-| Mac M1 (NEON) | 0.82 ms | 2.92 ms | sparse **3.55× slower** |
+| Mac M4 (NEON) | 0.82 ms | 2.92 ms | sparse **3.55× slower** |
 | antix1 (SSE2 i8) | 15.54 ms | 15.75 ms | sparse **1.01× slower (tie)** |
 
 The dense kernel processes 100% of elements but 16-wide SIMD and
 regularly; the sparse kernel processes ~50% but one-at-a-time scalar
 with irregular gather. On antix1 the "half the work" win and the
-"scalar + irregular" loss almost exactly cancel → a tie. On the M1's
+"scalar + irregular" loss almost exactly cancel → a tie. On the M4's
 fast NEON, dense wins outright.
 
 ### What it tells us
@@ -221,7 +231,7 @@ Two structural facts:
    scales linearly with parameter count on this host. Doubling the
    model exactly halves the tok/s.
 
-### Mac M1 NEON (`Kernel::AArch64Neon`), same model files
+### Mac M4 NEON (`Kernel::AArch64Neon`), same model files
 
 | Preset | Params | matvec | Decode-step |
 | --- | ---: | ---: | ---: |
@@ -229,7 +239,7 @@ Two structural facts:
 | Medium | 110 M | 0.057 ms (768 × 768) | **131 tok/s** |
 | Real 2 B | 2 000 M | ≈ 0.6 ms (2560 × 2560) | **7.9 tok/s** |
 
-### Cross-host speed-up (Mac M1 ÷ antix1)
+### Cross-host speed-up (Mac M4 ÷ antix1)
 
 | Preset | Ratio | Comment |
 | --- | ---: | --- |
@@ -334,7 +344,7 @@ Kept as the "before" reference for any future kernel.
 
 ## 2026-05-25 — v0.4.1-mvp baselines
 
-### Apple M1 — NEON (`Kernel::AArch64Neon`)
+### Apple M4 — NEON (`Kernel::AArch64Neon`)
 
 Measured on the v0.2.0-mvp release cycle; the matvec kernel and
 attention path have not changed shape since, so the figure carries
@@ -394,20 +404,20 @@ is GGUF parse + tensor directory build over the 332 tensors via mmap).
    present for the dashboard and detection arrays but does not route
    any traffic.
 
-#### M1 NEON ÷ Pentium-M scalar
+#### M4 NEON ÷ Pentium-M scalar
 
 The two hosts are different in four independent dimensions (clock,
 IPC, SIMD width, memory bandwidth), so a single ratio understates the
 SIMD contribution. For the record:
 
-* **Decode-step ratio**: 7.9 / 0.05 ≈ **158× faster on M1**.
-* **BitLinear matvec ratio**: M1's per-matvec time is roughly 5 ms
+* **Decode-step ratio**: 7.9 / 0.05 ≈ **158× faster on M4**.
+* **BitLinear matvec ratio**: M4's per-matvec time is roughly 5 ms
   (back-calculated from the 7.9 tok/s figure across 30 layers × ~6
   matvecs/layer of similar shape), versus 60.5 ms scalar → **≈ 12×**
   on the matvec alone. The remaining factor of ~13× comes from clock
   (2.0 GHz → ~3.2 GHz P-core), IPC (in-order P-M vs out-of-order
   Firestorm), memory bandwidth, and rayon multi-core scheduling on
-  the M1 against antix1's single core.
+  the M4 against antix1's single core.
 
 A theoretical SSE2 kernel that processes 16 × i8 elements per cycle
 sits at ~8 × the scalar's per-cycle work; once memory-bandwidth
