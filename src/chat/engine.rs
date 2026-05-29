@@ -287,14 +287,12 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
     }
-    /// Estimate KV cache memory in bytes given the current cache
-    /// position. Two f32 tensors per layer per token (K and V),
-    /// each of length kv_dim.
+    /// Actual KV-cache i8 + scale bytes resident, summed across
+    /// layers. Reads the live cache instead of recomputing — the
+    /// per-token cost is `2 × (kv_dim + 4)` bytes (K and V i8
+    /// vectors plus one f32 scale each).
     pub fn estimate_kv_cache_bytes(&self) -> u64 {
-        let layers = self.graph.layers.len() as u64;
-        let kv_dim = self.graph.config.kv_dim as u64;
-        let pos = self.next_pos as u64;
-        layers * kv_dim * pos * 4 * 2
+        self.cache.resident_bytes() as u64
     }
 
     /// Replace the engine's sampling configuration (history reset

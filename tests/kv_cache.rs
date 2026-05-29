@@ -1,5 +1,13 @@
-//! Stage 5-C integration tests — KV cache numerical equivalence with
-//! the no-cache `multi_token_forward` path.
+//! Stage 5-C integration tests — KV cache fidelity vs the no-cache
+//! `multi_token_forward` path.
+//!
+//! Since the v0.9.0 i8 KV quantisation, the cached forward is no
+//! longer bit-identical to the no-cache reference (i8 quant introduces
+//! per-element error on the order of `absmax / 254`). What stays
+//! invariant is (a) cosine similarity ≥ 0.999 on the post-`output_norm`
+//! hidden state and (b) byte-identical greedy token-id sequences —
+//! the property that actually matters for users. The third test below
+//! enforces (b).
 
 use std::path::Path;
 
@@ -25,6 +33,31 @@ fn skip_if_missing() -> Option<ModelMmap> {
     Some(ModelMmap::open(MODEL_PATH).expect("open"))
 }
 
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    let mut dot = 0.0_f32;
+    let mut na = 0.0_f32;
+    let mut nb = 0.0_f32;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        dot / denom
+    }
+}
+
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0_f32, f32::max)
+}
+
 #[test]
 fn cache_single_token_matches_no_cache_single_token() {
     let Some(mmap) = skip_if_missing() else {
@@ -41,9 +74,13 @@ fn cache_single_token_matches_no_cache_single_token() {
     let mut cache = KVCache::new(graph.layers.len(), graph.config.kv_dim as usize, 16);
     let h_cache = forward_with_cache(&graph, &mut cache, 15339, 0).expect("cache");
 
-    assert_eq!(
-        h_no_cache, h_cache,
-        "M=1 cache and no-cache must match exactly"
+    let cos = cosine_similarity(&h_no_cache, &h_cache);
+    let m_abs = max_abs_diff(&h_no_cache, &h_cache);
+    assert!(
+        cos > 0.999,
+        "M=1 i8 KV cache fidelity vs no-cache: cos={} (need > 0.999); max|Δ|={}",
+        cos,
+        m_abs
     );
     assert_eq!(cache.position(), 1);
 }
@@ -67,9 +104,13 @@ fn cache_two_token_sequence_matches_no_cache() {
         h_cache = forward_with_cache(&graph, &mut cache, tid, i as u32).expect("cache");
     }
     assert_eq!(cache.position(), ctx.len());
-    assert_eq!(
-        h_no_cache, h_cache,
-        "two-token cache vs no-cache must match exactly"
+    let cos = cosine_similarity(&h_no_cache, &h_cache);
+    let m_abs = max_abs_diff(&h_no_cache, &h_cache);
+    assert!(
+        cos > 0.999,
+        "M=2 i8 KV cache fidelity vs no-cache: cos={} (need > 0.999); max|Δ|={}",
+        cos,
+        m_abs
     );
 }
 

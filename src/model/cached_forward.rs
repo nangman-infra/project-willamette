@@ -106,8 +106,21 @@ pub fn forward_with_cache_progress<F: FnMut(u32)>(
     let mut hidden = vec![0.0_f32; ctx.n_embd];
     embedding_gather_f16(graph.token_embd, token_id, &mut hidden)?;
 
+    // Dequant scratch reused across layers — capacity stabilises at
+    // (position + 1) × kv_dim after the first growth.
+    let mut scratch_k: Vec<f32> = Vec::new();
+    let mut scratch_v: Vec<f32> = Vec::new();
+
     for layer in &graph.layers {
-        forward_one_layer(layer, cache, &mut hidden, &ctx, position)?;
+        forward_one_layer(
+            layer,
+            cache,
+            &mut hidden,
+            &mut scratch_k,
+            &mut scratch_v,
+            &ctx,
+            position,
+        )?;
         on_layer(layer.index);
     }
 
@@ -152,10 +165,13 @@ fn validate_cache_inputs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn forward_one_layer(
     layer: &LayerWeights<'_>,
     cache: &mut KVCache,
     hidden: &mut [f32],
+    scratch_k: &mut Vec<f32>,
+    scratch_v: &mut Vec<f32>,
     ctx: &LayerCtx,
     position: u32,
 ) -> Result<(), WillametteError> {
@@ -190,10 +206,10 @@ fn forward_one_layer(
 
     let layer_idx = layer.index as usize;
     cache.append(layer_idx, &k, &v)?;
-    let (cached_k, cached_v) = cache.read(layer_idx)?;
-    let n_past = cached_k.len() / ctx.kv_dim;
+    cache.read_into(layer_idx, scratch_k, scratch_v)?;
+    let n_past = scratch_k.len() / ctx.kv_dim;
 
-    let attn_out = scaled_dot_product_attention(&q, cached_k, cached_v, n_past, ctx);
+    let attn_out = scaled_dot_product_attention(&q, scratch_k, scratch_v, n_past, ctx);
 
     let mut sub_normed = vec![0.0_f32; ctx.n_embd];
     rms_norm_f32(
