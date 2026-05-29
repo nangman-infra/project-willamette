@@ -49,7 +49,7 @@ Engineering rules every change is held to (full list in
 │   ── windowing / sparse tables     │         │                                          │
 │   ── target-ISA aware blocking     │         │                                          │
 └────────────────────────────────────┘         └──────────────────────────────────────────┘
-       NOT BUILT YET                                      WORKING TODAY (v0.2.3)
+       NOT BUILT YET                                      WORKING TODAY (v0.7.1-mvp)
 ```
 
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
@@ -58,7 +58,7 @@ work runs where compute is cheap, and the on-device runtime stays
 small. `willamette-prep` is the next major piece of work; what
 exists today is the runtime side, hardcoded to BitNet b1.58 2B.
 
-## Status: v0.2.3-mvp
+## Status: v0.7.1-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -68,13 +68,19 @@ What works **today**, on the path toward the thesis:
 | Model SHA256 | `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162` |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
-| Apple Silicon NEON kernel | ✅ implemented + validated |
+| Apple Silicon NEON kernel | ✅ implemented + validated (Apple M4 dev host) |
+| **x86 SSE2 i8 kernel (default)** | ✅ **Stage 6-B landed** — validated on antix1 (Pentium-M 2 GHz, i686). 2.2× over f32 SSE2, ~5.4× over scalar; byte-identical greedy output |
+| Runtime CPU dispatch | ✅ NEON / SSE2-i8 / SSE2-f32 / scalar selected at runtime ([`src/model/dispatch.rs`](src/model/dispatch.rs)) |
+| **Prebuilt static binaries** | ✅ 6 targets per release — `x86_64`, `i686`, `aarch64`, `armv7` Linux musl + `aarch64`, `x86_64` macOS. See [Releases](https://github.com/nangman-infra/project-willamette/releases). |
 | Multi-core CPU parallelism | ✅ `rayon` per-row BitLinear matvec |
 | Norm-weight + scratch caching | ✅ Stage 10-A / 10-B |
-| Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui) |
+| Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui full-screen) |
+| Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
+| Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **242** passing, 0 warnings (`cargo test --release`) |
-| SonarQube Quality Gate | ✅ OK — `new_coverage` 100 %, `new_violations` 0 |
+| Tests | **291** passing (Mac aarch64), 295 (x86 with SSE2 paths), 0 warnings, `cargo test --release` |
+| SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
+| Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 
 What does **not** work yet but is on the roadmap toward the thesis:
 
@@ -82,9 +88,10 @@ What does **not** work yet but is on the roadmap toward the thesis:
 | -------- | ----- |
 | Model coverage beyond BitNet b1.58 (Llama / Mistral / Phi / …) | ❌ runtime hardcoded to BitNet b1.58 |
 | Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ only `I2_S` |
-| `willamette-prep` (offline preprocessor) | ❌ not started |
-| x86_64 AVX2 / SSE2 SIMD kernel | ⏳ Stage 6-B pending — needs x86 host validation |
-| i686 / MMX kernel | ❌ not started |
+| `willamette-prep` (offline preprocessor) | ❌ not started — thesis's missing half |
+| AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
+| LUT (TL1/TL2) kernel | ❌ needs SSSE3+ (`pshufb`) → not for Pentium-M; for SSSE3+ hosts later |
+| MMX-era / sub-SSE2 kernel | ❌ not started |
 | KV cache int8 quantisation | ❌ — biggest immediately-available memory win |
 | LLM-in-a-Flash style mmap windowing | ❌ |
 | Emulator-based humble-hardware benchmark pipeline (QEMU / 86Box) | ❌ |
@@ -93,12 +100,38 @@ What does **not** work yet but is on the roadmap toward the thesis:
 
 ## Quick start
 
-### 1. Toolchain
+You have **two install paths** — picking the lighter one matters on
+humble hardware:
 
-* Rust 1.94 or newer (`rustup install stable`).
-* macOS / Linux on aarch64 or x86_64. Apple Silicon gets the NEON path
-  for free; x86 currently runs the scalar fallback (see
-  [`LIMITATIONS.md`](LIMITATIONS.md) for the AVX2/SSE2 roadmap).
+### Option A — Prebuilt static binary (recommended for low-end hosts)
+
+No toolchain, no compile time. Pick the tarball matching your host:
+
+```bash
+TAG=v0.7.1-mvp
+TARGET=i686-unknown-linux-musl   # also: x86_64-unknown-linux-musl,
+                                 #       aarch64-unknown-linux-musl,
+                                 #       armv7-unknown-linux-musleabihf,
+                                 #       aarch64-apple-darwin,
+                                 #       x86_64-apple-darwin
+curl -LO https://github.com/nangman-infra/project-willamette/releases/download/$TAG/willamette-$TAG-$TARGET.tar.gz
+curl -LO https://github.com/nangman-infra/project-willamette/releases/download/$TAG/willamette-$TAG-$TARGET.tar.gz.sha256
+sha256sum -c willamette-$TAG-$TARGET.tar.gz.sha256
+tar -xzf willamette-$TAG-$TARGET.tar.gz
+./willamette-$TAG-$TARGET/willamette --version
+```
+
+The Linux binaries are **musl-static** (no glibc dependency) — the
+same artifact runs on antiX Pentium-M (glibc 2.36), Raspberry Pi OS,
+and modern Ubuntu. i686 build is ≈ **2.5 MB** stripped.
+
+### Option B — Build from source
+
+* Rust 1.94 (`rust-toolchain.toml` pins this).
+* macOS / Linux on aarch64 or x86_64 / i686. Apple Silicon gets the
+  NEON path; x86 / i686 gets the **SSE2 int8 kernel by default**
+  (validated on antiX Pentium-M, see
+  [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)).
 
 ### 2. Download the model
 
@@ -143,7 +176,9 @@ generation as the build host.
     --max-new-tokens 3
 ```
 
-Expected output (Apple Silicon, ~5 s):
+Expected output (Apple M-series, < 3 s on M4; antiX Pentium-M ≈ 8 s
+per token after the prefill, so plan for ~60 s end-to-end for 3
+tokens including model mmap):
 
 ```
 Generating:  Paris. Paris
@@ -156,6 +191,7 @@ Full text:        "The capital of France is Paris. Paris"
 
 ```text
 willamette inspect    --model PATH
+willamette analyze    --model PATH
 willamette tokenize   --model PATH --text TEXT [--no-bos] [--add-eos]
 willamette logits     --model PATH --prompt TEXT [--top-k N] [--no-bos]
 willamette run        --model PATH --prompt TEXT
@@ -165,39 +201,99 @@ willamette run        --model PATH --prompt TEXT
                       [--repetition-penalty R] [--seed S]
                       [--stop-id ID]...
 willamette bench      --model PATH [--decode-steps N]
+willamette chat       --model PATH [--max-seq-len N] [--max-new-tokens N]
+                      [--system TEXT]
+                      [--temperature F] [--top-k K] [--top-p P]
+                      [--repetition-penalty R] [--seed S]
+willamette tui        --model PATH [--max-seq-len N] [--max-new-tokens N]
+                      [--system TEXT]
+                      [--temperature F] [--top-k K] [--top-p P]
+                      [--repetition-penalty R] [--seed S]
+willamette synth-gguf --output PATH --preset {tiny|small|medium}
 willamette --version
 ```
 
 * `inspect` — Stage 1. Dumps every metadata key + every tensor's raw
   ggml_type, shape, offset, and byte length. No inference.
+* `analyze` — Counts -1 / 0 / +1 across every BitLinear (I2_S) tensor.
+  Reports the zero fraction (the upper bound on what sparsity-aware
+  skipping could save). Real 2B: 28.9 / 42.2 / 28.9 %.
 * `tokenize` — Stage 2. Runs the GGUF-bundled GPT-2 byte-level BPE
   tokenizer (with the `LLAMA_VOCAB_PRE_TYPE_DEFAULT` 3-regex
-  pre-tokenization, matching upstream when `tokenizer.ggml.pre` is
-  absent). Refuses to run on tokenizer models we don't support.
+  pre-tokenization). Refuses to run on tokenizer models we don't
+  support.
 * `logits` — Stage 4-D5. Runs the full 30-layer forward and prints the
   top-K next-token logits. Useful for comparing against bitnet.cpp.
 * `run` — Stage 5. Real BitLinear forward + greedy or sampled
   generation, with KV cache.
 * `bench` — Stage 6-A. Times one matvec, one no-cache forward, and one
-  cached decode step. Reports which BitLinear backend (NEON or scalar)
-  is active.
+  cached decode step. Reports the **active backend label** (e.g.
+  `i686 SSE2 (i8)`, `aarch64 NEON`) — also runs a sparse-prototype
+  comparison against the dense kernel on `attn_q`.
+* `chat` — Stage 9. Multi-turn stdio chat (line-based). `/quit`,
+  `/reset`, `/sys [text|off]`, `/history`, `/save <file>`.
+* `tui` — Stage 9-E. Full-screen ratatui chat — left chat pane + right
+  live dashboard (per-core CPU %, KV cache size, **tok/s**, current
+  layer, RSS, sampling params, active SIMD kernel). Keys: type+Enter,
+  ↑↓ history, Ctrl-R reverse search, Ctrl-L clear log, Ctrl-Y yank
+  last bot reply (OSC52), Esc cancel mid-generation, F1 help,
+  `/quit`. Needs a terminal ≥ 72 columns for the 2-column layout.
+* `synth-gguf` — Builds a synthetic BitNet b1.58 GGUF (random ternary
+  weights) for throughput benchmarking on humble hosts. `tiny`
+  ≈ 73 KB, `small` ≈ 10 M params, `medium` ≈ 110 M params (same scale
+  class as TinyLlama). No tokenizer included → `inspect` and `bench`
+  work, `run` / `chat` / `tui` will reject the file (random weights →
+  garbage tokens — see [[feedback-no-fake]]).
+
+### Running the TUI
+
+```bash
+./willamette tui --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf
+```
+
+Needs a real terminal (not the Claude-Code embedded chat). Over SSH
+use `ssh -t` to force a pseudo-tty when launching one-shot:
+
+```bash
+ssh -t user@host '~/bin/willamette tui --model ~/models/ggml-model-i2_s.gguf'
+```
+
+Expect very slow generation on humble HW — on antix1 Pentium-M the
+real 2B model runs at ~0.4 tok/s (i8 SSE2 default). Use **Esc** to
+cancel a long answer.
 
 ## Performance
 
-Numbers from Apple Silicon (M4+ (current measurement host M4), aarch64, single core, default cargo
-release profile, our scalar reference vs. our NEON backend):
+Headline numbers (real BitNet 2B model, decode step, `cargo
+--release`). Full table including the synthetic 110M / 7M points,
+EXO Pentium-II comparison, and llama2.c head-to-head live in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-| Operation | Scalar (Stage 6-A) | NEON (Stage 6-C) | Speed-up |
-| --------- | ----------------: | ---------------: | -------: |
-| One I2_S BitLinear matvec (2560×2560 ternary) | 13.7 ms | **1.9 ms** | **7.3×** |
-| Single-token forward (30 layers, no cache) | 5104 ms | **669 ms** | **7.6×** |
-| Decode step (with KV cache, avg 3 runs) | 5034 ms | **656 ms** | **7.7×** |
-| Throughput (decode, tokens/sec) | 0.20 | **1.52** | **7.5×** |
+| Host | Kernel | tok/s |
+| --- | --- | ---: |
+| **Apple M4** (Mac16,10, dev box) | aarch64 NEON | **7.9** |
+| **antiX Pentium-M 2 GHz** (humble validation host) | i686 SSE2 (i8) | **0.41** |
+| antiX Pentium-M 2 GHz | i686 scalar (v0.4.1) | 0.05 |
 
-These are correctness-first numbers. There is no SIMD activation
-quantisation, no thread pool, no graph fusion. Future Stage 8 work on
-x86 AVX2/SSE2 and possible BitNet-paper i8 activation quant could move
-this further.
+Same hardware, same model, kernel only:
+
+| antiX Pentium-M progression | tok/s | speed-up |
+| --- | ---: | ---: |
+| scalar reference | 0.05 | — |
+| SSE2 f32 mask-add (v0.4.x f32 path) | 0.19 | 2.49× over scalar |
+| **SSE2 i8 (v0.5.0+ default)** | **0.41** | **2.15× over f32 / 5.4× over scalar** |
+
+Same-machine head-to-head vs `llama2.c` (vanilla Llama 2 f32) on
+antix1 at **110M scale** — both single-thread, both SSE2:
+
+| Build | tok/s |
+| --- | ---: |
+| `llama2.c` `stories110M` (vanilla f32) | 2.51 |
+| `willamette` synth 110M (BitNet b1.58 + SSE2 i8) | **4.96 (1.97× faster)** |
+
+The runtime is "correctness + memory floor + portability floor" first
+— `llama.cpp` will likely win raw speed on modern x86. We win the
+**lowest hardware floor a real medium LLM can be run on**.
 
 ## Reference compatibility (bitnet.cpp)
 
@@ -226,6 +322,7 @@ Full procedure in [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILI
 | File | Purpose |
 | ---- | ------- |
 | [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md) | Exact upstream SHA, file/line references, model SHA256 |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | All benchmark numbers, scaling sweep, llama2.c head-to-head, EXO Pentium-II comparison |
 | [`REFERENCE_COMMIT.md`](REFERENCE_COMMIT.md) | Stage 1 GGUF inspection log + verification table |
 | [`docs/I2_S_LAYOUT.md`](docs/I2_S_LAYOUT.md) | Pinned-source citation for the I2_S byte/scale layout |
 | [`docs/BITLINEAR_I2S_MATVEC.md`](docs/BITLINEAR_I2S_MATVEC.md) | BitLinear matvec contract & code → ternary map |
@@ -248,8 +345,10 @@ Full procedure in [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILI
    `UnsupportedTensorType`, `UnsupportedTokenizer`, …) — it does not
    synthesise output.
 4. **No unverified SIMD.** `target-cpu=native` is not the default;
-   AVX2/SSE2 stays unimplemented until an x86 host is available to
-   validate it against the scalar fallback (Stage 6-B).
+   every SIMD kernel ships only after on-target validation against
+   the scalar reference. SSE2 (i8) is validated on antiX Pentium-M;
+   AVX2 / AVX-512 / LUT (SSSE3+) remain unmerged until a host is in
+   hand to test them.
 5. **No model files in this repo.** GGUFs are downloaded at use time.
 6. **Source-pinned changes.** Any modification of a constant
    (`GGML_TYPE_*`, RoPE type, regex set, scale offset, …) must cite

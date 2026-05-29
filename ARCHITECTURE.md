@@ -91,7 +91,12 @@ flowchart TB
 | 5-E | Reference compat | `scripts/run_*_reference.sh`, `scripts/compare_reference.sh`, `docs/REFERENCE_COMPATIBILITY.md`, pre-tokenizer fix |
 | 6-A | Scalar bench | `src/main.rs::cmd_bench` |
 | 6-C | NEON kernel | `src/model/bitlinear_neon.rs` + dispatch in `bitlinear.rs` |
-| 6-B | x86 AVX2 / SSE2 | _deferred — needs x86 host_ |
+| 6-B | x86 SSE2 (i8 default + f32 mask-add via `--cfg willamette_sse2_f32`) | `src/model/bitlinear_sse2.rs` + dispatch — validated on antiX Pentium-M (v0.5.0 / v0.7.0). |
+| 6-B+ | x86 AVX2 / AVX-512 / LUT (TL2) | _deferred — needs SSSE3+ / AVX2 host validation_ |
+| dispatch | Runtime CPU kernel selection (NEON / SSE2-i8 / SSE2-f32 / scalar) | `src/model/dispatch.rs` |
+| 6-B-aux | Sparsity prototype (CSR, scalar over non-zeros) | `src/model/bitlinear_sparse.rs` — prototype, not default |
+| analyze | Ternary weight distribution (-1/0/+1 fractions) | `src/main.rs::cmd_analyze` |
+| synth | Synthetic GGUF builder for benchmarking (tiny/small/medium presets) | `src/synth.rs` |
 
 ## Memory layout (per token, decode step)
 

@@ -1,4 +1,6 @@
-# Limitations — Project Willamette v0.1.0 MVP
+# Limitations — Project Willamette v0.7.1-mvp
+
+*Last revised 2026-05-27.*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
@@ -40,19 +42,25 @@ Anything outside this combination returns a typed error
 
 ## 2. Performance
 
-The performance numbers in [`README.md`](README.md) are **single-host,
-single-thread** measurements on an Apple Silicon M-series Mac with our
-reference scalar and NEON kernels. They are not portable promises.
+The performance numbers in [`README.md`](README.md) and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
+are **single-host** measurements on the Apple M4 dev box and the
+antiX Pentium-M humble-validation host. They are not portable
+promises — other CPUs in the same ISA family will land somewhere on
+the scaling curve, not at the exact numbers.
 
 | Concern | Status |
 | ------- | ------ |
-| Apple Silicon NEON | implemented, validated against scalar (Stage 6-C) |
-| **x86 AVX2** | **not yet implemented** — needs an x86 host to validate against scalar; Project Willamette principle is "no unverified SIMD merge" |
-| **x86 SSE2** | same |
-| Apple Silicon with `+dotprod` (i8×i8 dot product) | not used; current NEON path keeps f32 activations for parity with scalar |
-| Multi-threading | not implemented; one BitLinear matvec runs on one core |
-| GPU (CUDA / Metal / Vulkan / ROCm) | not implemented |
-| Batched / multi-token-per-step decoding | the multi-token path exists for prompt prefill, but per-step decode is single-token |
+| Apple Silicon NEON | implemented, validated against scalar (Stage 6-C). Measured on Apple M4. |
+| **x86 / i686 SSE2 (int8 activation)** | **default since v0.5.0 / v0.7.0** — validated on antiX Pentium-M 2 GHz. 2.2× over the f32 SSE2 path, ~5.4× over scalar. Byte-identical greedy output to f32 on the real 2B model. |
+| x86 / i686 SSE2 (f32 mask-add) | kept as the numerical reference behind `--cfg willamette_sse2_f32`. |
+| **x86 AVX2 / AVX-512** | not yet implemented — gain target for modern x86 hosts (Haswell+ AVX2, Skylake-X+ AVX-512). |
+| **LUT kernel (bitnet.cpp TL1/TL2 style)** | not implemented. Requires SSSE3+ (`pshufb`) or NEON `vqtbl` for the table lookup — Pentium-M (SSE2-only) cannot accelerate it. Revisit on an SSSE3+ host. |
+| **Sparsity-aware skipping** | prototype shipped (`src/model/bitlinear_sparse.rs`), benched, but on antix1 it ties with dense i8 (1.01× slower — irregular access cancels the 42% skip). Documented; not default. Likely a win on sub-SSE2 hardware. |
+| Apple Silicon with `+dotprod` / FEAT_DotProd | hardware present on the M4 dev host; the stable-Rust `vdotq_s32` intrinsic remains unused (kernel keeps `vmull_s8`-style widening for parity). Switching is an `RUSTFLAGS="--cfg willamette_i8_activations"` flag away. |
+| Apple Silicon with FEAT_I8MM / SME / SME2 | hardware present on M4; intrinsics not in stable Rust → unused. |
+| Multi-threading | `rayon` per-row BitLinear matvec parallelism (Stage 10-C); on antix1 (1 core) this is a no-op. |
+| GPU (CUDA / Metal / Vulkan / ROCm) | not implemented (out of scope by thesis). |
+| Batched / multi-token-per-step decoding | the multi-token path exists for prompt prefill, but per-step decode is single-token. |
 | Memory-pinned KV cache | the KV cache lives in normal heap memory and grows linearly with context length; no swap / eviction |
 
 On x86 hosts Willamette currently falls back to the scalar reference,

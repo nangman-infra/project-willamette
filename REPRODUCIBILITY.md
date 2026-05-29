@@ -1,4 +1,6 @@
-# Reproducibility — Project Willamette v0.1.0 MVP
+# Reproducibility — Project Willamette v0.7.1-mvp
+
+*Last revised 2026-05-27.*
 
 This file pins every external value that the numbers in
 [`README.md`](README.md), [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md),
@@ -94,11 +96,21 @@ Failure modes:
 * `cargo test` SKIPs every test that needs the real GGUF if the file
   is missing — but everything else (unit tests, synthetic GGUF parser
   tests, NEON unit fixtures) still runs.
-* On non-aarch64 hosts the `tests/bitlinear_simd.rs` file compiles to
-  zero tests (file-level `#![cfg(target_arch = "aarch64")]`), and the
-  matvec dispatcher routes through the scalar fallback. Test count is
-  189 on aarch64 and 181 on other hosts (the 8 SIMD equivalence tests
-  do not exist).
+* `tests/bitlinear_simd.rs` is `#![cfg(target_arch = "aarch64")]` —
+  on x86 hosts it compiles to zero tests. Its x86 counterparts are
+  `tests/bitlinear_sse2.rs` and `tests/bitlinear_sse2_i8.rs`
+  (`#![cfg(any(target_arch = "x86", target_arch = "x86_64"))]`).
+  When the real GGUF isn't present the integration tests SKIP at
+  runtime.
+* Matvec backend on x86 is **SSE2 int8** by default since v0.5.0 /
+  v0.7.0; fall back to f32 mask-add with `RUSTFLAGS="--cfg
+  willamette_sse2_f32"`. Pure scalar runs only on architectures with
+  no SIMD kernel compiled in (or when no SIMD feature is detected at
+  runtime).
+* Test counts (v0.7.1-mvp): **291** on Mac aarch64 (default cfg),
+  **295** on x86 with the real model present (SSE2 + SSE2-i8
+  integration tests run), **287** on x86 without the model (those
+  integration tests SKIP but unit tests still run).
 
 ## 6. Reproducing the reference comparison
 

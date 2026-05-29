@@ -1,4 +1,6 @@
-# Golden Tests — Project Willamette v0.1.0 MVP
+# Golden Tests — Project Willamette v0.7.1-mvp
+
+*Last revised 2026-05-27.*
 
 Reference outputs that future code changes must preserve. If anything
 in this file regresses, the change is wrong by construction — either

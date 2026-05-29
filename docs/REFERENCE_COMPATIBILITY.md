@@ -181,8 +181,13 @@ existing tests still pass.
   reference prompts, so reference parity is preserved across the
   scalar→NEON transition.
 
-* **Stage 6-B (x86 AVX2/SSE2)** remains deferred — it requires an
-  x86 host to test the produced SIMD against the scalar fallback.
+* **Stage 6-B (x86 SSE2)** landed in v0.5.0 (f32 mask-add) and v0.7.0
+  (int8 activation, now the x86 default). Validated on antiX
+  Pentium-M 2 GHz against the scalar reference; greedy decode is
+  byte-identical to the f32 SSE2 / scalar paths on the canonical
+  prompt. Full numbers in [`BENCHMARKS.md`](BENCHMARKS.md).
+* **Stage 6-B+ (AVX2 / AVX-512 / LUT)** remain deferred — they need
+  modern x86 / SSSE3+ hosts to validate against the scalar reference.
 
 ## 8. Stage 5-E checklist
 
