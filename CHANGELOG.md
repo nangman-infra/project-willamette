@@ -23,7 +23,76 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ## [Unreleased]
 
-_No changes yet._
+Minor-release candidate. **Phase III step 2** — generic
+`ModelArchitecture` trait + registry so the GGUF loader accepts the
+BitNet *family* (`bitnet-b1.58`, `bitnet-25`, `bitnet`) instead of
+just the canonical Microsoft 2B string. Community fine-tunes
+(Aramis French, Bifrost Solana coding) load + greedy-decode
+end-to-end on the antix1 Pentium-M validation host. Design
+document: [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md).
+
+### Added
+
+* `src/model/architecture/` module — `ModelArchitecture` trait,
+  global `OnceLock` registry, `resolve(arch_string) -> Option<&'static dyn …>`.
+  Trait methods: `architecture_strings()`, `metadata_prefix()`,
+  `config_from_meta()`. Object-safe (`Send + Sync + 'static`).
+* `BitNetArchitecture` impl claiming three aliases
+  (`bitnet-b1.58` / `bitnet-25` / `bitnet`); all share the same
+  forward graph + tensor name layout. Equivalence verified by
+  inspecting Aramis + Bifrost — 332 tensors, identical
+  `blk.N.{role}.weight` names (including `attn_sub_norm` +
+  `ffn_sub_norm`), identical hyperparameter values, identical
+  packed byte size.
+* `BitNetConfig::from_gguf_metadata_with_prefix(arch_string, prefix, meta)`
+  — the entry point each architecture impl calls; the old
+  hard-coded `"bitnet-b1.58."` key prefix is gone, the prefix is
+  supplied per arch.
+* `docs/PHASE_III_ARCHITECTURE_RFC.md` (330 lines) — design doc
+  for this work and the upcoming non-BitNet architectures
+  (Llama 2, Phi-3, Gemma). The five-step migration plan's steps
+  3–5 are deferred: building empty `LayerTensorRole` /
+  `ForwardVariant` machinery without a second forward graph to
+  exercise them would be the empty-cathedral shape that
+  [[feedback-principled-design]] warns against.
+
+### Changed
+
+* `BitNetConfig::from_gguf_metadata()` consults the registry via
+  `crate::model::architecture::resolve(arch_string)` instead of
+  hard-coding the canonical string. Unknown
+  `general.architecture` values still raise
+  `UnsupportedArchitecture` (failure surface unchanged).
+* `BitNetConfig::ARCHITECTURE` const kept — `src/synth.rs`
+  still uses it as the canonical writer-side string.
+
+### Tests
+
+* Suite total: **299** (was 291) — `+8`:
+  * `architecture::tests` — 3 (canonical resolve, alias resolve,
+    unknown returns None).
+  * `architecture::bitnet::tests` — 2 (three aliases claimed,
+    prefix equals arch string for each).
+  * `architecture::registry::tests` — 3 (non-empty, OnceLock
+    stability across calls, all aliases share the same impl).
+* End-to-end verified on antix1 Pentium-M (i686 SSE2 i8 default):
+  * Aramis — `"La capitale de la France est"` →
+    `" Paris. La capitale de la Chine est Paris. La capitale"`
+    (greedy, 15 tokens, temp 0). French grammar + first answer
+    correct; factual drift beyond is the underlying 2B base
+    model's limit.
+  * Bifrost — `"fn main() {"` →
+    `"  // Your code here  }  {  }  return 0"` (greedy, 15
+    tokens, temp 0). Code-domain follow-on.
+
+### Compatibility
+
+* No API removal. New public surface: `model::architecture`
+  module (trait + `resolve()` + `BitNetArchitecture`). Existing
+  callers of `BitNetConfig::from_gguf_metadata` see no signature
+  change.
+* Microsoft 2B reference path is byte-identical (load + forward).
+  All 291 pre-existing tests still pass on Mac aarch64.
 
 ## [v0.7.1-mvp] — 2026-05-27
 

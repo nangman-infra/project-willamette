@@ -1,6 +1,6 @@
 # Limitations — Project Willamette v0.7.1-mvp
 
-*Last revised 2026-05-27.*
+*Last revised 2026-05-29 (Phase III step 2 — BitNet family registry).*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
@@ -20,11 +20,20 @@ Anything outside this combination returns a typed error
 
 ### Not supported
 
-* **Other architectures.** Only `general.architecture = "bitnet-b1.58"`
-  is accepted. Plain `bitnet` (24/26 layer Microsoft BitNet) and
-  `bitnet-25` use the same forward graph upstream but Willamette has
-  not been validated on them; constructing a `BitNetConfig` from one
-  will reject the architecture string.
+* **Architectures outside the BitNet family.** Willamette accepts the
+  BitNet family (`bitnet-b1.58`, `bitnet-25`, `bitnet`) through the
+  `ModelArchitecture` registry (see `src/model/architecture/`).
+  `bitnet-25` was end-to-end verified on antix1 against
+  [`jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF`](https://huggingface.co/jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF)
+  and
+  [`Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf`](https://huggingface.co/Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf).
+  The bare `bitnet` string (paper-era 24/26-layer variants) is
+  accepted on the assumption that its metadata prefix matches the
+  arch string — that branch will be confirmed the first time such a
+  GGUF is in hand. Llama / Mistral / Phi / Gemma remain rejected;
+  the design path for them is
+  [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md)
+  § 5.4 (Phase III-B).
 * **Other GGUF quantisations.** F32, F16, Q4_0, Q4_K, Q8_0, IQ4_XS,
   TL1, TL2, … will parse via `willamette inspect` (the GGUF reader
   enumerates them and labels them by raw u32) but the BitLinear matvec
@@ -86,7 +95,9 @@ The following errors are real and intentional, not "should never
 happen" guards:
 
 * `UnsupportedArchitecture("xxx")` — `general.architecture` is not
-  `"bitnet-b1.58"`.
+  claimed by any impl in the
+  [`crate::model::architecture::registry`] (today: the BitNet
+  family — `bitnet-b1.58`, `bitnet-25`, `bitnet`).
 * `UnsupportedTensorType(N)` — any tensor whose raw `u32` ggml_type is
   not one of the small set we recognise. `inspect` will print the raw
   number; if that number is genuinely a new BitNet type, upgrade

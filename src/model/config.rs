@@ -5,9 +5,11 @@
 //! `LLM_KV_ATTENTION_LAYERNORM_RMS_EPS` and asserts `n_layer == 30 → MODEL_2B`)
 //! at the pinned commit.
 //!
-//! This module does not infer values, does not invent defaults beyond a
-//! single derived `head_dim`, and does not accept architectures other than
-//! `"bitnet-b1.58"`.
+//! This module does not infer values and does not invent defaults beyond a
+//! single derived `head_dim`. The set of accepted `general.architecture`
+//! strings is owned by [`crate::model::architecture::registry`] — today
+//! the BitNet family (`bitnet-b1.58`, `bitnet-25`, `bitnet`); unknown
+//! strings still return `UnsupportedArchitecture`.
 
 use std::collections::HashMap;
 

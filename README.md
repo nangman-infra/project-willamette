@@ -64,8 +64,9 @@ What works **today**, on the path toward the thesis:
 
 | Property | Value |
 | -------- | ----- |
-| Working model | `microsoft/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf` (1.1 GiB ternary) |
+| Working reference model | `microsoft/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf` (1.1 GiB ternary) |
 | Model SHA256 | `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162` |
+| BitNet-family fine-tunes accepted | ✅ `bitnet-b1.58`, `bitnet-25`, `bitnet` GGUF strings load through `model::architecture::registry`. End-to-end greedy decode verified on antix1 against [`jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF`](https://huggingface.co/jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF) (French) and [`Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf`](https://huggingface.co/Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf) (Solana coding). See [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md). |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
 | Apple Silicon NEON kernel | ✅ implemented + validated (Apple M4 dev host) |
@@ -78,7 +79,7 @@ What works **today**, on the path toward the thesis:
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **291** passing (Mac aarch64), 295 (x86 with SSE2 paths), 0 warnings, `cargo test --release` |
+| Tests | **299** passing (Mac aarch64), 303 (x86 with SSE2 paths), 0 warnings, `cargo test --release` |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
 | Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 
@@ -86,7 +87,7 @@ What does **not** work yet but is on the roadmap toward the thesis:
 
 | Property | Value |
 | -------- | ----- |
-| Model coverage beyond BitNet b1.58 (Llama / Mistral / Phi / …) | ❌ runtime hardcoded to BitNet b1.58 |
+| Model coverage beyond the BitNet family (Llama / Mistral / Phi / Gemma) | ❌ BitNet family (`bitnet-b1.58` / `bitnet-25` / `bitnet`) accepted today; non-BitNet architectures pending Phase III-B — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
 | Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ only `I2_S` |
 | `willamette-prep` (offline preprocessor) | ❌ not started — thesis's missing half |
 | AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
