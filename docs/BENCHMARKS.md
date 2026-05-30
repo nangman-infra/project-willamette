@@ -75,7 +75,7 @@ scalar** gate. attn_q (2560×2560) on the real BitNet 2B GGUF:
 | --- | ---: | ---: | ---: | --- | ---: |
 | Mac M4 (aarch64) | 16.349 ms | **1.160 ms** | **14.09× PASS** | NEON | LUT is way slower than NEON — sanity only |
 | **mbp2012** (Ivy Bridge) | 24.945 ms | **2.652 ms** | **9.41× PASS** | x86_64 SSE2 (i8), 1.050 ms | LUT **0.40× the default** (i.e. SSE2 i8 is **2.5×** *faster* than scalar LUT) |
-| antix1 (Pentium-M) | — | — | — | — | **not measured** — antix1 was SSH-unreachable when the cycle ran |
+| **antix1** (Pentium-M) | **59.876 ms** | **7.011 ms** | **8.54× PASS** | i686 SSE2 (i8), **37.083 ms** | **LUT is 5.29× *faster* than the default — production-beating** |
 
 ### Reading
 
