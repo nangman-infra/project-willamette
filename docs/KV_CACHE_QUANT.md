@@ -176,6 +176,64 @@ The group-quant fix re-opens this section with a *measured* fidelity report.
 Until then, **per-token absmax i8 stays the default**; the gap from
 v0.9.0's 3.97× shrink to a hypothetical 7-8× is not free.
 
+## Measured long-context behaviour (2026-05-30)
+
+The earlier "antix1 ~13 K-token ceiling" was an *upper-bound
+extrapolation* from the per-position formula (~37.7 KB/token × ~500 MB
+available budget). An empirical 800-token greedy generation on antix1
+shows the formula massively overstates the runtime memory pressure:
+
+| Sample window | RSS / VmHWM growth (KB/token) |
+| --- | ---: |
+| Formula (per-position cache size) | 37.7 |
+| **antix1 observed VmHWM peak** | **0.45** (i.e. essentially zero) |
+| antix1 observed VmData (real heap) | 4.07 |
+| mbp2012 observed VmHWM peak | 32.7 |
+
+Why the antix1 number is so low: `KVCache::new(n_layers, kv_dim,
+max_seq_len)` calls `Vec::with_capacity` for the **full** i8 buffer up
+front. On Linux i686 the glibc allocator pre-commits those pages
+eagerly (versus x86_64's lazier policy seen on mbp2012's 32.7 KB/token
+shape). Once the capacity is reserved, subsequent `append` calls
+write into already-committed pages — VmHWM doesn't move, only VmData
+ticks up with small auxiliary allocations.
+
+The practical consequence: **the user-visible chat-length ceiling on
+antix1 is the `max_seq_len` argument passed at startup, not a runtime
+memory cliff**. `cargo run --release …` sets
+`max_seq_len = prompt_len + max_new_tokens + 16` automatically (see
+`src/main.rs::cmd_run`), so a 100-token run only reserves ~5 MB of
+cache. `cargo run --release -- chat --max-seq-len 4096` reserves the
+model's full 4 096-token allocation up front, which by the formula is
+4 096 × 37.7 KB = 154 MB — antix1 holds that easily inside its 800-MB
+available budget after the 1.1 GB mmap.
+
+The "~13 K-token ceiling" stays *technically* true as a hypothetical
+upper bound (max bytes the allocation *could* commit), but a chat user
+running on antix1 will not see KV growth as the limiting factor. The
+real limit on this host is **the model's own 4 096-position context
+length**, and the v0.9.0 i8 KV cache lets antix1 stay inside that
+limit without RAM trouble.
+
+### Reproducibility
+
+```bash
+# On antix1:
+~/willamette-v0.9.0-mvp/willamette run \
+    --model ~/models/ggml-model-i2_s.gguf \
+    --prompt "Once upon a time" \
+    --max-new-tokens 800 \
+    --temperature 0 &
+RPID=$!
+while kill -0 $RPID 2>/dev/null; do
+    awk '/VmRSS|VmHWM|VmData/ {print}' /proc/$RPID/status
+    sleep 20
+done
+```
+
+Captures VmRSS / VmHWM / VmData every 20 s; final VmHWM should land
+near `model_mmap + 1-2 MB`, not `model_mmap + 800 × 37.7 KB`.
+
 ## Out of scope (intentional)
 
 * **i8-direct attention dot product.** The current implementation
