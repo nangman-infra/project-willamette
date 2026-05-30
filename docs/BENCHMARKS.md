@@ -63,6 +63,214 @@ bitnet.cpp's production CPU path implicitly requires** (see the
 low-end x86 thin clients, and legacy desktops sit in this sub-AVX2
 band; this is the first time we have direct numbers on one.
 
+## 2026-05-30 — Decode-step stage breakdown — where the 90 % goes
+
+After the 2026-05-30 LUT step-3 wrap-up the project's open question was:
+*"if BitLinear matvec is ~10 % of decode-step on antix1, what makes
+up the other ~90 %?"*. That 10 % figure was an arithmetic
+extrapolation (`7 ms matvec × 30 layers ≈ 240 ms / 2 491 ms decode-
+step`), not a measurement. This section measures it.
+
+### Method
+
+Commit `f006eb9` adds `src/model/stage_timing.rs` — a thread-local
+per-stage accumulator behind `--cfg willamette_stage_timing`. When the
+cfg is off, the `time_stage!` macro expands to its body verbatim (no
+`Instant::now`, no TLS access), so the default release build is
+byte-for-byte unchanged. Stage 5-E greedy decode of
+`"The capital of France is"` returns
+`[12366, 13, 12366, 374, 264]` byte-identical in both build modes.
+
+Stages instrumented inside `cached_forward.rs`:
+
+* `embedding` — input token lookup (once per decode step)
+* `attn_norm`, `attn_sub_norm`, `ffn_norm`, `ffn_sub_norm`,
+  `output_norm` — RMSNorm (5 per decode step — 4 per layer × 30 layers
+  + 1 final)
+* `matvec_qkv` — three BitLinear matvecs (attn_q, attn_k, attn_v)
+* `matvec_attn_output` — one BitLinear matvec (attn_output)
+* `matvec_ffn_gate_up` — two BitLinear matvecs (ffn_gate, ffn_up)
+* `matvec_ffn_down` — one BitLinear matvec (ffn_down)
+* `rope` — both Q-side and K-side NEOX rotary application
+* `kv_append`, `kv_read_into` — i8 KV cache write + dequant read
+* `attn_softmax_v` — `Q·Kᵀ`, softmax, and the weighted-V scan
+* `ffn_relu2_emul` — ReLU² gate + gate ⊙ up
+* `residual_attn`, `residual_ffn` — the two per-layer residuals
+* `check_finite` — per-layer NaN guard
+
+Each host ran `bench --decode-steps 10` three times. Stages are summed
+across all 300 BitLinear-bearing layer calls (10 steps × 30 layers).
+Per-stage variance across the three runs:
+
+* Matvec rows (every line ≥ 10 % of decode): ≤ ±5 % from median on
+  mbp2012, ≤ ±1 % on antix1.
+* Sub-1 % stages (e.g. `rope` 0.32 / 0.46 / 0.33 % on mbp2012,
+  `kv_read_into` 0.05 / 0.05 / 0.06 % on antix1) varied by up to
+  ±25 % from median in *relative* terms, but the absolute jitter is
+  ≤ 7 ms / decode-step in every case — well inside the ±10 %
+  decode-step reproducibility budget for the totals. The conclusions
+  in *Dominant components* below depend only on the matvec rows, so
+  the sub-1 % jitter is reportable but not load-bearing.
+
+### mbp2012 — x86_64 SSE2 (i8), median (run 2 of 3 by total)
+
+Run-to-run variance: total decode-step ranged 4 348 / 4 333 / 4 071 ms
+across the 3 runs (≤ ±3.2 % from median). The biggest matvec row
+(`matvec_ffn_gate_up`) varied 50.1 / 50.1 / 50.7 % across the same
+3 runs.
+
+| Stage | total ms | % of decode | mean µs per call |
+| --- | ---: | ---: | ---: |
+| `matvec_ffn_gate_up` (FFN gate + up) | 2 172.011 | **50.13 %** | 7 240.0 |
+| `matvec_ffn_down` (FFN down) | 1 135.612 | 26.21 % | 3 785.4 |
+| `matvec_qkv` (attn Q/K/V) | 600.182 | 13.85 % | 2 000.6 |
+| `matvec_attn_output` (attn output) | 382.173 | 8.82 % | 1 273.9 |
+| `rope` (Q + K NEOX) | 19.841 | 0.46 % | 66.14 |
+| RMSNorms (4× per layer + final) | 7.738 | 0.18 % | 6.34 / call avg |
+| KV append + read_into | 6.208 | 0.14 % | 10.35 / call avg |
+| `attn_softmax_v` (scores + softmax + V scan) | 5.961 | 0.14 % | 19.87 |
+| `ffn_relu2_emul` (ReLU² + elementwise mul) | 1.538 | 0.04 % | 5.13 |
+| Residuals + finite check (3 stages combined) | 1.324 | 0.03 % | 1.47 / call avg |
+| Embedding (1× per step) | 0.058 | 0.001 % | 5.77 |
+| **TOTAL (sum of stages)** | **4 332.6** | 100 % | — |
+| (per decode step) | **433.3 ms / 2.31 tok/s** | — | — |
+
+> 4 332.6 ms is the sum of `time_stage!` samples across 10 decode steps.
+> Wall-clock decode-step from the same bench (1 000 ms / 2.29 tok/s)
+> was 436.7 ms, so the instrumentation captures 99.22 % of the work
+> — overhead is ~3.4 ms out of 437 ms, well below the per-run noise
+> floor.
+
+**The four BitLinear matvec stages together are 99.02 % of decode
+time on mbp2012.** Everything else — RMSNorm, RoPE, softmax + V scan,
+KV append/read, FFN non-linearity, embedding, residuals, finite-check
+— totals **0.98 %** combined. This is a much sharper picture than
+the prior "matvec is ~10 % on antix1" extrapolation — see *Reading*
+below.
+
+### antix1 — i686 SSE2 (scalar LUT), median (run 2 of 3 by total)
+
+Run-to-run variance: total decode-step ranged 52 345 / 52 045 / 51 992
+ms across the 3 runs (≤ ±0.6 % from median). The biggest matvec row
+varied 48.58 / 48.41 / 48.40 % across the same 3 runs — antix1 is
+single-core, so cross-run noise is much tighter than on mbp2012.
+
+| Stage | total ms | % of decode | mean µs per call |
+| --- | ---: | ---: | ---: |
+| `matvec_ffn_gate_up` (FFN gate + up) | 25 195.981 | **48.41 %** | 83 986.6 |
+| `matvec_ffn_down` (FFN down) | 14 234.639 | 27.35 % | 47 448.8 |
+| `matvec_qkv` (attn Q/K/V) | 7 701.546 | 14.80 % | 25 671.8 |
+| `matvec_attn_output` (attn output) | 4 607.114 | 8.85 % | 15 357.0 |
+| `rope` (Q + K NEOX) | 113.178 | 0.22 % | 377.3 |
+| `attn_softmax_v` (scores + softmax + V scan) | 64.210 | 0.12 % | 214.0 |
+| RMSNorms (4× per layer + final) | 59.067 | 0.11 % | 48.41 / call avg |
+| KV append + read_into | 48.677 | 0.09 % | 81.13 / call avg |
+| `ffn_relu2_emul` (ReLU² + elementwise mul) | 13.824 | 0.03 % | 46.08 |
+| Residuals + finite check (3 stages combined) | 6.171 | 0.012 % | 6.86 / call avg |
+| Embedding (1× per step) | 0.328 | 0.0006 % | 32.79 |
+| **TOTAL (sum of stages)** | **52 044.7** | 100 % | — |
+| (per decode step) | **5 204.5 ms / 0.192 tok/s** | — | — |
+
+> 52 044.7 ms is the sum of `time_stage!` samples across 10 decode
+> steps. Wall-clock decode-step (`Time: ...`) printed 5 216.9 ms,
+> so the instrumentation captures 99.76 % of the work — overhead
+> on this slow host is ~12 ms / 5 217 ms, well inside noise.
+
+**The four BitLinear matvec stages together are 99.41 % of decode
+time on antix1.** Everything else — RMSNorm, RoPE, softmax + V scan,
+KV append/read, FFN non-linearity, embedding, residuals, finite-check
+— totals **0.59 %** combined. The matvec share is even higher on
+antix1 than on mbp2012 (99.41 % vs 99.02 %) because the scalar LUT
+matvec stretches further on the narrow SSE2 pipeline while the
+non-matvec stages (already short) shrink proportionally less.
+
+### Reading
+
+The earlier (2026-05-30 LUT step-3) claim that BitLinear matvec is
+"~10 % of decode time" on antix1 was an **extrapolation error**, not
+a measurement. It computed the matvec budget as `7 ms (single attn_q
+warmed sample) × 30 layers`. But every BitNet b1.58 transformer
+block has **seven** BitLinear matvecs per layer, not one:
+
+* attn_q, attn_k, attn_v (kv_dim, kv_dim, kv_dim outputs)
+* attn_output (n_embd output)
+* ffn_gate, ffn_up (n_ff output, **typically 4-8× n_embd**)
+* ffn_down (n_embd input from n_ff, **the biggest single weight matrix
+  in the model**)
+
+The FFN matvecs dominate because `n_ff = 6912` vs `n_embd = 2560`
+(2.7× per output element) and `n_ff` shows up on **both sides** of the
+FFN block (gate+up reads + down writes). The mbp2012 numbers above
+make this explicit: `matvec_ffn_gate_up` alone is 50.13 % of decode
+time, and the three FFN-shaped matvecs together (`gate_up` + `down`)
+are 76.34 %.
+
+### Dominant components — both hosts
+
+* **All seven BitLinear matvecs together** (= every `matvec_*` row)
+  account for **99.02 % of decode time on mbp2012** and **99.41 % on
+  antix1**. This is roughly an order of magnitude larger share than
+  the prior extrapolation suggested.
+* The single biggest line item on both hosts is the **FFN gate+up
+  pair**, at ~50 % of decode on mbp2012 and 48 % on antix1. The
+  FFN-down matvec is the second-biggest, at ~26-27 % on both hosts.
+* The mbp2012 and antix1 stage shares track each other within ±2 pp
+  across the entire breakdown despite the 12× gap in absolute
+  decode-step time (433 ms vs 5 205 ms). The bottleneck is the same
+  on both hosts — only the scaling factor differs.
+
+### Recommended next code track
+
+The next code track is the **BitLinear matvec itself — specifically
+the FFN-shaped variant** (`n_ff = 6912` rows), because cutting its
+runtime is the only way to move the decode-step budget meaningfully.
+Concrete candidates, ordered by expected leverage on mbp2012-class
+hardware (SSSE3+ available):
+
+1. **SSSE3 `pshufb`-based ternary LUT for the FFN matvecs** (RFC § 5
+   step 4, currently parked because step-3 showed scalar LUT didn't
+   beat SSE2 i8 on the attn_q matvec). Step 4 was deferred under the
+   assumption that the gain would be a small fraction of a small
+   fraction of the budget; this measurement says the *base* is 99 %,
+   so even a modest 1.3× on the matvec is a measurable end-to-end
+   move. The step-4 gate should be re-stated as **"beat SSE2 i8 on
+   the FFN matvec specifically"** (`n_ff = 6912`, much larger than
+   the attn_q matvec step-3 measured), not "on attn_q".
+2. **Multi-row matvec batching** for FFN-shaped weights. The current
+   `bitlinear_i2s_matvec_f32` produces one output element per pass
+   over the input vector; FFN-down would also benefit from being
+   driven as `M=2560 × N=6912` rather than 2 560 independent dots.
+
+KV cache attention dot-products (`attn_softmax_v`, 0.14 % on
+mbp2012, 0.12 % on antix1) and KV append/read_into (0.14 % / 0.09 %)
+are **below the noise floor** for code-track prioritisation right
+now. The 2026-05-25 i8 KV cache work (3.97× memory shrink) was a
+sound *memory* win, but a further i4 group-quant of the KV cache
+would only move a ~0.2 % line item on either host — well below the
+run-to-run variance.
+
+The same logic rules out micro-optimising RMSNorm, RoPE, the FFN
+non-linearity, or the residuals: each is ≤ 0.5 % of decode on both
+hosts. Combined, every non-matvec stage on antix1 totals 305 ms
+across 10 decode-steps (≈ 31 ms per step out of 5 205 ms). Even
+eliminating every non-matvec line item entirely would buy 0.6
+percentage points end-to-end — well below the run-to-run noise.
+The matvec is where the work is.
+
+### Reproducibility
+
+```bash
+RUSTFLAGS="--cfg willamette_stage_timing" cargo build --release
+./target/release/project-willamette bench \
+    --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf \
+    --decode-steps 10
+```
+
+A default-build (no cfg) bench prints `stage timing: instrumentation
+not compiled in (rebuild with…)` instead of the table, so a
+production binary cannot accidentally serve a misleading empty
+breakdown.
+
 ## 2026-05-30 — LUT step-1 prototype measurement (RFC § 5 step 1)
 
 Followed `docs/LUT_KERNEL_RFC.md` step 1: pure-Rust scalar LUT
