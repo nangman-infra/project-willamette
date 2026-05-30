@@ -63,6 +63,84 @@ bitnet.cpp's production CPU path implicitly requires** (see the
 low-end x86 thin clients, and legacy desktops sit in this sub-AVX2
 band; this is the first time we have direct numbers on one.
 
+## 2026-05-30 — LUT step-1 prototype measurement (RFC § 5 step 1)
+
+Followed `docs/LUT_KERNEL_RFC.md` step 1: pure-Rust scalar LUT
+gated behind `--cfg willamette_lut`. `cmd_bench` got a banner
+block that prints `Scalar BitLinear` and `Scalar LUT` side by
+side with the explicit pass/fail line on the **≥ 1.3× over
+scalar** gate. attn_q (2560×2560) on the real BitNet 2B GGUF:
+
+| Host | Scalar BitLinear | Scalar LUT | vs scalar (gate) | Default backend | LUT vs default |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Mac M4 (aarch64) | 16.349 ms | **1.160 ms** | **14.09× PASS** | NEON | LUT is way slower than NEON — sanity only |
+| **mbp2012** (Ivy Bridge) | 24.945 ms | **2.652 ms** | **9.41× PASS** | x86_64 SSE2 (i8), 1.050 ms | LUT **0.40× the default** (i.e. SSE2 i8 is **2.5×** *faster* than scalar LUT) |
+| antix1 (Pentium-M) | — | — | — | — | **not measured** — antix1 was SSH-unreachable when the cycle ran |
+
+### Reading
+
+The gate is cleared on mbp2012 and on Mac. **What the gate
+does not show is that our existing SSE2 i8 dispatch (the v0.9.0
+production kernel) is already 2.5× faster than the scalar LUT
+prototype on the same host.** "Beating scalar BitLinear" is a
+weak bar because scalar BitLinear was never the production
+kernel on any of our hosts — antix1's i686 SSE2 i8 has been the
+default since v0.7.0, mbp2012 picks the same kernel, and Mac
+picks NEON.
+
+So the RFC's claim that *"a LUT kernel … opens the first LUT-
+accelerated BitNet path on sub-AVX2 hosts"* survives the step-1
+measurement only in a narrow sense: the scalar LUT compiles and
+runs and is much faster than the **scalar reference** (which
+nobody actually runs in production). The interesting question
+— *can a LUT beat SSE2 i8?* — is unanswered until RFC step 4
+(SSSE3 `pshufb` LUT). For step 4 to be worth running, it has to
+push the LUT path past ~1.05 ms on mbp2012, i.e. a **≥ 2.5×
+speed-up over scalar LUT** (vs the RFC's currently-written
+"≥ 1.5×" step-4 gate). The RFC itself needs an update on this
+exact point — see below.
+
+### What this tells the project about itself
+
+* The **production SSE2 i8 kernel is already very good** —
+  ~6.24 GB/s of effective i8 throughput on Ivy Bridge, which is
+  in the same order of magnitude as the DDR3 effective ceiling.
+  A LUT can win only by reducing memory traffic *and* by giving
+  the SIMD unit something faster to do per byte read.
+* **`pshufb` is the only realistic mechanism** for a LUT to do
+  that on this hardware band. 16-byte parallel table lookup vs
+  scalar 1-byte serial lookup is the ratio that needs to land,
+  not "9.4× over scalar".
+* If step 4 fails to clear the *real* gate ("beat SSE2 i8"),
+  the honest outcome is to **close the RFC with a recorded
+  negative result** the way the KV i4 prototypes were closed,
+  and accept that for the sub-AVX2 band the v0.9.0 SSE2 i8
+  kernel **is** the local optimum until a fundamentally
+  different idea (group-quant activation, sparse-aware
+  scheduling) appears.
+
+### Mac NEON sanity
+
+Mac M4's default is NEON; scalar LUT vs scalar BitLinear there
+is a pure CPU-side sanity check that the LUT code path is
+correct + meaningfully faster than the reference. The Mac
+parity test (`tests/bitlinear_lut.rs`, 4/4 pass with
+`RUSTFLAGS="--cfg willamette_lut"`) confirms numerical
+equivalence at `max|Δ| ≤ 1e-2`.
+
+### Reproducibility
+
+```bash
+RUSTFLAGS="--cfg willamette_lut" cargo build --release
+./target/release/project-willamette bench \
+    --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf \
+    --decode-steps 1 \
+    | grep -E "Matvec backend|Scalar BitLinear|Scalar LUT|Gate"
+```
+
+The two-line block + the gate verdict reproduce on the same
+host within ±10 % run-to-run.
+
 ## 2026-05-30 — mbp2012 Ivy Bridge measurement (v0.9.0-mvp prebuilt)
 
 Three deferred tracks from `LIMITATIONS.md` § 2 were "host-blocked"

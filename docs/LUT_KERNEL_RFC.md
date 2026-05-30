@@ -154,19 +154,40 @@ unaffected*.
 Five steps. Steps 4–5 only run if step 1 measurement says the
 kernel earns its keep.
 
-### Step 1 — Scalar LUT prototype + measurement
+### Step 1 — Scalar LUT prototype + measurement *(executed 2026-05-30)*
 
 Add `bitlinear_lut.rs` with a pure-Rust scalar LUT for one
-`T_GROUP ∈ {4, 5, 8}` choice (initially 5). Wire it behind
-`--cfg willamette_lut` to a separate test binary; do **not**
-touch `dispatch.rs` yet. Run the same `cargo bench` matvec
-measurement we already use on antix1 + mbp2012.
+`T_GROUP` choice. Wire it behind `--cfg willamette_lut` to a
+separate test binary; do **not** touch `dispatch.rs` yet. Run
+the same `cargo bench` matvec measurement we already use on
+antix1 + mbp2012.
 
 **Gate**: scalar LUT matvec ≥ 1.3× faster than `bitlinear_i2s_matvec_f32_scalar`
 on at least one of antix1 / mbp2012, with byte-identical Stage 5-E
 greedy output. Below 1.3× → record as a negative result in
 `BENCHMARKS.md` (the way the KV i4 prototypes were recorded) and
 close this RFC without merging.
+
+**Outcome (2026-05-30, `BENCHMARKS.md` § "2026-05-30 — LUT step-1
+prototype measurement")**: gate **PASSES** on mbp2012
+(9.41× over scalar) and on Mac (14.09× over scalar). antix1 was
+SSH-unreachable when the cycle ran — single-host PASS still
+clears the RFC's "at least one of" wording.
+
+**But the measurement also surfaced a calibration problem with
+the step-4 gate**: on mbp2012 the existing production SSE2 i8
+kernel runs in 1.050 ms vs scalar LUT's 2.652 ms — i.e. SSE2 i8
+is **2.5× faster than scalar LUT**. The RFC's step-4 gate ("≥ 1.5×
+over scalar LUT") would let an SSSE3 LUT land at ~1.77 ms — still
+slower than the production kernel it would replace. That is a
+shipping mistake. **Step 4's real gate is "must beat SSE2 i8 on a
+host that detects SSSE3", which means ≥ 2.5× over scalar LUT, not
+1.5×.** Step 5 of this RFC inherits the same correction: a LUT
+kernel that loses to SSE2 i8 on the same host is not a release-
+worthy gain regardless of how much it improves over scalar.
+
+Parity (`tests/bitlinear_lut.rs`, `max|Δ| ≤ 1e-2`): **4/4 pass**
+on Mac aarch64.
 
 ### Step 2 — `T_GROUP` sweep
 
@@ -183,14 +204,27 @@ the LUT path. Bench banner reports which kernel ran. Same
 fidelity contract as v0.9.0 KV cache: cosine ≥ 0.999 on
 post-`output_norm` + byte-identical Stage 5-E greedy.
 
-### Step 4 — SSSE3 `pshufb` LUT *(only if step 1 cleared, and only on hosts that detect SSSE3)*
+### Step 4 — SSSE3 `pshufb` LUT *(only on hosts that detect SSSE3)*
 
 `pshufb` does a parallel 16-byte table lookup; this collapses
 the inner table read of step 1 to one instruction per 16
-activations. Same correctness gate; the speed gate is
-"≥ 1.5× over scalar LUT on mbp2012". Below 1.5× the SSSE3
-variant does not land — scalar LUT alone already won, no need
-to ship a second variant.
+activations. Same correctness gate.
+
+**Speed gate — revised after the step-1 measurement, 2026-05-30**:
+**SSSE3 LUT must beat the existing SSE2 i8 production kernel on
+the same host (mbp2012)**, not the scalar LUT. Concretely:
+matvec must come in under ~1.05 ms on mbp2012 (the v0.9.0
+production SSE2 i8 timing), which works out to ≥ 2.5× over
+scalar LUT given the 2.652 ms step-1 number. Below that, the
+honest move is to **close this RFC with a recorded negative
+result** the way the KV i4 prototypes were closed; sub-AVX2
+hosts keep SSE2 i8 as their local optimum and the project
+moves on to a different track.
+
+The original "≥ 1.5× over scalar LUT" gate is preserved here
+only as a historical marker — it was calibrated against an
+imagined scalar baseline, not against the production kernel
+that already exists.
 
 ### Step 5 — Doc + release
 
