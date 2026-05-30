@@ -6,6 +6,8 @@
 pub mod architecture;
 pub mod attention;
 pub mod bitlinear;
+#[cfg(willamette_lut)]
+pub mod bitlinear_lut;
 #[cfg(target_arch = "aarch64")]
 pub mod bitlinear_neon;
 pub mod bitlinear_sparse;

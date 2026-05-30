@@ -1008,6 +1008,49 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     );
     println!();
 
+    // ── 1.5) Scalar BitLinear + scalar LUT comparison (LUT step-1 gate) ──
+    {
+        use project_willamette::model::bitlinear::bitlinear_i2s_matvec_f32_scalar;
+        let mut q_scalar = vec![0.0_f32; mv_out];
+        // Warm-up.
+        bitlinear_i2s_matvec_f32_scalar(attn_q, &x, &mut q_scalar)
+            .map_err(|e| anyhow::anyhow!("scalar matvec warm-up: {}", e))?;
+        let t = Instant::now();
+        bitlinear_i2s_matvec_f32_scalar(attn_q, &x, &mut q_scalar)
+            .map_err(|e| anyhow::anyhow!("scalar matvec: {}", e))?;
+        let scalar_ms = t.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "Scalar BitLinear (LUT step-1 baseline): {:.3} ms ({:.2} M elem/s)",
+            scalar_ms,
+            (mv_in as f64 * mv_out as f64) / (scalar_ms / 1000.0) / 1.0e6
+        );
+
+        #[cfg(willamette_lut)]
+        {
+            use project_willamette::model::bitlinear_lut::bitlinear_i2s_matvec_f32_lut_scalar;
+            let mut q_lut = vec![0.0_f32; mv_out];
+            bitlinear_i2s_matvec_f32_lut_scalar(attn_q, &x, &mut q_lut)
+                .map_err(|e| anyhow::anyhow!("lut matvec warm-up: {}", e))?;
+            let t = Instant::now();
+            bitlinear_i2s_matvec_f32_lut_scalar(attn_q, &x, &mut q_lut)
+                .map_err(|e| anyhow::anyhow!("lut matvec: {}", e))?;
+            let lut_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let speedup = scalar_ms / lut_ms;
+            println!(
+                "Scalar LUT (step-1 prototype):        {:.3} ms ({:.2} M elem/s)  → {:.2}× vs scalar",
+                lut_ms,
+                (mv_in as f64 * mv_out as f64) / (lut_ms / 1000.0) / 1.0e6,
+                speedup
+            );
+            println!(
+                "  Gate (RFC § 5 step 1): {} {} 1.3×",
+                if speedup >= 1.3 { "PASS" } else { "FAIL" },
+                if speedup >= 1.3 { "≥" } else { "<" }
+            );
+        }
+    }
+    println!();
+
     // ── 2) Single-token full forward (no cache) ──
     let t = Instant::now();
     let _hidden = forward_single_token_position_zero(&graph, bench_token)

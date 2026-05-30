@@ -44,4 +44,5 @@ strip = true
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(willamette_i8_activations)",
     "cfg(willamette_sse2_f32)",
+    "cfg(willamette_lut)",
 ] }
