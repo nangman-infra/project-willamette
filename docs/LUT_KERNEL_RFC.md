@@ -169,25 +169,34 @@ greedy output. Below 1.3× → record as a negative result in
 close this RFC without merging.
 
 **Outcome (2026-05-30, `BENCHMARKS.md` § "2026-05-30 — LUT step-1
-prototype measurement")**: gate **PASSES** on mbp2012
-(9.41× over scalar) and on Mac (14.09× over scalar). antix1 was
-SSH-unreachable when the cycle ran — single-host PASS still
-clears the RFC's "at least one of" wording.
+prototype measurement")**: gate **PASSES** on every measured
+host:
 
-**But the measurement also surfaced a calibration problem with
-the step-4 gate**: on mbp2012 the existing production SSE2 i8
-kernel runs in 1.050 ms vs scalar LUT's 2.652 ms — i.e. SSE2 i8
-is **2.5× faster than scalar LUT**. The RFC's step-4 gate ("≥ 1.5×
-over scalar LUT") would let an SSSE3 LUT land at ~1.77 ms — still
-slower than the production kernel it would replace. That is a
-shipping mistake. **Step 4's real gate is "must beat SSE2 i8 on a
-host that detects SSSE3", which means ≥ 2.5× over scalar LUT, not
-1.5×.** Step 5 of this RFC inherits the same correction: a LUT
-kernel that loses to SSE2 i8 on the same host is not a release-
-worthy gain regardless of how much it improves over scalar.
+| Host | scalar LUT vs scalar BitLinear | scalar LUT vs production default |
+| --- | ---: | ---: |
+| Mac M4 (NEON default)   | 14.09× | (sanity only — NEON is default) |
+| mbp2012 (SSE2 i8 default 1.05 ms) | 9.41× | **0.40×** (SSE2 i8 wins by 2.5×) |
+| **antix1 (SSE2 i8 default 37.08 ms)** | **8.54×** | **5.29×** (LUT wins decisively) |
+
+**The antix1 number is what makes RFC step 3 actually worth
+shipping.** Pentium-M's narrow SIMD pipeline + 16 KiB L1d makes
+the SSE2 i8 kernel slow enough that the scalar LUT's one-byte-per-
+table-read inner loop wins by 5.29× on the dominant decode-step
+component. mbp2012 still loses with LUT because its Ivy Bridge
+SIMD already does in one instruction what the LUT collapses into
+one table read.
+
+**Step-4 gate recalibration (kept from the original step-1 doc
+write-up, still correct)**: any SSSE3 `pshufb` LUT has to beat
+SSE2 i8 on the same host, which means ≥ 2.5× over scalar LUT
+on mbp2012 (1.05 ms / 2.65 ms). The original "≥ 1.5× over scalar
+LUT" wording is dropped because it would have let step 4 land a
+regression.
 
 Parity (`tests/bitlinear_lut.rs`, `max|Δ| ≤ 1e-2`): **4/4 pass**
-on Mac aarch64.
+on Mac aarch64. antix1 + mbp2012 inherit the same parity from
+the algorithmic equivalence; integration parity on those hosts
+lands with step 3 (the byte-identical Stage 5-E gate).
 
 ### Step 2 — `T_GROUP` sweep
 

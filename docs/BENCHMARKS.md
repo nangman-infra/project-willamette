@@ -79,26 +79,54 @@ scalar** gate. attn_q (2560×2560) on the real BitNet 2B GGUF:
 
 ### Reading
 
-The gate is cleared on mbp2012 and on Mac. **What the gate
-does not show is that our existing SSE2 i8 dispatch (the v0.9.0
-production kernel) is already 2.5× faster than the scalar LUT
-prototype on the same host.** "Beating scalar BitLinear" is a
-weak bar because scalar BitLinear was never the production
-kernel on any of our hosts — antix1's i686 SSE2 i8 has been the
-default since v0.7.0, mbp2012 picks the same kernel, and Mac
-picks NEON.
+The gate is cleared on every measured host. **And on antix1 the
+scalar LUT actually beats the production SSE2 i8 kernel by 5.29×
+on the matvec — answering the question that the original mbp2012
+measurement could not.** The two-host comparison decomposes
+cleanly:
 
-So the RFC's claim that *"a LUT kernel … opens the first LUT-
-accelerated BitNet path on sub-AVX2 hosts"* survives the step-1
-measurement only in a narrow sense: the scalar LUT compiles and
-runs and is much faster than the **scalar reference** (which
-nobody actually runs in production). The interesting question
-— *can a LUT beat SSE2 i8?* — is unanswered until RFC step 4
-(SSSE3 `pshufb` LUT). For step 4 to be worth running, it has to
-push the LUT path past ~1.05 ms on mbp2012, i.e. a **≥ 2.5×
-speed-up over scalar LUT** (vs the RFC's currently-written
-"≥ 1.5×" step-4 gate). The RFC itself needs an update on this
-exact point — see below.
+* **mbp2012 (Ivy Bridge, SSSE3 + SSE4 + AVX)** — SSE2 i8 wins,
+  LUT is 2.5× *slower* than the production default. The Ivy
+  Bridge SIMD pipeline is already quick enough that 16-byte
+  parallel byte processing beats serial byte-indexed table reads,
+  even with the LUT's table being L1-resident.
+* **antix1 (Pentium-M, SSE2 only)** — LUT wins, 5.29× *faster*
+  than the production SSE2 i8 default. Pentium-M's narrower SIMD
+  port + smaller L2 + serial decode work against the SSE2 i8
+  kernel; the LUT's 1 KiB table fits in the 16 KiB L1d and the
+  scalar inner loop becomes one table read per byte where SSE2 i8
+  was four sign-extend / mask / madd operations per byte.
+
+So the original framing — *"LUT needs SSSE3+ `pshufb` to be
+useful"* (LIMITATIONS § 2 wording, dropped in this revision) —
+was the wrong generalisation. **Most of the LUT's gain comes from
+collapsing the inner ternary ops into one table lookup, not from
+SIMD-parallel lookup**. The `pshufb` story is a *separate*
+optimisation (RFC step 4) for hosts where a serial table read is
+already cheap enough that vectorising it might give more — and
+mbp2012 just told us those hosts already win with SSE2 i8.
+
+### Implications for dispatch + the RFC
+
+* **RFC step 3 (dispatch integration) is now load-bearing**:
+  antix1-class hosts should default to scalar LUT, mbp2012-class
+  hosts should stay on SSE2 i8. The split is by ISA detection:
+  if the host runs SSE2 but not SSSE3 (Pentium-M, Core 1, Pentium
+  4 family) → scalar LUT. If the host runs SSSE3+ → SSE2 i8
+  (current default) until step 4 measures something better.
+* **Step 4 (SSSE3 `pshufb` LUT) drops out of the critical path**:
+  the hosts step 4 would target are the same hosts where SSE2 i8
+  already wins. If step 4 eventually lands it has to clear the
+  recalibrated "must beat SSE2 i8 on the same host" gate; that
+  is a follow-on optimisation, not a prerequisite to landing the
+  scalar LUT.
+* **Pentium-M throughput projection (single-sample, ±20 % noise)**:
+  matvec moves from 37 ms to 7 ms, a 5.29× cut on the dominant
+  decode-step component. The decode-step itself shouldn't move
+  by that full factor (norm + softmax + KV scan are unaffected),
+  but the LUT-side estimate is **0.41 tok/s → ≈ 1.0-1.2 tok/s**
+  on antix1. End-to-end verification belongs in step 3, against
+  the byte-identical Stage 5-E greedy gate.
 
 ### What this tells the project about itself
 
