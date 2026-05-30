@@ -132,6 +132,41 @@ So in plain terms: at decoding time the model writes exactly the
 same bytes it wrote in v0.8 on the verified prompts, but it costs
 ~4 × less memory to keep the cache around.
 
+## Measured negative result (2026-05-30) — per-token absmax i4
+
+Prototype: same `append_quantised` shape, but `scale = absmax / 7`
+and `q = round(...).clamp(-7, 7)` (16 levels instead of 256). The
+storage byte was kept at i8 to isolate the *bit-width* effect from
+the *packing* effect.
+
+| Test | Reference | Result |
+| --- | --- | --- |
+| `cache_two_token_sequence_matches_no_cache` cosine | ≥ 0.999 | **0.955** ✗ |
+| same `max|Δ|` on hidden | (informational) | **0.071** (14× i8) |
+| `greedy_with_cache_matches_greedy_no_cache_for_2_steps` | exact equal | **passes** — 2-step argmax is preserved |
+
+The cosine contract from v0.9.0-mvp breaks. The 2-step greedy
+still matches because argmax has enough slack at short horizons,
+but extrapolating to a long chat would almost certainly start
+flipping tokens. Per [[feedback-no-fake]] we don't ship a scheme
+whose fidelity is "probably fine for now."
+
+Two responses are sensible:
+
+* **`q4` group quantisation** (group_size = 32, one f32 scale per
+  group): the standard fix for absmax outliers, used by llama.cpp
+  Q4_K. Implementation is a real cycle (storage layout changes,
+  `read_into` rewrite, fidelity gate at the same cosine ≥ 0.999
+  contract). Deferred.
+* **K-i8 / V-i4 split**: K dot products feed softmax (exp-sensitive),
+  V's contribution is a weighted sum (linearly less sensitive).
+  Asymmetric quantisation could keep K's precision and let V take
+  the i4 hit. Prototype + measurement before committing.
+
+Either fix re-opens this section with a *measured* fidelity report.
+Until then, **per-token absmax i8 stays the default**; the gap from
+v0.9.0's 3.97× shrink to a hypothetical 7-8× is not free.
+
 ## Out of scope (intentional)
 
 * **i8-direct attention dot product.** The current implementation
