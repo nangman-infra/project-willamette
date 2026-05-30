@@ -23,7 +23,67 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ## [Unreleased]
 
-_No changes yet._
+Doc + dispatch-correctness changes since `v0.9.0-mvp`. **No release
+tag is cut on this content** per [[feedback-no-fake]] — the LUT
+dispatch landing is a fidelity / consistency improvement, not a
+user-visible performance gain (measured end-to-end tok/s on antix1
+unchanged). A future release that already has its own user-visible
+deliverable will absorb these as supporting changes.
+
+### Changed
+
+* `src/model/dispatch.rs`, `src/model/bitlinear.rs`,
+  `src/model/bitlinear_lut.rs`, `src/model/mod.rs` — new
+  `Kernel::X86Sse2ScalarLut` variant; runtime split on
+  `is_x86_feature_detected!("ssse3")` routes Pentium-M /
+  Core 1 / Pentium 4-family hosts to a pure-Rust scalar LUT
+  BitLinear kernel. SSSE3+ hosts stay on the existing SSE2 i8
+  path byte-for-byte. Mac NEON path untouched. Source: `9f95f4d`.
+* `tests/bitlinear_lut.rs` — 4 parity cases (`attn_q` /
+  `attn_k` / `attn_v` / `ffn_gate`) now run on every x86 build
+  with `max|Δ| ≤ 1e-2` vs scalar BitLinear (was prototype-flag
+  gated).
+* `src/main.rs::cmd_bench` — per-kernel comparison row
+  (scalar BitLinear + scalar LUT) prints unconditionally on
+  x86 so any user can see why dispatch picked what it picked.
+
+### Measured
+
+* antix1 (Pentium-M, SSE2-only, `seongwon@192.168.10.111`):
+  matvec drops to 7.277 ms; **decode-step stays at 0.40 tok/s
+  (was 0.41 prior)** — within ±10 % run-to-run noise. Stage 5-E
+  reference `"The capital of France is"` emits
+  `[12366, 13, 12366, 374, 264]` byte-identical to Mac NEON +
+  mbp2012 SSE2 i8 paths. parity tests 4/4. Source: `76bec69`.
+* mbp2012 (Ivy Bridge, `seongwon@192.168.10.102`): backend
+  label stays `x86_64 SSE2 (i8)`, decode-step 3.05 tok/s
+  (within noise of v0.9.0's 2.95). Stage 5-E byte-identical.
+
+### Documented
+
+* `docs/LUT_KERNEL_RFC.md` — full RFC with measurement gates.
+  Step 1 (scalar LUT prototype) and step 3 (dispatch integration)
+  outcomes are written into the RFC inline. Step 4 (SSSE3
+  `pshufb` LUT) and step 5 (release) marked "deferred — gain
+  did not materialise end-to-end".
+* `docs/KV_CACHE_QUANT.md` — KV i8 per-token absmax design +
+  two measured-negative i4 prototype results (uniform and
+  K-i8/V-i4 split, cosine 0.955 / 0.962 vs ≥ 0.999 contract).
+* `docs/BENCHMARKS.md` — new "2026-05-30 — LUT step-1 prototype
+  measurement" section with three-host table; new "Step-3
+  end-to-end measurement" subsection that corrects the earlier
+  matvec-only extrapolation.
+* `LIMITATIONS.md` § 2 — LUT row rewritten as "landed on main,
+  fidelity OK, end-to-end tok/s unchanged".
+
+### Not in this release line
+
+* `v0.10.0-mvp` tag. Held until a measurable user-visible
+  improvement is in place (bandwidth-side optimisation,
+  Phase III-B Llama support, Phase IV preprocessor).
+* RFC step 4 (SSSE3 LUT) implementation.
+
+## [v0.9.0-mvp] — 2026-05-29
 
 ## [v0.9.0-mvp] — 2026-05-29
 
