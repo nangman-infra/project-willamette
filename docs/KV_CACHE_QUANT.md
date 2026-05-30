@@ -158,12 +158,21 @@ Two responses are sensible:
   Q4_K. Implementation is a real cycle (storage layout changes,
   `read_into` rewrite, fidelity gate at the same cosine ≥ 0.999
   contract). Deferred.
-* **K-i8 / V-i4 split**: K dot products feed softmax (exp-sensitive),
-  V's contribution is a weighted sum (linearly less sensitive).
-  Asymmetric quantisation could keep K's precision and let V take
-  the i4 hit. Prototype + measurement before committing.
+* **K-i8 / V-i4 split** *(measured 2026-05-30 — also broken)*: K
+  feeds softmax (exp-sensitive), V is a linear weighted sum, so
+  the intuition is that V tolerates i4 even when K can't. The
+  prototype kept K at i8 and dropped V to per-token absmax i4
+  (range -7..7). Result: M=2 cosine **0.962** vs ≥ 0.999, max|Δ|
+  **0.123**. Greedy 2-step still passed (argmax intact), but the
+  hidden-state contract broke. Conclusion: V's "linear" use is
+  not linear enough — the weighted sum *accumulates* small drift
+  across positions, and per-token absmax i4 has no group locality
+  to limit each row's worst-case error. Asymmetric quantisation
+  needs `q4` group quant on V (and possibly K too) to stand a
+  chance. Reverted; see commit
+  [Reverted prototype, doc-only change].
 
-Either fix re-opens this section with a *measured* fidelity report.
+The group-quant fix re-opens this section with a *measured* fidelity report.
 Until then, **per-token absmax i8 stays the default**; the gap from
 v0.9.0's 3.97× shrink to a hypothetical 7-8× is not free.
 
