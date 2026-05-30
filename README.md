@@ -92,7 +92,7 @@ What does **not** work yet but is on the roadmap toward the thesis:
 | Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ only `I2_S` |
 | `willamette-prep` (offline preprocessor) | ❌ not started — thesis's missing half |
 | AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
-| LUT (TL1/TL2) kernel | ❌ needs SSSE3+ (`pshufb`) → not for Pentium-M; for SSSE3+ hosts later |
+| LUT (TL1/TL2) kernel | ❌ design RFC drafted 2026-05-30 ([`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md)); plan-then-act, ≥ 1.3× measurement gate before any code lands |
 | MMX-era / sub-SSE2 kernel | ❌ not started |
 | KV cache int8 quantisation | ✅ landed in v0.9.0 (see Status table above) |
 | LLM-in-a-Flash style mmap windowing | ❌ |
@@ -332,6 +332,8 @@ Full procedure in [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILI
 | [`docs/BITNET_FORWARD_PLAN.md`](docs/BITNET_FORWARD_PLAN.md) | Stage-by-stage forward-pass plan & status |
 | [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md) | Willamette ↔ bitnet.cpp comparison procedure & result |
 | [`LIMITATIONS.md`](LIMITATIONS.md) | What's supported, what isn't, what won't be |
+| [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md) | v0.9.0 KV i8 design + memory math + fidelity contract + measured-negative i4 prototypes |
+| [`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md) | Plan-then-act RFC for the table-lookup BitLinear kernel — gates, steps, risks |
 | [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) | Exact env to reproduce every number above |
 | [`GOLDEN_TESTS.md`](GOLDEN_TESTS.md) | Reference prompts, token ids, expected outputs |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history |
