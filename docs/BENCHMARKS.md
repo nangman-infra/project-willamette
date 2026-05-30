@@ -128,6 +128,69 @@ mbp2012 just told us those hosts already win with SSE2 i8.
   on antix1. End-to-end verification belongs in step 3, against
   the byte-identical Stage 5-E greedy gate.
 
+### Step-3 end-to-end measurement (2026-05-30, same antix1)
+
+`9f95f4d` lands the dispatch integration so SSE2-only hosts
+default to scalar LUT. Re-running the bench on antix1 with the
+new dispatch (and `--decode-steps 5` instead of the prior
+`--decode-steps 1`):
+
+| Component | New (scalar LUT default) | Prior (SSE2 i8 default) |
+| --- | ---: | ---: |
+| Matvec backend label | `i686 SSE2 (scalar LUT)` | `i686 SSE2 (i8)` |
+| BitLinear matvec (single warmed sample) | **7.277 ms** | 7-37 ms (high variance across runs) |
+| scalar BitLinear ref (cmd_bench compare row) | 75.285 ms | — |
+| scalar LUT direct (cmd_bench compare row) | 6.943 ms | — |
+| LUT vs scalar BitLinear | **10.84×** | — |
+| Decode-step (5-avg) | **2491 ms / 0.40 tok/s** | 0.41 tok/s |
+| Stage 5-E reference greedy | `[12366, 13, 12366, 374, 264]` byte-identical | same |
+
+**End-to-end speed-up = 1.0× (within noise).** The matvec drops
+by the predicted factor, but the predicted `0.41 → ~1.0 tok/s`
+end-to-end gain does *not* materialise.
+
+### What this means
+
+The matvec-vs-decode-step asymmetry is the load-bearing fact.
+A single decode-step on antix1 is ~2.5 s; the BitLinear matvec
+inside it accounts for roughly 240 ms (30 layers × 7 ms), i.e.
+**~10 % of the decode time**. The other 90 % is split across
+RMSNorm + RoPE + softmax + KV scan + lm_head + the FFN matvecs
+that *also* run BitLinear but feed off different cache windows.
+A 5× cut on a 10 %-of-budget line item is a 4 percentage-point
+end-to-end improvement at best — well inside the ±10 % run-to-
+run noise floor.
+
+The earlier extrapolation in this section was wrong in
+exactly that way: matvec ratio × 1 was treated as decode
+ratio. Measured, the projection should have been ~1.05×, not
+~2-3×. The single-sample matvec timings in the original
+write-up (which compared a 37 ms SSE2 i8 number against a
+7 ms scalar LUT number) were also overstated — the 37 ms data
+point looks like cold-cache / SpeedStep idle, not steady
+state.
+
+### Honest disposition
+
+* **Dispatch integration (`9f95f4d`) is kept on main.**
+  Fidelity is perfect (byte-identical Stage 5-E across four
+  environments), parity tests are 4/4 on antix1, the matvec is
+  at least as fast as the SSE2 i8 path on the same host, and
+  the LUT module is pure-Rust (vs `bitlinear_sse2_i8`'s unsafe
+  intrinsics) — a small maintenance win.
+* **No release tag is cut on the back of this measurement.**
+  Per [[feedback-no-fake]] we don't ship a "5× faster on
+  Pentium-M" claim because the user-visible tok/s did not move.
+  A future release will absorb this dispatch change in the
+  CHANGELOG body as a *correctness / consistency* improvement,
+  not a performance claim.
+* **The next track is bandwidth, not compute.** Decode-step
+  bandwidth ≈ 240 ms matvec + ~2250 ms everything else; the
+  "everything else" is what would actually move tok/s. KV
+  cache i4 (deferred, group-quant version) and / or reducing
+  the per-layer scratch allocations are now first-order moves;
+  refining the matvec further is second-order.
+
 ### What this tells the project about itself
 
 * The **production SSE2 i8 kernel is already very good** —

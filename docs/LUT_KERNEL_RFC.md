@@ -235,16 +235,36 @@ only as a historical marker — it was calibrated against an
 imagined scalar baseline, not against the production kernel
 that already exists.
 
-### Step 5 — Doc + release
+### Step 5 — Doc + release *(deferred — gain did not materialise end-to-end)*
 
-`BENCHMARKS.md` gets a "20XX-XX-XX — LUT kernel landed" section
-with the matvec / decode-step / tok/s comparison on both hosts.
-`LIMITATIONS.md` § 2 "LUT kernel" row flips from ❌ to ✅ for the
-LUT variants that landed. CHANGELOG cut as a minor release
-(`v0.10.0-mvp`-ish — exact tag is the user's call per
-[[feedback-external-ops]]). The RFC itself stays in `docs/`
-as the durable record of why this kernel exists and what it
-promised to do.
+The end-to-end measurement on antix1 with the dispatch
+integrated (`docs/BENCHMARKS.md` 2026-05-30 § "Step-3
+end-to-end measurement") shows the predicted matvec-level 5×
+**did not turn into a decode-step gain**: matvec is ~10 % of
+the decode-step budget, and a 5× cut there is < 1 percentage
+point end-to-end — inside the ±10 % noise floor.
+
+Per [[feedback-no-fake]] no `v0.10.0-mvp` release tag goes out
+on a "5× faster on Pentium-M" claim. The dispatch integration
+stays on main as a correctness / consistency change (pure-Rust
+LUT path is easier to maintain than the SSE2 i8 intrinsics
+path; both produce byte-identical Stage 5-E greedy output;
+parity tests cover the LUT path on every x86 build). A future
+release that bundles other meaningful changes will absorb this
+dispatch change in its CHANGELOG body — *not* as a performance
+claim.
+
+The next track per the measurement is **bandwidth, not
+compute**: KV cache i4 group quantisation and per-layer
+scratch reduction are first-order moves, since the matvec is
+already a small slice of the decode-step budget. Step 4 of
+this RFC (SSSE3 `pshufb` LUT) drops out for the same reason —
+even if it succeeded, the win would be in the ~10 %-of-decode
+component on hosts where SSE2 i8 already wins.
+
+The RFC itself stays in `docs/` as the durable record of why
+this kernel exists, what it promised, and where the
+measurement disagreed with the projection.
 
 ## 6. Tests
 
