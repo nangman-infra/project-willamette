@@ -1067,6 +1067,11 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     let _ = forward_with_cache(&graph, &mut cache, bench_token, 0)
         .map_err(|e| anyhow::anyhow!("prefill: {}", e))?;
 
+    // Discard any per-stage timings accumulated during warm-up / prefill
+    // so only the measurement loop below contributes to the breakdown.
+    // No-op when `--cfg willamette_stage_timing` is off.
+    project_willamette::model::stage_timing::reset();
+
     let mut decode_total = 0.0_f64;
     let mut samples = 0usize;
     for step in 0..decode_steps {
@@ -1087,6 +1092,17 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     );
     println!("  Time:           {:.1} ms", decode_avg_ms);
     println!("  Throughput:     {:.2} tokens/sec", 1000.0 / decode_avg_ms);
+    println!();
+
+    // ── 3.5) Per-stage decode breakdown (cfg-gated) ──
+    // Prints meaningful output only when the binary was built with
+    // `RUSTFLAGS="--cfg willamette_stage_timing"`. Otherwise emits one
+    // line explaining the cfg is off — so a default-build bench never
+    // sees a misleading empty table.
+    print!(
+        "{}",
+        project_willamette::model::stage_timing::report(samples)
+    );
     println!();
     // ── 4) Sparse prototype: dense i8 vs CSR-sparse on attn_q ──
     {

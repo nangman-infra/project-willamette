@@ -26,6 +26,7 @@ pub mod lm_head;
 pub mod multi_forward;
 pub mod primitives;
 pub mod sampler;
+pub mod stage_timing;
 
 pub use config::BitNetConfig;
 pub use graph::{LayerWeights, ModelGraph};

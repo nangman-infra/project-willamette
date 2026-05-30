@@ -33,6 +33,7 @@ use crate::model::primitives::{
     attention_scale, embedding_gather_f16, kv_head_for_q_head, rms_norm_f32, AttentionShape,
     RopeType,
 };
+use crate::model::stage_timing::time_stage;
 
 /// Per-token constants pulled from `ModelConfig` — packaged so the
 /// inner per-layer helper doesn't take a dozen scalar arguments.
@@ -104,7 +105,9 @@ pub fn forward_with_cache_progress<F: FnMut(u32)>(
     validate_cache_inputs(graph, cache, token_id, position, ctx.kv_dim)?;
 
     let mut hidden = vec![0.0_f32; ctx.n_embd];
-    embedding_gather_f16(graph.token_embd, token_id, &mut hidden)?;
+    time_stage!("embedding", {
+        embedding_gather_f16(graph.token_embd, token_id, &mut hidden)?;
+    });
 
     // Dequant scratch reused across layers — capacity stabilises at
     // (position + 1) × kv_dim after the first growth.
@@ -125,7 +128,9 @@ pub fn forward_with_cache_progress<F: FnMut(u32)>(
     }
 
     let mut final_hidden = vec![0.0_f32; ctx.n_embd];
-    rms_norm_f32(&hidden, &graph.output_norm_f32, ctx.eps, &mut final_hidden)?;
+    time_stage!("output_norm", {
+        rms_norm_f32(&hidden, &graph.output_norm_f32, ctx.eps, &mut final_hidden)?;
+    });
     Ok(final_hidden)
 }
 
@@ -176,56 +181,76 @@ fn forward_one_layer(
     position: u32,
 ) -> Result<(), WillametteError> {
     let mut x_norm = vec![0.0_f32; ctx.n_embd];
-    rms_norm_f32(hidden, &layer.attn_norm_f32, ctx.eps, &mut x_norm)?;
+    time_stage!("attn_norm", {
+        rms_norm_f32(hidden, &layer.attn_norm_f32, ctx.eps, &mut x_norm)?;
+    });
 
     let mut q = vec![0.0_f32; ctx.n_embd];
     let mut k = vec![0.0_f32; ctx.kv_dim];
     let mut v = vec![0.0_f32; ctx.kv_dim];
-    bitlinear_i2s_matvec_f32(layer.attn_q, &x_norm, &mut q)?;
-    bitlinear_i2s_matvec_f32(layer.attn_k, &x_norm, &mut k)?;
-    bitlinear_i2s_matvec_f32(layer.attn_v, &x_norm, &mut v)?;
+    time_stage!("matvec_qkv", {
+        bitlinear_i2s_matvec_f32(layer.attn_q, &x_norm, &mut q)?;
+        bitlinear_i2s_matvec_f32(layer.attn_k, &x_norm, &mut k)?;
+        bitlinear_i2s_matvec_f32(layer.attn_v, &x_norm, &mut v)?;
+    });
 
-    apply_rope_multi_head(
-        &mut q,
-        ctx.n_heads as u32,
-        ctx.head_dim,
-        ctx.n_rot,
-        position,
-        ctx.freq_base,
-        RopeType::Neox,
-    )?;
-    apply_rope_multi_head(
-        &mut k,
-        ctx.n_heads_kv,
-        ctx.head_dim,
-        ctx.n_rot,
-        position,
-        ctx.freq_base,
-        RopeType::Neox,
-    )?;
+    time_stage!("rope", {
+        apply_rope_multi_head(
+            &mut q,
+            ctx.n_heads as u32,
+            ctx.head_dim,
+            ctx.n_rot,
+            position,
+            ctx.freq_base,
+            RopeType::Neox,
+        )?;
+        apply_rope_multi_head(
+            &mut k,
+            ctx.n_heads_kv,
+            ctx.head_dim,
+            ctx.n_rot,
+            position,
+            ctx.freq_base,
+            RopeType::Neox,
+        )?;
+    });
 
     let layer_idx = layer.index as usize;
-    cache.append(layer_idx, &k, &v)?;
-    cache.read_into(layer_idx, scratch_k, scratch_v)?;
+    time_stage!("kv_append", {
+        cache.append(layer_idx, &k, &v)?;
+    });
+    time_stage!("kv_read_into", {
+        cache.read_into(layer_idx, scratch_k, scratch_v)?;
+    });
     let n_past = scratch_k.len() / ctx.kv_dim;
 
-    let attn_out = scaled_dot_product_attention(&q, scratch_k, scratch_v, n_past, ctx);
+    let attn_out = time_stage!("attn_softmax_v", {
+        scaled_dot_product_attention(&q, scratch_k, scratch_v, n_past, ctx)
+    });
 
     let mut sub_normed = vec![0.0_f32; ctx.n_embd];
-    rms_norm_f32(
-        &attn_out,
-        &layer.attn_sub_norm_f32,
-        ctx.eps,
-        &mut sub_normed,
-    )?;
+    time_stage!("attn_sub_norm", {
+        rms_norm_f32(
+            &attn_out,
+            &layer.attn_sub_norm_f32,
+            ctx.eps,
+            &mut sub_normed,
+        )?;
+    });
     let mut wo_out = vec![0.0_f32; ctx.n_embd];
-    bitlinear_i2s_matvec_f32(layer.attn_output, &sub_normed, &mut wo_out)?;
-    for d in 0..ctx.n_embd {
-        hidden[d] += wo_out[d];
-    }
+    time_stage!("matvec_attn_output", {
+        bitlinear_i2s_matvec_f32(layer.attn_output, &sub_normed, &mut wo_out)?;
+    });
+    time_stage!("residual_attn", {
+        for d in 0..ctx.n_embd {
+            hidden[d] += wo_out[d];
+        }
+    });
 
     apply_ffn_block(layer, hidden, ctx)?;
-    check_finite_hidden(hidden, layer.index)?;
+    time_stage!("check_finite", {
+        check_finite_hidden(hidden, layer.index)?;
+    });
     Ok(())
 }
 
@@ -267,21 +292,33 @@ fn apply_ffn_block(
     ctx: &LayerCtx,
 ) -> Result<(), WillametteError> {
     let mut x_norm_ffn = vec![0.0_f32; ctx.n_embd];
-    rms_norm_f32(hidden, &layer.ffn_norm_f32, ctx.eps, &mut x_norm_ffn)?;
+    time_stage!("ffn_norm", {
+        rms_norm_f32(hidden, &layer.ffn_norm_f32, ctx.eps, &mut x_norm_ffn)?;
+    });
     let mut gate = vec![0.0_f32; ctx.n_ff];
     let mut up = vec![0.0_f32; ctx.n_ff];
-    bitlinear_i2s_matvec_f32(layer.ffn_gate, &x_norm_ffn, &mut gate)?;
-    bitlinear_i2s_matvec_f32(layer.ffn_up, &x_norm_ffn, &mut up)?;
-    relu_square(&mut gate);
+    time_stage!("matvec_ffn_gate_up", {
+        bitlinear_i2s_matvec_f32(layer.ffn_gate, &x_norm_ffn, &mut gate)?;
+        bitlinear_i2s_matvec_f32(layer.ffn_up, &x_norm_ffn, &mut up)?;
+    });
     let mut fused = vec![0.0_f32; ctx.n_ff];
-    elementwise_mul(&gate, &up, &mut fused)?;
+    time_stage!("ffn_relu2_emul", {
+        relu_square(&mut gate);
+        elementwise_mul(&gate, &up, &mut fused)?;
+    });
     let mut fused_norm = vec![0.0_f32; ctx.n_ff];
-    rms_norm_f32(&fused, &layer.ffn_sub_norm_f32, ctx.eps, &mut fused_norm)?;
+    time_stage!("ffn_sub_norm", {
+        rms_norm_f32(&fused, &layer.ffn_sub_norm_f32, ctx.eps, &mut fused_norm)?;
+    });
     let mut down = vec![0.0_f32; ctx.n_embd];
-    bitlinear_i2s_matvec_f32(layer.ffn_down, &fused_norm, &mut down)?;
-    for d in 0..ctx.n_embd {
-        hidden[d] += down[d];
-    }
+    time_stage!("matvec_ffn_down", {
+        bitlinear_i2s_matvec_f32(layer.ffn_down, &fused_norm, &mut down)?;
+    });
+    time_stage!("residual_ffn", {
+        for d in 0..ctx.n_embd {
+            hidden[d] += down[d];
+        }
+    });
     Ok(())
 }
 
