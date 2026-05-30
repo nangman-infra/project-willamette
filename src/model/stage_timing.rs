@@ -154,15 +154,9 @@ pub fn report(decode_steps: usize) -> String {
     samples.sort_by(|a, b| b.total.cmp(&a.total));
     let grand_ns: u128 = samples.iter().map(|s| s.total.as_nanos()).sum();
     let mut out = String::new();
-    out.push_str(
-        "Stage breakdown (sum over all decode steps; mean per call in µs):\n",
-    );
-    out.push_str(
-        "  stage                              total_ms     calls   mean_us    share\n",
-    );
-    out.push_str(
-        "  --------------------------------  ---------  --------  --------  -------\n",
-    );
+    out.push_str("Stage breakdown (sum over all decode steps; mean per call in µs):\n");
+    out.push_str("  stage                              total_ms     calls   mean_us    share\n");
+    out.push_str("  --------------------------------  ---------  --------  --------  -------\n");
     for s in &samples {
         let total_ms = s.total.as_secs_f64() * 1000.0;
         let mean_us = if s.calls > 0 {
