@@ -43,7 +43,143 @@ within ±10 % (warm-cache decode-step variance).
 | OS | Debian 12 bookworm + antiX kernel `5.10.224-antix.1-486-smp` |
 | Toolchain | i686-unknown-linux-musl, cross-built on the CI runner |
 
-## 2026-05-27 — Sparsity experiment (negative result, kept on purpose)
+### mbp2012 — Mid-2012 MacBook Pro, Ivy Bridge sub-AVX2 host
+
+| | |
+| --- | --- |
+| Chassis | MacBookPro9,2 (13", non-Retina, Mid-2012) |
+| CPU | Intel Core i7-3520M (Ivy Bridge, family 6 model 58 stepping 9), 2.9 GHz base / 3.6 GHz turbo |
+| Cores | 2 physical (4 threads with HT) |
+| SIMD ceiling | SSE2 / SSSE3 / SSE4.1 / SSE4.2 / **AVX** / AES / F16C — **no AVX2 / FMA / BMI** (Haswell+ only) |
+| L1d / L2 / L3 | 32 KiB per-core / 256 KiB per-core / 4 MiB shared |
+| RAM | 7.7 GiB (DDR3-1600 dual-channel) |
+| OS | Zorin OS 18.1 (Ubuntu 24.04 base), kernel 6.17, glibc 2.39 |
+| Toolchain | `x86_64-unknown-linux-musl` v0.9.0-mvp prebuilt (no source build required) |
+
+This host fills a gap our benchmarks did not have: a machine **above
+the SSE2-only floor of antix1** but **below the AVX2 baseline that
+bitnet.cpp's production CPU path implicitly requires** (see the
+2026-05-30 head-to-head section below). Many Mid-2012-class laptops,
+low-end x86 thin clients, and legacy desktops sit in this sub-AVX2
+band; this is the first time we have direct numbers on one.
+
+## 2026-05-30 — mbp2012 Ivy Bridge measurement (v0.9.0-mvp prebuilt)
+
+Three deferred tracks from `LIMITATIONS.md` § 2 were "host-blocked"
+on antix1: (i) rayon multi-thread effect, (ii) bitnet.cpp same-machine
+head-to-head, (iii) anything that needs SSSE3+ (e.g. LUT kernels).
+mbp2012 (Ivy Bridge, 4 threads, SSE2+SSSE3+SSE4.1+SSE4.2+AVX, no AVX2)
+unblocks all three at once.
+
+### Fidelity — four environments now agree byte-for-byte
+
+Stage 5-E reference prompt `"The capital of France is"` greedy, 5
+tokens, temperature 0:
+
+| Environment | Token ids | Output |
+| --- | --- | --- |
+| Mac M4 NEON (source build, v0.9.0) | `[12366, 13, 12366, 374, 264]` | `" Paris. Paris is a"` |
+| antix1 i686 SSE2 i8 (source build) | `[12366, 13, 12366, 374, 264]` | `" Paris. Paris is a"` |
+| antix1 i686 SSE2 i8 (prebuilt) | `[12366, 13, 12366, 374, 264]` | `" Paris. Paris is a"` |
+| **mbp2012 x86_64 SSE2 i8 (prebuilt)** | `[12366, 13, 12366, 374, 264]` | `" Paris. Paris is a"` |
+
+i8 KV (v0.9.0) + i8 BitLinear activation + scalar ternary path:
+**zero argmax flips across NEON aarch64 / i686 SSE2 / x86_64 SSE2 +
+across both source and prebuilt routes**.
+
+### Speed (willamette v0.9.0-mvp, decode step, real BitNet 2B)
+
+| Host | Matvec (2560×2560) | Single forward (30 layers) | Decode-step (30-avg) | tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| antix1 — Pentium-M SSE2 i8 | 24.30 ms | 8.87 s | 8.15 s | **0.41** |
+| **mbp2012 — Ivy Bridge SSE2 i8** | **1.016 ms** | **353.8 ms** | **377.9 ms** | **2.65** |
+| ratio mbp2012 / antix1 | 23.9× faster | 25.1× | 21.6× | **6.5×** |
+
+The 6.5× tok/s gap is not just clock (1.5×) — Ivy Bridge's L1 32 KiB
++ L2 256 KiB / core + L3 4 MiB and a wider micro-architecture do
+the heavy lifting. mbp2012 uses the **same x86_64 SSE2 i8 kernel**
+as antix1, so this isolates "humble-hardware micro-arch class"
+from "kernel choice".
+
+mbp2012 30-token greedy run, prompt `"Once upon a time"`:
+
+```
+Generated 30 token(s):
+  ", in a small town called Willowbrook, there lived a young girl named
+   Lily. Lily was a curious and adventurous girl who loved exploring the
+   world around"
+```
+
+`real 32.1 s` ≈ 0.93 tok/s wall-clock for prefill + decode + tokenizer
+output; the decode loop itself runs at the 2.65 tok/s reported above.
+
+### rayon multi-thread — null result (memory-bandwidth bound)
+
+We expected antix1's single-core RAYON_NUM_THREADS=1-default to leave
+performance on the table on a multi-core host. It did not:
+
+| `RAYON_NUM_THREADS` | Matvec | Decode-step | tok/s |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.046 ms | 336.4 ms | 2.97 |
+| 2 | 1.047 ms | 338.7 ms | 2.95 |
+| 4 (HT max) | 1.012 ms | 338.5 ms | 2.95 |
+
+1 thread and 4 threads are within run-to-run noise. The matvec
+moves 6.45 GB/s of i8 data through 30 layers per token. DDR3-1600
+dual-channel theoretical peak is 25.6 GB/s; with row-of-weights
+streaming + lm_head + KV pressure the effective ceiling lands well
+under that. **The matvec is memory-bandwidth bound, not core-count
+bound** — antix1's 1-core "no-op for rayon" is the *symptom*, not
+the cause. Revisit when an i8-direct attention dot product
+(deferred per `docs/KV_CACHE_QUANT.md`) reduces per-token memory
+traffic, or when a host with significantly higher bandwidth lands.
+
+### Sparse prototype on mbp2012 — 3.62× slower than dense i8
+
+Same prototype (`bitlinear_sparse::sparse_matvec_i8`, 50.4 % non-zero
+on attn_q):
+
+| Host | Dense i8 | Sparse CSR | Δ |
+| --- | ---: | ---: | ---: |
+| Mac M4 NEON | 0.82 ms | 2.92 ms | sparse 3.55× slower |
+| antix1 SSE2 i8 | 15.54 ms | 15.75 ms | tie (1.01× slower) |
+| **mbp2012 SSE2 i8** | **1.055 ms** | **3.817 ms** | **sparse 3.62× slower** |
+
+The trend `Mac 3.55× → mbp2012 3.62× → antix1 1.01×` is consistent
+with the earlier 2026-05-27 finding: dense i8 + good cache wins,
+sparse irregular gather only pays off at the very bottom of the
+ISA / cache curve. mbp2012's good cache puts it on the M4 end of
+the curve, not the antix1 end.
+
+### bitnet.cpp head-to-head on mbp2012 — three attempts, three failures
+
+This is the deferred comparison from `LIMITATIONS.md` § 2 and
+`docs/REFERENCE_COMPATIBILITY.md`. We could not get it to produce
+correct output on this host. Each attempt and what it tells us:
+
+| Attempt | cmake flags | Result |
+| --- | --- | --- |
+| 1. Default | (no flags — uses upstream defaults including `GGML_AVX2=ON GGML_FMA=ON`) | `llama-cli` aborts with **`Illegal instruction (SIGILL)`** on first execution. Ivy Bridge has no AVX2 / FMA; the binary was compiled against intrinsics the host can't run. |
+| 2. AVX2 + FMA off, MAD scalar path | `-DGGML_AVX2=OFF -DGGML_FMA=OFF` (MAD scalar is the bitnet.cpp default-fallback path) | Build succeeds. Generation produces **`!!!!!`** for every prompt — i.e. argmax keeps hitting token id ~0. The AVX2-off fallback inside `ggml-bitnet-mad.cpp` does not actually compute the I2_S matmul correctly. |
+| 3. AVX2 off + LUT TL2 on | `-DGGML_AVX2=OFF -DGGML_FMA=OFF -DBITNET_X86_TL2=ON` | **Compile error** in `ggml-bitnet-lut.cpp`. The TL2 LUT path assumes AVX2 / VPSHUFB-256 at the source level. |
+
+**Reading**: bitnet.cpp's x86 CPU production paths effectively assume
+AVX2. Sub-AVX2 hosts (Pentium-M, Core 2, Atom Bonnell/Saltwell, Sandy
+Bridge, Ivy Bridge, AMD Bulldozer-and-older) get no working bitnet.cpp
+binary on this commit. Willamette's hand-written SSE2 i8 path covers
+the same hosts and produces byte-identical greedy output on the Stage
+5-E reference set.
+
+This is one of those measurements that is more useful *because* it
+failed: it pins down the lower edge of bitnet.cpp's supported
+hardware envelope and the upper edge of where willamette's value is
+non-trivially additive. It also sets up the next code cycle — an
+AVX1 BitLinear kernel for willamette would extend the *good*
+performance region from SSE2-i8 (1.046 ms matvec on Ivy Bridge) to
+AVX1 (256-bit vectors, ≈ 2× theoretical) on the exact band of
+hardware bitnet.cpp leaves unsupported.
+
+
 
 BitNet ternary weights are ~42% zero, and a zero contributes nothing
 to the dot product, so skipping zeros *seems* like free speed. We

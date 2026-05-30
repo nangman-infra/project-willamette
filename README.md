@@ -274,6 +274,7 @@ EXO Pentium-II comparison, and llama2.c head-to-head live in
 | Host | Kernel | tok/s |
 | --- | --- | ---: |
 | **Apple M4** (Mac16,10, dev box) | aarch64 NEON | **7.9** |
+| **mbp2012** Mid-2012 MBP Ivy Bridge i7-3520M (sub-AVX2 host) | x86_64 SSE2 (i8) | **2.65** |
 | **antiX Pentium-M 2 GHz** (humble validation host) | i686 SSE2 (i8) | **0.41** |
 | antiX Pentium-M 2 GHz | i686 scalar (v0.4.1) | 0.05 |
 

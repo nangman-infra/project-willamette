@@ -1,6 +1,6 @@
 # Limitations — Project Willamette v0.9.0-mvp
 
-*Last revised 2026-05-29 (KV cache i8 quantisation).*
+*Last revised 2026-05-30 (mbp2012 Ivy Bridge measurement cycle).*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
@@ -67,7 +67,8 @@ the scaling curve, not at the exact numbers.
 | **Sparsity-aware skipping** | prototype shipped (`src/model/bitlinear_sparse.rs`), benched, but on antix1 it ties with dense i8 (1.01× slower — irregular access cancels the 42% skip). Documented; not default. Likely a win on sub-SSE2 hardware. |
 | Apple Silicon with `+dotprod` / FEAT_DotProd | hardware present on the M4 dev host; the stable-Rust `vdotq_s32` intrinsic remains unused (kernel keeps `vmull_s8`-style widening for parity). Switching is an `RUSTFLAGS="--cfg willamette_i8_activations"` flag away. |
 | Apple Silicon with FEAT_I8MM / SME / SME2 | hardware present on M4; intrinsics not in stable Rust → unused. |
-| Multi-threading | `rayon` per-row BitLinear matvec parallelism (Stage 10-C); on antix1 (1 core) this is a no-op. |
+| Multi-threading | `rayon` per-row BitLinear matvec parallelism (Stage 10-C). 1-thread and 4-thread runs on mbp2012 (Ivy Bridge, 4 HT threads) measure within run-to-run noise — the matvec is **memory-bandwidth bound** (≈ 6.45 GB/s of i8 weight traffic per token vs DDR3-1600 ~25 GB/s peak), so adding cores does not help on this workload. antix1's 1-core "no rayon gain" is the same constraint surfacing differently. See `docs/BENCHMARKS.md` 2026-05-30. |
+| bitnet.cpp same-machine comparison on sub-AVX2 hosts | bitnet.cpp's x86 production CPU path (both the default `ggml-bitnet-mad` scalar fallback and the `BITNET_X86_TL2` LUT path) **effectively assumes AVX2**. On Ivy Bridge (no AVX2): the default build crashes with `SIGILL`, the `GGML_AVX2=OFF` build emits garbage (`!!!!!`), and the LUT build fails to compile. Willamette's hand-written SSE2 i8 kernel produces byte-identical Stage 5-E output on the same machine — see `docs/BENCHMARKS.md` 2026-05-30 § "bitnet.cpp head-to-head". The reference comparison in `docs/REFERENCE_COMPATIBILITY.md` therefore stays on AVX2-capable hosts. |
 | GPU (CUDA / Metal / Vulkan / ROCm) | not implemented (out of scope by thesis). |
 | Batched / multi-token-per-step decoding | the multi-token path exists for prompt prefill, but per-step decode is single-token. |
 | KV cache memory | **per-token absmax i8** since v0.9.0 — 3.97× smaller than the prior f32 layout (37.7 KB/token vs 150 KB/token on BitNet 2B). Lifts the practical chat-history ceiling on antix1 from ~3 K to ~13 K tokens. See [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md). Lives in normal heap memory; no swap / eviction. |
