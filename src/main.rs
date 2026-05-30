@@ -1008,11 +1008,13 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     );
     println!();
 
-    // ── 1.5) Scalar BitLinear + scalar LUT comparison (LUT step-1 gate) ──
+    // ── 1.5) Per-kernel comparison row (scalar / SSE2 i8 / scalar LUT) ──
+    // Shows every available x86 BitLinear path side-by-side so the host
+    // can see why dispatch picked what it picked. Same numbers the
+    // 2026-05-30 LUT measurement cycle uses.
     {
         use project_willamette::model::bitlinear::bitlinear_i2s_matvec_f32_scalar;
         let mut q_scalar = vec![0.0_f32; mv_out];
-        // Warm-up.
         bitlinear_i2s_matvec_f32_scalar(attn_q, &x, &mut q_scalar)
             .map_err(|e| anyhow::anyhow!("scalar matvec warm-up: {}", e))?;
         let t = Instant::now();
@@ -1020,12 +1022,12 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("scalar matvec: {}", e))?;
         let scalar_ms = t.elapsed().as_secs_f64() * 1000.0;
         println!(
-            "Scalar BitLinear (LUT step-1 baseline): {:.3} ms ({:.2} M elem/s)",
+            "  scalar BitLinear (reference):  {:.3} ms ({:.2} M elem/s)",
             scalar_ms,
             (mv_in as f64 * mv_out as f64) / (scalar_ms / 1000.0) / 1.0e6
         );
 
-        #[cfg(willamette_lut)]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             use project_willamette::model::bitlinear_lut::bitlinear_i2s_matvec_f32_lut_scalar;
             let mut q_lut = vec![0.0_f32; mv_out];
@@ -1035,17 +1037,11 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
             bitlinear_i2s_matvec_f32_lut_scalar(attn_q, &x, &mut q_lut)
                 .map_err(|e| anyhow::anyhow!("lut matvec: {}", e))?;
             let lut_ms = t.elapsed().as_secs_f64() * 1000.0;
-            let speedup = scalar_ms / lut_ms;
             println!(
-                "Scalar LUT (step-1 prototype):        {:.3} ms ({:.2} M elem/s)  → {:.2}× vs scalar",
+                "  scalar LUT (lands on SSE2-only hosts): {:.3} ms ({:.2} M elem/s) — {:.2}× vs scalar BitLinear",
                 lut_ms,
                 (mv_in as f64 * mv_out as f64) / (lut_ms / 1000.0) / 1.0e6,
-                speedup
-            );
-            println!(
-                "  Gate (RFC § 5 step 1): {} {} 1.3×",
-                if speedup >= 1.3 { "PASS" } else { "FAIL" },
-                if speedup >= 1.3 { "≥" } else { "<" }
+                scalar_ms / lut_ms
             );
         }
     }

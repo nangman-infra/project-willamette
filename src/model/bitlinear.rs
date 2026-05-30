@@ -105,13 +105,19 @@ pub fn bitlinear_i2s_matvec_f32(
         // dispatch::select_kernel is what makes the unsafe call sound.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         super::dispatch::Kernel::X86Sse2 => unsafe {
-            // i8 activation kernel is the DEFAULT on x86. Measured on
-            // antix1 (Pentium-M): 2.2× faster than the f32 mask-add
-            // path (docs/BENCHMARKS.md), and greedy decode on the real
-            // 2B model produces byte-identical tokens to f32 (20/20 on
-            // "The capital of France is" — int8 quantisation never
-            // flipped an argmax). Unlike NEON (where i8 was slower so
-            // f32 stays default), x86 i8 wins outright.
+            // i8 activation kernel — picked on SSSE3+ hosts (mbp2012-
+            // class and newer). Measured on antix1 (Pentium-M, SSE2-
+            // only) at 2.2× over f32 SSE2, but the 2026-05-30 LUT
+            // measurement shows SSE2 i8 loses to scalar LUT on
+            // Pentium-M by 5.29× — see `Kernel::X86Sse2ScalarLut`
+            // arm below. On mbp2012 (Ivy Bridge SSSE3+) SSE2 i8
+            // still wins (1.05 ms vs scalar LUT's 2.65 ms).
+            //
+            // Greedy decode on the real 2B model produces byte-
+            // identical tokens to f32 (20/20 on "The capital of
+            // France is" — int8 quantisation never flipped an
+            // argmax). Unlike NEON (where i8 was slower so f32
+            // stays default), x86 i8 wins outright vs f32 SSE2.
             //
             // The f32 mask-add kernel (bit-close to scalar) stays
             // available under `--cfg willamette_sse2_f32` for
@@ -121,6 +127,16 @@ pub fn bitlinear_i2s_matvec_f32(
             #[cfg(not(willamette_sse2_f32))]
             super::bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2_i8(weight, input, output)
         },
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        super::dispatch::Kernel::X86Sse2ScalarLut => {
+            // Scalar LUT — picked on hosts that report SSE2 but
+            // **not** SSSE3 (Pentium-M, Core 1, Pentium 4 family).
+            // Measured 5.29× faster than the SSE2 i8 default on
+            // antix1 (37.083 ms → 7.011 ms matvec) — the narrow
+            // pre-SSSE3 SIMD pipeline is slower than a 1 KiB
+            // L1-resident table read per byte.
+            super::bitlinear_lut::bitlinear_i2s_matvec_f32_lut_scalar(weight, input, output)
+        }
         _ => bitlinear_i2s_matvec_f32_scalar(weight, input, output),
     }
 }

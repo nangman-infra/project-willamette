@@ -53,12 +53,21 @@ pub enum Kernel {
     /// `bitlinear_neon::bitlinear_i2s_matvec_f32_neon` — requires
     /// aarch64 + NEON (universally true on Apple Silicon, Cortex-A57+).
     AArch64Neon,
-    /// Stage 6-B target: 32-bit or 64-bit x86 with SSE2. **No code
-    /// path yet** — Phase 3 will fill it. Selected if the host
-    /// reports SSE2 but, until the kernel exists, dispatch falls back
-    /// to Scalar with this variant returned only for the dashboard
-    /// label.
+    /// `bitlinear_sse2::bitlinear_i2s_matvec_f32_sse2_i8` (x86 i8
+    /// activation kernel, x86 default since v0.7.0). Selected on
+    /// SSSE3+ hosts — mbp2012-class and newer. Measured on mbp2012
+    /// at 1.05 ms / matvec, ~5× faster than the scalar LUT in the
+    /// same place; see `docs/BENCHMARKS.md` 2026-05-30.
     X86Sse2,
+    /// `bitlinear_lut::bitlinear_i2s_matvec_f32_lut_scalar` — scalar
+    /// table-lookup kernel. Selected on hosts that report SSE2 but
+    /// **not** SSSE3 (Pentium-M, Core 1, Pentium 4 family). On
+    /// antix1 it beats `X86Sse2` by 5.29× because the narrow
+    /// pre-SSSE3 SIMD pipeline is slower than a 1 KiB L1-resident
+    /// table read per byte. See `docs/LUT_KERNEL_RFC.md` § 5
+    /// step-1 outcome and `docs/BENCHMARKS.md` 2026-05-30
+    /// § "LUT step-1 prototype measurement".
+    X86Sse2ScalarLut,
 }
 
 impl Kernel {
@@ -87,6 +96,11 @@ impl Kernel {
                     (_, true) => "x86 SSE2 (f32)",
                 }
             }
+            Kernel::X86Sse2ScalarLut => match std::env::consts::ARCH {
+                "x86_64" => "x86_64 SSE2 (scalar LUT)",
+                "x86" => "i686 SSE2 (scalar LUT)",
+                _ => "x86 SSE2 (scalar LUT)",
+            },
         }
     }
 }
@@ -127,6 +141,7 @@ pub fn detected_features() -> Vec<(&'static str, bool)> {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         out.push(("sse2", std::arch::is_x86_feature_detected!("sse2")));
+        out.push(("ssse3", std::arch::is_x86_feature_detected!("ssse3")));
         out.push(("sse4.1", std::arch::is_x86_feature_detected!("sse4.1")));
         out.push(("avx2", std::arch::is_x86_feature_detected!("avx2")));
     }
@@ -151,12 +166,17 @@ fn select_kernel() -> Kernel {
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        // Stage 6-B: route to the SSE2 BitLinear kernel when the host
-        // reports the feature. Pentium-M / antiX i686 falls here.
-        // bitlinear::bitlinear_i2s_matvec_f32 holds the matching
-        // `Kernel::X86Sse2` arm.
+        // 2026-05-30 measurement (docs/BENCHMARKS.md "LUT step-1
+        // prototype measurement"): the scalar LUT beats SSE2 i8 by
+        // 5.29× on antix1 (Pentium-M, SSE2-only) but loses by 2.5×
+        // on mbp2012 (Ivy Bridge, SSSE3+). Split on SSSE3 — the
+        // cheapest detected proxy for "Core 2 or newer microarch".
         if std::arch::is_x86_feature_detected!("sse2") {
-            return Kernel::X86Sse2;
+            if std::arch::is_x86_feature_detected!("ssse3") {
+                return Kernel::X86Sse2;
+            } else {
+                return Kernel::X86Sse2ScalarLut;
+            }
         }
     }
 
@@ -180,7 +200,12 @@ mod tests {
     fn label_is_non_empty() {
         // Every Kernel variant must produce a non-empty label —
         // otherwise the dashboard would render a blank line.
-        for k in [Kernel::Scalar, Kernel::AArch64Neon, Kernel::X86Sse2] {
+        for k in [
+            Kernel::Scalar,
+            Kernel::AArch64Neon,
+            Kernel::X86Sse2,
+            Kernel::X86Sse2ScalarLut,
+        ] {
             assert!(!k.label().is_empty(), "empty label for {:?}", k);
         }
     }

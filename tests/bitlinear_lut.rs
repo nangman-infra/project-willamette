@@ -1,14 +1,14 @@
-//! LUT BitLinear step-1 prototype parity — see `docs/LUT_KERNEL_RFC.md`.
+//! LUT BitLinear parity test — see `docs/LUT_KERNEL_RFC.md`.
 //!
 //! Numerical-equivalence test, scalar LUT vs scalar reference BitLinear,
 //! on every layer-0 weight of the real GGUF. Tolerance matches the
 //! NEON / SSE2 i8 tests' `max|Δ| ≤ 1e-2`. f32 reassociation may shift
 //! per-element error by a few ULP; bit-equality is not claimed.
 //!
-//! Gated on `--cfg willamette_lut`. Without that flag this file
-//! compiles to no tests.
+//! Compiled on x86 only — the LUT kernel lives in `bitlinear_lut.rs`
+//! which is itself x86-gated.
 
-#![cfg(willamette_lut)]
+#![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 
 use std::path::Path;
 
