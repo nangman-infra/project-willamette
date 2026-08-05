@@ -36,11 +36,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 6-C SIMD tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -113,6 +112,7 @@ fn compare(weight: &TensorView<'_>, input: &[f32], out_dim: usize, label: &str) 
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_neon_attn_q() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -122,6 +122,7 @@ fn scalar_vs_neon_attn_q() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_neon_attn_k() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -131,6 +132,7 @@ fn scalar_vs_neon_attn_k() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_neon_attn_v() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -140,6 +142,7 @@ fn scalar_vs_neon_attn_v() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_neon_attn_output() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -149,6 +152,7 @@ fn scalar_vs_neon_attn_output() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_neon_ffn_gate() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -158,6 +162,7 @@ fn scalar_vs_neon_ffn_gate() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_neon_ffn_up() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -167,6 +172,7 @@ fn scalar_vs_neon_ffn_up() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_neon_ffn_down() {
     // ffn_down takes n_ff input, so we need to fabricate one of that size.
     with_real_graph(|g| {
@@ -180,6 +186,7 @@ fn scalar_vs_neon_ffn_down() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn neon_zero_input_matches_scalar_zero_output() {
     with_real_graph(|g| {
         let input = vec![0.0_f32; g.config.embedding_length as usize];

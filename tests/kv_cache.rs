@@ -22,15 +22,14 @@ use project_willamette::tokenizer::Tokenizer;
 
 const MODEL_PATH: &str = "./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf";
 
-fn skip_if_missing() -> Option<ModelMmap> {
+fn open_real_model() -> ModelMmap {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 5-C tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return None;
     }
-    Some(ModelMmap::open(MODEL_PATH).expect("open"))
+    ModelMmap::open(MODEL_PATH).expect("open")
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -59,10 +58,9 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn cache_single_token_matches_no_cache_single_token() {
-    let Some(mmap) = skip_if_missing() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let graph = ModelGraph::from_gguf(&gguf).expect("graph");
@@ -86,10 +84,9 @@ fn cache_single_token_matches_no_cache_single_token() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn cache_two_token_sequence_matches_no_cache() {
-    let Some(mmap) = skip_if_missing() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let graph = ModelGraph::from_gguf(&gguf).expect("graph");
@@ -115,12 +112,11 @@ fn cache_two_token_sequence_matches_no_cache() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn greedy_with_cache_matches_greedy_no_cache_for_2_steps() {
     // For prompt "hello" (BOS + "hello"), generating 2 tokens should
     // produce identical token IDs whether or not we use a cache.
-    let Some(mmap) = skip_if_missing() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata).expect("tokenizer");

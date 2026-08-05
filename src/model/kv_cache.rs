@@ -53,23 +53,71 @@ pub struct KVCache {
     layers: Vec<LayerKV>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KVCacheCheckpoint {
+    position: usize,
+}
+
 impl KVCache {
     pub fn new(n_layers: usize, kv_dim: usize, max_seq_len: usize) -> Self {
-        let mut layers = Vec::with_capacity(n_layers);
+        Self::try_new(n_layers, kv_dim, max_seq_len)
+            .expect("KVCache::new: invalid cache dimensions")
+    }
+
+    pub fn try_new(
+        n_layers: usize,
+        kv_dim: usize,
+        max_seq_len: usize,
+    ) -> Result<Self, WillametteError> {
+        let quant_capacity = max_seq_len.checked_mul(kv_dim).ok_or_else(|| {
+            WillametteError::GgufParse(format!(
+                "KVCache::new: max_seq_len({}) * kv_dim({}) overflows usize",
+                max_seq_len, kv_dim
+            ))
+        })?;
+        let mut layers = Vec::new();
+        layers.try_reserve_exact(n_layers).map_err(|e| {
+            WillametteError::GgufParse(format!(
+                "KVCache::new: reserving {} layers failed: {}",
+                n_layers, e
+            ))
+        })?;
         for _ in 0..n_layers {
+            let mut k_quant = Vec::new();
+            let mut k_scales = Vec::new();
+            let mut v_quant = Vec::new();
+            let mut v_scales = Vec::new();
+            k_quant.try_reserve_exact(quant_capacity).map_err(|e| {
+                WillametteError::GgufParse(format!("KVCache::new: reserving K cache failed: {}", e))
+            })?;
+            k_scales.try_reserve_exact(max_seq_len).map_err(|e| {
+                WillametteError::GgufParse(format!(
+                    "KVCache::new: reserving K scales failed: {}",
+                    e
+                ))
+            })?;
+            v_quant.try_reserve_exact(quant_capacity).map_err(|e| {
+                WillametteError::GgufParse(format!("KVCache::new: reserving V cache failed: {}", e))
+            })?;
+            v_scales.try_reserve_exact(max_seq_len).map_err(|e| {
+                WillametteError::GgufParse(format!(
+                    "KVCache::new: reserving V scales failed: {}",
+                    e
+                ))
+            })?;
             layers.push(LayerKV {
-                k_quant: Vec::with_capacity(max_seq_len * kv_dim),
-                k_scales: Vec::with_capacity(max_seq_len),
-                v_quant: Vec::with_capacity(max_seq_len * kv_dim),
-                v_scales: Vec::with_capacity(max_seq_len),
+                k_quant,
+                k_scales,
+                v_quant,
+                v_scales,
             });
         }
-        Self {
+        Ok(Self {
             n_layers,
             kv_dim,
             max_seq_len,
             layers,
-        }
+        })
     }
 
     /// Number of positions currently stored. All layers are kept in
@@ -79,6 +127,24 @@ impl KVCache {
             0
         } else {
             self.layers[0].k_scales.len()
+        }
+    }
+
+    pub(crate) fn checkpoint(&self) -> KVCacheCheckpoint {
+        KVCacheCheckpoint {
+            position: self.position(),
+        }
+    }
+
+    /// Discard entries appended after `checkpoint`, including partial
+    /// per-layer appends left behind by a failed forward pass.
+    pub(crate) fn rollback(&mut self, checkpoint: KVCacheCheckpoint) {
+        let quant_len = checkpoint.position * self.kv_dim;
+        for layer in &mut self.layers {
+            layer.k_quant.truncate(quant_len);
+            layer.k_scales.truncate(checkpoint.position);
+            layer.v_quant.truncate(quant_len);
+            layer.v_scales.truncate(checkpoint.position);
         }
     }
 
@@ -218,6 +284,12 @@ mod tests {
     }
 
     #[test]
+    fn cache_capacity_multiplication_overflow_is_an_error() {
+        let err = KVCache::try_new(1, 2, usize::MAX).unwrap_err();
+        assert!(err.to_string().contains("overflows usize"));
+    }
+
+    #[test]
     fn append_then_dequantise_round_trips_within_absmax_tol() {
         let mut c = KVCache::new(1, 4, 8);
         // K and V have different absmax so they get different scales.
@@ -294,5 +366,25 @@ mod tests {
         }
         let expected = 2 * 3 * 4 * 2 /* i8 K+V */ + 2 * 3 * 4 * 2 /* f32 scales */;
         assert_eq!(c.resident_bytes(), expected);
+    }
+
+    #[test]
+    fn rollback_removes_partial_layer_appends() {
+        let mut c = KVCache::new(2, 2, 8);
+        for layer in 0..2 {
+            c.append(layer, &[1.0, 2.0], &[3.0, 4.0]).unwrap();
+        }
+        let checkpoint = c.checkpoint();
+        c.append(0, &[5.0, 6.0], &[7.0, 8.0]).unwrap();
+
+        c.rollback(checkpoint);
+
+        assert_eq!(c.position(), 1);
+        let mut k = Vec::new();
+        let mut v = Vec::new();
+        c.read_into(1, &mut k, &mut v).unwrap();
+        assert_eq!(k.len(), 2);
+        c.read_into(0, &mut k, &mut v).unwrap();
+        assert_eq!(k.len(), 2);
     }
 }

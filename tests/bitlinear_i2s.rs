@@ -29,11 +29,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 4-C tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -73,6 +72,7 @@ fn realistic_input(graph: &ModelGraph<'_>) -> Vec<f32> {
 // ── role-by-role shape checks ─────────────────────────────────────────
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn attn_q_shape_matches_n_embd_to_n_embd() {
     with_real_graph(|g| {
         let w = g.layers[0].attn_q;
@@ -90,6 +90,7 @@ fn attn_q_shape_matches_n_embd_to_n_embd() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn attn_k_and_attn_v_share_gqa_kv_dim() {
     with_real_graph(|g| {
         for w in [g.layers[0].attn_k, g.layers[0].attn_v] {
@@ -105,6 +106,7 @@ fn attn_k_and_attn_v_share_gqa_kv_dim() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn attn_output_collapses_back_to_n_embd() {
     with_real_graph(|g| {
         let w = g.layers[0].attn_output;
@@ -119,6 +121,7 @@ fn attn_output_collapses_back_to_n_embd() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn ffn_gate_up_down_match_n_embd_n_ff_pattern() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as u64;
@@ -132,6 +135,7 @@ fn ffn_gate_up_down_match_n_embd_n_ff_pattern() {
 // ── scale block sanity ────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn every_i2s_tensor_has_finite_scale() {
     with_real_graph(|g| {
         for layer in &g.layers {
@@ -168,6 +172,7 @@ fn every_i2s_tensor_has_finite_scale() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scale_data_is_present_for_every_i2s_tensor() {
     with_real_graph(|g| {
         let mut count = 0;
@@ -197,6 +202,7 @@ fn scale_data_is_present_for_every_i2s_tensor() {
 // ── matvec produces finite, non-zero, deterministic output ────────────
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn matvec_attn_q_produces_finite_nonzero_output() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -217,6 +223,7 @@ fn matvec_attn_q_produces_finite_nonzero_output() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn matvec_attn_k_v_produce_kv_dim_output() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -234,6 +241,7 @@ fn matvec_attn_k_v_produce_kv_dim_output() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn matvec_ffn_gate_up_produce_n_ff_output() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -263,6 +271,7 @@ fn matvec_ffn_gate_up_produce_n_ff_output() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn matvec_ffn_down_consumes_n_ff_input() {
     with_real_graph(|g| {
         // ffn_down has in_dim = n_ff, not n_embd. Feed a synthetic n_ff
@@ -281,6 +290,7 @@ fn matvec_ffn_down_consumes_n_ff_input() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn matvec_is_deterministic_across_repeated_runs() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -294,6 +304,7 @@ fn matvec_is_deterministic_across_repeated_runs() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn matvec_different_layers_produce_different_outputs() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -317,6 +328,7 @@ fn matvec_different_layers_produce_different_outputs() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn matvec_with_zero_input_is_zero_output() {
     with_real_graph(|g| {
         // For ANY weight, W · 0 = 0, and scale × 0 = 0. Confirms the

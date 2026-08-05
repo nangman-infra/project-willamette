@@ -13,22 +13,20 @@ use project_willamette::tokenizer::Tokenizer;
 
 const MODEL_PATH: &str = "./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf";
 
-fn maybe_open() -> Option<(ModelMmap,)> {
+fn open_real_model() -> ModelMmap {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 5-B tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return None;
     }
-    Some((ModelMmap::open(MODEL_PATH).expect("open"),))
+    ModelMmap::open(MODEL_PATH).expect("open")
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn multi_token_with_one_token_matches_single_token_forward() {
-    let Some((mmap,)) = maybe_open() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let graph = ModelGraph::from_gguf(&gguf).expect("graph");
@@ -43,10 +41,9 @@ fn multi_token_with_one_token_matches_single_token_forward() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn multi_token_two_token_produces_finite_hidden() {
-    let Some((mmap,)) = maybe_open() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let graph = ModelGraph::from_gguf(&gguf).expect("graph");
@@ -59,10 +56,9 @@ fn multi_token_two_token_produces_finite_hidden() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn multi_token_is_deterministic() {
-    let Some((mmap,)) = maybe_open() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let graph = ModelGraph::from_gguf(&gguf).expect("graph");
@@ -72,10 +68,9 @@ fn multi_token_is_deterministic() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn greedy_generate_2_tokens_produces_in_range_ids() {
-    let Some((mmap,)) = maybe_open() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata).expect("tokenizer");
@@ -99,14 +94,13 @@ fn greedy_generate_2_tokens_produces_in_range_ids() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn greedy_generate_eos_short_circuit() {
     // Force the EOS id to be whatever argmax actually returns at step 0
     // — this is a tautological-looking but useful test: it confirms the
     // EOS path stops the loop immediately and returns zero generated
     // tokens. We avoid hardcoding a particular argmax value.
-    let Some((mmap,)) = maybe_open() else {
-        return;
-    };
+    let mmap = open_real_model();
     let bytes = mmap.as_bytes();
     let gguf = GgufFile::parse(bytes).expect("parse");
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata).expect("tokenizer");
@@ -121,8 +115,10 @@ fn greedy_generate_eos_short_circuit() {
     let pretend_eos = project_willamette::model::lm_head::argmax(&logits).unwrap();
 
     let generated =
-        greedy_generate_no_cache(&graph, &prompt_ids, 10, Some(pretend_eos), |_, _, _| {})
-            .expect("generate");
+        greedy_generate_no_cache(&graph, &prompt_ids, 10, Some(pretend_eos), |_, _, _| {
+            panic!("EOS token must not reach the tick callback")
+        })
+        .expect("generate");
     assert!(
         generated.is_empty(),
         "EOS at first step should produce no generated tokens, got {:?}",

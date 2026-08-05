@@ -1,6 +1,6 @@
-# Reproducibility — Project Willamette v0.7.1-mvp
+# Reproducibility — Project Willamette v0.10.0
 
-*Last revised 2026-05-27.*
+*Last revised 2026-08-05.*
 
 This file pins every external value that the numbers in
 [`README.md`](README.md), [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md),
@@ -88,29 +88,39 @@ hf download microsoft/bitnet-b1.58-2B-4T-gguf \
     --local-dir ./models/bitnet-b1.58-2B-4T-gguf
 
 cargo build --release
-cargo test --release       # expect 189 passing, 0 warnings, 0 failures
+cargo test --release
 ```
+
+The default suite does not require the external model. Tests that read the
+official GGUF use Rust's explicit `#[ignore]` marker, so the test summary
+reports them as ignored rather than passing after an early return. After the
+model is downloaded and its checksum is verified, run them with:
+
+```bash
+cargo test --release --tests -- --ignored
+```
+
+Rust's standard test harness has no runtime "skipped" result. Consequently,
+an explicitly selected real-model test fails with a model-not-found message
+instead of returning successfully when the file is absent.
 
 Failure modes:
 
-* `cargo test` SKIPs every test that needs the real GGUF if the file
-  is missing — but everything else (unit tests, synthetic GGUF parser
-  tests, NEON unit fixtures) still runs.
+* `cargo test` reports every real-GGUF test as ignored; unit tests,
+  synthetic GGUF tests, and model-independent kernel fixtures still run.
 * `tests/bitlinear_simd.rs` is `#![cfg(target_arch = "aarch64")]` —
   on x86 hosts it compiles to zero tests. Its x86 counterparts are
   `tests/bitlinear_sse2.rs` and `tests/bitlinear_sse2_i8.rs`
   (`#![cfg(any(target_arch = "x86", target_arch = "x86_64"))]`).
-  When the real GGUF isn't present the integration tests SKIP at
-  runtime.
+  Their real-GGUF cases follow the same explicit-ignore policy.
 * Matvec backend on x86 is **SSE2 int8** by default since v0.5.0 /
   v0.7.0; fall back to f32 mask-add with `RUSTFLAGS="--cfg
   willamette_sse2_f32"`. Pure scalar runs only on architectures with
   no SIMD kernel compiled in (or when no SIMD feature is detected at
   runtime).
-* Test counts (v0.7.1-mvp): **291** on Mac aarch64 (default cfg),
-  **295** on x86 with the real model present (SSE2 + SSE2-i8
-  integration tests run), **287** on x86 without the model (those
-  integration tests SKIP but unit tests still run).
+* Exact test counts vary by target architecture because NEON and x86 kernel
+  crates are compile-time gated. Treat the passed/ignored/failed summary as
+  authoritative rather than comparing against a stale fixed count.
 
 ## 6. Reproducing the reference comparison
 

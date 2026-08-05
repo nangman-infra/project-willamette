@@ -1,19 +1,16 @@
 [package]
 name = "project-willamette"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 description = "Rust-native, mmap-backed runtime for the official microsoft/BitNet-b1.58-2B-4T 1.58-bit GGUF."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
-# Backend selection is currently `cfg`-based, not feature-based:
-#   * On aarch64 hosts, `src/model/bitlinear_neon.rs` is compiled in
-#     and the dispatcher in `bitlinear.rs` picks NEON at runtime via
-#     `is_aarch64_feature_detected!("neon")`.
-#   * Elsewhere only the scalar fallback exists.
-#
-# A future `x86-simd` cargo feature will gate Stage 6-B (AVX2/SSE2)
-# code once an x86 host is available to validate it.
+# Backend selection is `cfg`-based and runtime-dispatched:
+#   * aarch64 uses NEON when detected.
+#   * x86/x86_64 uses the SSE2 i8 kernel on SSSE3+ CPUs and the scalar LUT
+#     kernel on SSE2-only CPUs; `willamette_sse2_f32` selects the f32 variant.
+#   * Other targets, or targets without the required SIMD, use scalar fallback.
 
 [dependencies]
 memmap2 = "0.9"          # zero-copy file mapping

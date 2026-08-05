@@ -13,8 +13,7 @@
 //!      (`offset + byte_len + I2S_TRAILING_SCALE_BLOCK_BYTES`) lies within
 //!      the file and does not overlap the next tensor's data.
 //!
-//! Tests are skipped (passing with a SKIP message) if the model file is not
-//! present at the expected path.
+//! Tests are ignored by default and selected explicitly when the model exists.
 
 use std::path::Path;
 
@@ -29,18 +28,16 @@ const MODEL_PATH: &str = "./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf"
 /// 30 BitNet blocks × 7 I2_S BitLinear weights per block = 210.
 const EXPECTED_I2S_COUNT: usize = 210;
 
-/// Open the real model and run `f` with the parsed `GgufFile`. Returns
-/// without asserting when the model file is missing.
+/// Open the real model and run `f` with the parsed `GgufFile`.
 fn with_real_gguf<F>(f: F)
 where
     F: FnOnce(&GgufFile<'_>, usize),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: model file not found at {} — Stage 3 layout tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -50,6 +47,7 @@ where
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn there_are_exactly_210_i2s_tensors() {
     with_real_gguf(|gguf, _| {
         let n_i2s = gguf
@@ -66,6 +64,7 @@ fn there_are_exactly_210_i2s_tensors() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn zero_unknown_tensor_types() {
     with_real_gguf(|gguf, _| {
         let unknowns: Vec<(&str, GgmlType)> = gguf
@@ -85,6 +84,7 @@ fn zero_unknown_tensor_types() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn every_i2s_byte_len_matches_expected_packed_bytes() {
     with_real_gguf(|gguf, _| {
         let mut checked = 0usize;
@@ -112,6 +112,7 @@ fn every_i2s_byte_len_matches_expected_packed_bytes() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn every_i2s_total_footprint_is_in_bounds_and_non_overlapping() {
     with_real_gguf(|gguf, file_len| {
         // Build a sorted (by offset) list of (offset, name, end_of_this_tensor)
@@ -161,6 +162,7 @@ fn every_i2s_total_footprint_is_in_bounds_and_non_overlapping() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn i2s_scale_offsets_are_well_formed() {
     with_real_gguf(|gguf, file_len| {
         for t in &gguf.tensors {
@@ -186,6 +188,7 @@ fn i2s_scale_offsets_are_well_formed() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn file_type_metadata_is_40() {
     // LLAMA_FTYPE_MOSTLY_I2_S = 40 per llama.h:183 of the pinned commit.
     with_real_gguf(|gguf, _| {
@@ -203,6 +206,7 @@ fn file_type_metadata_is_40() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn architecture_is_bitnet_b1_58() {
     with_real_gguf(|gguf, _| {
         let arch = gguf

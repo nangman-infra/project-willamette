@@ -234,29 +234,56 @@ pub struct ChatEngine<'g, 'a> {
     progress: Option<Arc<WorkerProgress>>,
 }
 
+struct StreamFailure {
+    error: WillametteError,
+    visible_text: String,
+}
+
 impl<'g, 'a> ChatEngine<'g, 'a> {
     /// Construct an engine. `max_seq_len` sizes the KV cache; choose
     /// it to comfortably exceed prompt + expected dialogue length
     /// (the engine errors out cleanly if the budget is exceeded).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the requested cache dimensions are invalid. New callers
+    /// that accept user-provided limits should use [`Self::try_new`].
     pub fn new(
         graph: &'g ModelGraph<'a>,
         tokenizer: Tokenizer,
         sampling: SamplingParams,
         max_seq_len: usize,
     ) -> Self {
+        Self::try_new(graph, tokenizer, sampling, max_seq_len)
+            .expect("ChatEngine::new: invalid context or cache dimensions")
+    }
+
+    pub fn try_new(
+        graph: &'g ModelGraph<'a>,
+        tokenizer: Tokenizer,
+        sampling: SamplingParams,
+        max_seq_len: usize,
+    ) -> Result<Self, WillametteError> {
+        let context_length = graph.config.context_length as usize;
+        if max_seq_len > context_length {
+            return Err(WillametteError::GgufParse(format!(
+                "chat: max_seq_len={} exceeds model context_length={}",
+                max_seq_len, context_length
+            )));
+        }
         let n_layers = graph.layers.len();
         let kv_dim = graph.config.kv_dim as usize;
-        Self {
+        Ok(Self {
             graph,
             tokenizer,
-            cache: KVCache::new(n_layers, kv_dim, max_seq_len),
+            cache: KVCache::try_new(n_layers, kv_dim, max_seq_len)?,
             sampler: Sampler::new(sampling),
             history: Vec::new(),
             next_pos: 0,
             max_seq_len,
             system_prompt: None,
             progress: None,
-        }
+        })
     }
 
     /// Install a shared progress / cancel state. Used by the TUI to
@@ -369,7 +396,19 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         }
 
         // Budget check up front: prompt + worst-case decode must fit.
-        let need = self.cache.position() + prompt_tokens.len() + max_new_tokens;
+        let need = self
+            .cache
+            .position()
+            .checked_add(prompt_tokens.len())
+            .and_then(|n| n.checked_add(max_new_tokens))
+            .ok_or_else(|| {
+                WillametteError::GgufParse(format!(
+                    "chat: cache.position({}) + new prompt({}) + max_new_tokens({}) overflows usize",
+                    self.cache.position(),
+                    prompt_tokens.len(),
+                    max_new_tokens
+                ))
+            })?;
         if need > self.max_seq_len {
             return Err(WillametteError::GgufParse(format!(
                 "chat: context budget exceeded — cache.position={} + new prompt={} + max_new_tokens={} = {} > max_seq_len={}",
@@ -385,14 +424,49 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             p.begin_turn(max_new_tokens as u32);
         }
 
-        let last_hidden = self.prefill_prompt_tokens(&prompt_tokens)?;
-        let result = self.stream_assistant_response(last_hidden, max_new_tokens, &mut tick);
+        let cache_checkpoint = self.cache.checkpoint();
+        let sampler_checkpoint = self.sampler.checkpoint();
+        let next_pos_checkpoint = self.next_pos;
+        let history_len = self.history.len();
+        let result = match self.prefill_prompt_tokens(&prompt_tokens) {
+            Ok(last_hidden) => {
+                self.stream_assistant_response(last_hidden, max_new_tokens, &mut tick)
+            }
+            Err(error) => Err(StreamFailure {
+                error,
+                visible_text: String::new(),
+            }),
+        };
 
         if let Some(p) = &self.progress {
             p.end_turn();
         }
 
-        let response_text = result?;
+        let response_text = match result {
+            Ok(response_text) => response_text,
+            Err(failure) => {
+                if failure.visible_text.is_empty() {
+                    self.cache.rollback(cache_checkpoint);
+                    self.sampler.rollback(sampler_checkpoint);
+                    self.next_pos = next_pos_checkpoint;
+                    self.history.truncate(history_len);
+                    self.update_kv_cache_estimate();
+                } else {
+                    // Streaming callbacks are irreversible. Preserve the
+                    // successfully forwarded prefix and record exactly the
+                    // text already delivered so the next turn remains usable.
+                    self.history.push(ChatMessage {
+                        role: Role::User,
+                        content: user_text.to_string(),
+                    });
+                    self.history.push(ChatMessage {
+                        role: Role::Assistant,
+                        content: failure.visible_text,
+                    });
+                }
+                return Err(failure.error);
+            }
+        };
 
         self.history.push(ChatMessage {
             role: Role::User,
@@ -491,7 +565,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         mut last_hidden: Vec<f32>,
         max_new_tokens: usize,
         tick: &mut F,
-    ) -> Result<String, WillametteError>
+    ) -> Result<String, StreamFailure>
     where
         F: FnMut(&str),
     {
@@ -505,8 +579,25 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 break;
             }
 
-            let logits = compute_logits_from_graph(&last_hidden, self.graph)?;
-            let next = self.sampler.sample(&logits)?;
+            let cache_checkpoint = self.cache.checkpoint();
+            let sampler_checkpoint = self.sampler.checkpoint();
+
+            let logits = compute_logits_from_graph(&last_hidden, self.graph).map_err(|error| {
+                StreamFailure {
+                    error,
+                    visible_text: response_text[..tick_flushed_up_to].to_string(),
+                }
+            })?;
+            let next = match self.sampler.sample(&logits) {
+                Ok(next) => next,
+                Err(error) => {
+                    self.sampler.rollback(sampler_checkpoint);
+                    return Err(StreamFailure {
+                        error,
+                        visible_text: response_text[..tick_flushed_up_to].to_string(),
+                    });
+                }
+            };
 
             if Some(next) == self.tokenizer.eos_id || next == LLAMA3_EOT_ID {
                 break;
@@ -518,23 +609,30 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 &mut emitted_up_to,
                 &mut response_text,
             );
+            self.sampler.observe(next);
+            last_hidden = match self.forward_with_optional_progress(next, self.next_pos) {
+                Ok(hidden) => hidden,
+                Err(error) => {
+                    self.cache.rollback(cache_checkpoint);
+                    self.sampler.rollback(sampler_checkpoint);
+                    return Err(StreamFailure {
+                        error,
+                        visible_text: response_text[..tick_flushed_up_to].to_string(),
+                    });
+                }
+            };
+            self.next_pos += 1;
             self.note_token_emitted();
+            self.update_kv_cache_estimate();
 
-            // Stop-sequence check on the WHOLE accumulated response,
-            // not just the not-yet-tick'd tail. If the model has
-            // started fabricating a turn boundary, both the visible
-            // (already-tick'd) bytes and the still-buffered tail are
-            // truncated; nothing further reaches the caller.
+            // Keep cache and sampler aligned with every token the model
+            // generated, even when its visible bytes are a turn marker that
+            // we suppress from the transcript.
             if truncate_at_chat_stop_sequence(&mut response_text) {
                 break;
             }
 
             flush_safe_window(&response_text, &mut tick_flushed_up_to, tick);
-
-            self.sampler.observe(next);
-            last_hidden = self.forward_with_optional_progress(next, self.next_pos)?;
-            self.next_pos += 1;
-            self.update_kv_cache_estimate();
         }
 
         self.finalize_stream(
@@ -871,5 +969,125 @@ mod stop_sequence_tests {
         assert!(s.ends_with("today? 🖥️ 💬👍🤖✨"));
         assert!(!s.contains("User:"));
         assert!(!s.contains("hash function"));
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use super::{ChatEngine, WorkerProgress};
+    use crate::gguf::reader::{GgufFile, GgufValue};
+    use crate::model::graph::ModelGraph;
+    use crate::model::sampler::{SamplerCheckpoint, SamplingParams};
+    use crate::synth::{build_gguf_for_config, Preset};
+    use crate::tokenizer::Tokenizer;
+
+    #[allow(clippy::needless_range_loop)]
+    fn byte_vocab() -> Vec<String> {
+        let mut printable = [false; 256];
+        for b in (b'!' as usize)..=(b'~' as usize) {
+            printable[b] = true;
+        }
+        for b in 0xA1usize..=0xACusize {
+            printable[b] = true;
+        }
+        for b in 0xAEusize..=0xFFusize {
+            printable[b] = true;
+        }
+        let mut chars = ['\0'; 256];
+        let mut next_code = 256;
+        for b in 0..256 {
+            chars[b] = if printable[b] {
+                char::from_u32(b as u32).unwrap()
+            } else {
+                let c = char::from_u32(next_code).unwrap();
+                next_code += 1;
+                c
+            };
+        }
+        chars.iter().map(char::to_string).collect()
+    }
+
+    fn tokenizer() -> Tokenizer {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        );
+        metadata.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(byte_vocab().into_iter().map(GgufValue::Str).collect()),
+        );
+        metadata.insert(
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(Vec::new()),
+        );
+        metadata.insert(
+            "tokenizer.ggml.bos_token_id".to_string(),
+            GgufValue::Uint32(0),
+        );
+        Tokenizer::from_gguf_metadata(&metadata).unwrap()
+    }
+
+    fn model_bytes() -> Vec<u8> {
+        let mut config = Preset::Tiny.config();
+        config.vocab_size = 256;
+        config.context_length = 256;
+        build_gguf_for_config(config, false)
+    }
+
+    fn sampling_with_invalid_top_k() -> SamplingParams {
+        SamplingParams {
+            temperature: 1.0,
+            top_k: Some(0),
+            top_p: None,
+            repetition_penalty: Some(1.1),
+            seed: 42,
+        }
+    }
+
+    fn assert_turn_state_unchanged(
+        engine: &ChatEngine<'_, '_>,
+        sampler_checkpoint: SamplerCheckpoint,
+    ) {
+        assert_eq!(engine.cache.position(), 0);
+        assert_eq!(engine.cache.resident_bytes(), 0);
+        assert_eq!(engine.next_pos, 0);
+        assert!(engine.history.is_empty());
+        assert_eq!(engine.sampler.checkpoint(), sampler_checkpoint);
+    }
+
+    #[test]
+    fn prefill_error_rolls_back_partial_layer_append() {
+        let bytes = model_bytes();
+        let gguf = GgufFile::parse(&bytes).unwrap();
+        let mut graph = ModelGraph::from_gguf(&gguf).unwrap();
+        graph.layers[1].index = 99;
+        let mut engine = ChatEngine::new(&graph, tokenizer(), SamplingParams::greedy(), 256);
+        let sampler_checkpoint = engine.sampler.checkpoint();
+
+        assert!(engine.send_user_message("hello", 1, |_| {}).is_err());
+
+        assert_turn_state_unchanged(&engine, sampler_checkpoint);
+    }
+
+    #[test]
+    fn generation_error_rolls_back_prefill_and_ends_progress() {
+        let bytes = model_bytes();
+        let gguf = GgufFile::parse(&bytes).unwrap();
+        let graph = ModelGraph::from_gguf(&gguf).unwrap();
+        let mut engine = ChatEngine::new(&graph, tokenizer(), sampling_with_invalid_top_k(), 256);
+        let progress = Arc::new(WorkerProgress::new());
+        engine.set_worker_progress(progress.clone());
+        let sampler_checkpoint = engine.sampler.checkpoint();
+
+        assert!(engine.send_user_message("hello", 1, |_| {}).is_err());
+
+        assert_turn_state_unchanged(&engine, sampler_checkpoint);
+        assert_eq!(progress.turn_start_nanos.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.kv_cache_bytes.load(Ordering::Relaxed), 0);
     }
 }

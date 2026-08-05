@@ -292,7 +292,15 @@ fn align(offset: u64, alignment: u64) -> u64 {
 /// numerical assertions still hold), every code is `0` so every
 /// BitLinear matvec returns 0.
 pub fn build_gguf(preset: Preset, random_weights: bool) -> Vec<u8> {
-    let cfg = preset.config();
+    build_gguf_with_config(preset.config(), random_weights)
+}
+
+#[cfg(test)]
+pub(crate) fn build_gguf_for_config(cfg: Config, random_weights: bool) -> Vec<u8> {
+    build_gguf_with_config(cfg, random_weights)
+}
+
+fn build_gguf_with_config(cfg: Config, random_weights: bool) -> Vec<u8> {
     let mut rng = Xorshift64::new(cfg.seed);
 
     // 1) Tensor list.

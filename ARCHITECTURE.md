@@ -32,9 +32,11 @@ flowchart TB
     end
 
     subgraph BIT["BitLinear matvec dispatcher · src/model/bitlinear.rs"]
-        disp{{"is_aarch64_feature_detected!(\"neon\")"}}
+        disp{{"runtime CPU feature dispatch"}}
         scalar["scalar fallback<br/>(Stage 4-C)"]
-        neon["NEON kernel<br/>(Stage 6-C, 7.5× faster)"]
+        neon["aarch64 NEON kernel"]
+        sse2["x86 SSE2 i8 kernel<br/>(SSSE3+ hosts)"]
+        lut["x86 scalar LUT<br/>(SSE2-only hosts)"]
     end
 
     subgraph KV["KV cache · src/model/{kv_cache, cached_forward}.rs"]
@@ -61,8 +63,10 @@ flowchart TB
     out_norm --> lm
     layer -. matvec calls .-> disp
     lm -. F16 row dot product .-> embed
-    disp -- yes --> neon
-    disp -- no --> scalar
+    disp -- aarch64 + NEON --> neon
+    disp -- x86 + SSSE3 --> sse2
+    disp -- x86 + SSE2 only --> lut
+    disp -- fallback --> scalar
     layer <--> cache
     lm --> sampler
     sampler --> loop_ctrl
@@ -97,6 +101,8 @@ flowchart TB
 | 6-B-aux | Sparsity prototype (CSR, scalar over non-zeros) | `src/model/bitlinear_sparse.rs` — prototype, not default |
 | analyze | Ternary weight distribution (-1/0/+1 fractions) | `src/main.rs::cmd_analyze` |
 | synth | Synthetic GGUF builder for benchmarking (tiny/small/medium presets) | `src/synth.rs` |
+| 9 | Multi-turn chat + TUI | `src/chat/*`, `src/main.rs::{cmd_chat,cmd_tui}` |
+| 10-D | i8 KV cache + i8 activation kernels | `src/model/{kv_cache,bitlinear_neon,bitlinear_sse2}.rs` |
 
 ## Memory layout (per token, decode step)
 
@@ -116,9 +122,9 @@ flowchart TB
     ├── ffn gate/up    : 6912 × f32 = 27 KiB
     └── unpacked_row   : in_dim × i8 ≤ 6912 B    (NEON only)
 
-  KV cache (allocated at session start, grows with position)
-    └── per layer × {K, V} × position × 640 × f32
-        ≈  30 × 2 × pos × 2560 B = 150 KiB / token
+  KV cache (capacity reserved at session start, length grows with position)
+    └── per layer × {K, V} × position × (640 × i8 + one f32 scale)
+        ≈  30 × 2 × pos × 644 B = 37.7 KiB / token
 ```
 
 ## Numerical pipeline
@@ -156,6 +162,8 @@ Every `BitLinear` arrow above is dispatched to:
 
 * `bitlinear_i2s_matvec_f32_neon` on `aarch64` hosts with NEON
   (Apple Silicon),
+* the SSE2 i8 kernel on x86 hosts with SSSE3,
+* the scalar LUT kernel on SSE2-only x86 hosts,
 * `bitlinear_i2s_matvec_f32_scalar` otherwise.
 
 Both read the same packed I2_S bytes from the mmap; neither expands

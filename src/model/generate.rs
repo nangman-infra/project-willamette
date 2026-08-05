@@ -75,6 +75,13 @@ where
             )));
         }
     }
+    validate_generation_budget(
+        "greedy_generate_no_cache",
+        prompt_ids.len(),
+        max_new_tokens,
+        None,
+        graph.config.context_length as usize,
+    )?;
 
     let mut context: Vec<u32> = prompt_ids.to_vec();
     let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
@@ -85,10 +92,10 @@ where
         let next = argmax(&logits).ok_or_else(|| {
             WillametteError::GgufParse("greedy_generate: empty logits".to_string())
         })?;
-        tick(step, context.len(), next);
         if Some(next) == eos_id {
             break;
         }
+        tick(step, context.len(), next);
         context.push(next);
         generated.push(next);
     }
@@ -125,20 +132,17 @@ where
             )));
         }
     }
-    let needed = prompt_ids.len() + max_new_tokens;
-    if needed > max_seq_len {
-        return Err(WillametteError::GgufParse(format!(
-            "greedy_generate_with_cache: prompt({}) + max_new_tokens({}) = {} exceeds max_seq_len={}",
-            prompt_ids.len(),
-            max_new_tokens,
-            needed,
-            max_seq_len
-        )));
-    }
+    validate_generation_budget(
+        "greedy_generate_with_cache",
+        prompt_ids.len(),
+        max_new_tokens,
+        Some(max_seq_len),
+        graph.config.context_length as usize,
+    )?;
 
     let kv_dim = graph.config.kv_dim as usize;
     let n_layers = graph.layers.len();
-    let mut cache = KVCache::new(n_layers, kv_dim, max_seq_len);
+    let mut cache = KVCache::try_new(n_layers, kv_dim, max_seq_len)?;
 
     // Prefill: process every prompt token in order. Retain only the
     // final hidden — that's what predicts the first new token.
@@ -155,10 +159,10 @@ where
         let next = argmax(&logits).ok_or_else(|| {
             WillametteError::GgufParse("greedy_generate_with_cache: empty logits".to_string())
         })?;
-        tick(step, next_pos as usize, next);
         if Some(next) == eos_id {
             break;
         }
+        tick(step, next_pos as usize, next);
         generated.push(next);
         // Don't forward unnecessarily after the final accepted token.
         if step + 1 < max_new_tokens {
@@ -199,16 +203,13 @@ where
             )));
         }
     }
-    let needed = prompt_ids.len() + max_new_tokens;
-    if needed > max_seq_len {
-        return Err(WillametteError::GgufParse(format!(
-            "generate_with_cache_and_sampler: prompt({}) + max_new_tokens({}) = {} exceeds max_seq_len={}",
-            prompt_ids.len(),
-            max_new_tokens,
-            needed,
-            max_seq_len
-        )));
-    }
+    validate_generation_budget(
+        "generate_with_cache_and_sampler",
+        prompt_ids.len(),
+        max_new_tokens,
+        Some(max_seq_len),
+        graph.config.context_length as usize,
+    )?;
 
     // Seed sampler history with the prompt tokens so repetition penalty
     // includes the user-supplied context, not just the generated tail.
@@ -218,7 +219,7 @@ where
 
     let kv_dim = graph.config.kv_dim as usize;
     let n_layers = graph.layers.len();
-    let mut cache = KVCache::new(n_layers, kv_dim, max_seq_len);
+    let mut cache = KVCache::try_new(n_layers, kv_dim, max_seq_len)?;
 
     let mut last_hidden: Vec<f32> = Vec::new();
     for (i, &tid) in prompt_ids.iter().enumerate() {
@@ -231,10 +232,10 @@ where
     for step in 0..max_new_tokens {
         let logits = compute_logits_from_graph(&last_hidden, graph)?;
         let next = sampler.sample(&logits)?;
-        tick(step, next_pos as usize, next);
         if Some(next) == eos_id || stop_ids.contains(&next) {
             break;
         }
+        tick(step, next_pos as usize, next);
         generated.push(next);
         sampler.observe(next);
         if step + 1 < max_new_tokens {
@@ -243,4 +244,76 @@ where
         }
     }
     Ok(generated)
+}
+
+fn validate_generation_budget(
+    operation: &str,
+    prompt_len: usize,
+    max_new_tokens: usize,
+    max_seq_len: Option<usize>,
+    context_length: usize,
+) -> Result<(), WillametteError> {
+    if let Some(max_seq_len) = max_seq_len {
+        if max_seq_len > context_length {
+            return Err(WillametteError::GgufParse(format!(
+                "{}: max_seq_len={} exceeds model context_length={}",
+                operation, max_seq_len, context_length
+            )));
+        }
+    }
+
+    // The final sampled token is returned to the caller but is not forwarded;
+    // only earlier generated tokens consume model positions/cache entries.
+    let generated_positions = max_new_tokens.saturating_sub(1);
+    let needed = prompt_len.checked_add(generated_positions).ok_or_else(|| {
+        WillametteError::GgufParse(format!(
+            "{}: prompt({}) + generated_positions({}) overflows usize",
+            operation, prompt_len, generated_positions
+        ))
+    })?;
+    if needed > context_length {
+        return Err(WillametteError::GgufParse(format!(
+            "{}: prompt({}) + max_new_tokens({}) = {} exceeds model context_length={}",
+            operation, prompt_len, max_new_tokens, needed, context_length
+        )));
+    }
+    if let Some(max_seq_len) = max_seq_len {
+        if needed > max_seq_len {
+            return Err(WillametteError::GgufParse(format!(
+                "{}: prompt({}) + max_new_tokens({}) = {} exceeds max_seq_len={}",
+                operation, prompt_len, max_new_tokens, needed, max_seq_len
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_generation_budget;
+
+    #[test]
+    fn generation_budget_rejects_cache_larger_than_model_context() {
+        let err = validate_generation_budget("generate", 1, 1, Some(17), 16).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("max_seq_len=17 exceeds model context_length=16"));
+    }
+
+    #[test]
+    fn generation_budget_rejects_prompt_plus_generation_overflow() {
+        let err = validate_generation_budget("generate", 2, usize::MAX, Some(16), 16).unwrap_err();
+        assert!(err.to_string().contains("overflows usize"));
+    }
+
+    #[test]
+    fn generation_budget_rejects_model_context_overrun() {
+        let err = validate_generation_budget("generate", 13, 5, Some(16), 16).unwrap_err();
+        assert!(err.to_string().contains("exceeds model context_length=16"));
+    }
+
+    #[test]
+    fn generation_budget_allows_one_prediction_at_full_context() {
+        validate_generation_budget("generate", 16, 1, Some(16), 16).unwrap();
+    }
 }

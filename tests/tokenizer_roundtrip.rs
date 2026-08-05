@@ -1,9 +1,8 @@
 //! Roundtrip tests for the GGUF byte-level BPE tokenizer.
 //!
 //! These tests require the real `microsoft/bitnet-b1.58-2B-4T-gguf` file at
-//! `./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf`. If the file is
-//! absent, every test prints a clear SKIP message and passes — Stage 2's
-//! invariants are checked exhaustively only when the real model is present.
+//! `./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf`. They are ignored
+//! by default and can be selected explicitly after downloading the model.
 
 use std::path::Path;
 
@@ -14,14 +13,13 @@ use project_willamette::tokenizer::{EncodeOptions, Tokenizer};
 const MODEL_PATH: &str = "./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf";
 
 /// Open the real model, parse GGUF, build the tokenizer, and pass it to `f`.
-/// Skips the test (returns without asserting) if the file is missing.
+/// An explicitly selected test fails if the file is missing.
 fn with_real_tokenizer<F: FnOnce(&Tokenizer)>(f: F) {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 2 roundtrip tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open real GGUF");
     let bytes = mmap.as_bytes();
@@ -43,21 +41,25 @@ fn assert_roundtrip(tok: &Tokenizer, text: &str) {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_hello_ascii() {
     with_real_tokenizer(|tok| assert_roundtrip(tok, "hello"));
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_hello_with_punctuation() {
     with_real_tokenizer(|tok| assert_roundtrip(tok, "Hello, world!"));
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_korean_annyeong() {
     with_real_tokenizer(|tok| assert_roundtrip(tok, "안녕하세요"));
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_korean_phrase() {
     with_real_tokenizer(|tok| {
         assert_roundtrip(
@@ -68,11 +70,13 @@ fn roundtrip_korean_phrase() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_emoji_simple() {
     with_real_tokenizer(|tok| assert_roundtrip(tok, "hello 🎉 world"));
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_emoji_dense_and_korean() {
     with_real_tokenizer(|tok| {
         assert_roundtrip(tok, "Hi 🚀 안녕 🌟 emoji ✨ 한글 + 123! 🎉");
@@ -80,6 +84,7 @@ fn roundtrip_emoji_dense_and_korean() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_empty_string() {
     with_real_tokenizer(|tok| {
         let opts = EncodeOptions::none();
@@ -91,6 +96,7 @@ fn roundtrip_empty_string() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_whitespace_and_newlines() {
     with_real_tokenizer(|tok| {
         assert_roundtrip(tok, "  leading\n\ttabs and newlines  ");
@@ -98,6 +104,7 @@ fn roundtrip_whitespace_and_newlines() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn add_bos_true_prepends_bos_id() {
     with_real_tokenizer(|tok| {
         let text = "hello";
@@ -130,6 +137,7 @@ fn add_bos_true_prepends_bos_id() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn add_bos_false_does_not_prepend_bos_id() {
     with_real_tokenizer(|tok| {
         let ids = tok
@@ -153,6 +161,7 @@ fn add_bos_false_does_not_prepend_bos_id() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn metadata_special_tokens_match_inspect_log() {
     // Values verified in Stage 1 against the official GGUF (inspect.log
     // lines 20, 21, 24).
@@ -167,6 +176,7 @@ fn metadata_special_tokens_match_inspect_log() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn roundtrip_does_not_depend_on_token_id_hardcoding() {
     // This test guards an explicit project rule: token-id sequences may
     // differ from bitnet.cpp until Stage 5 cross-validation. Roundtrip
@@ -195,6 +205,7 @@ fn roundtrip_does_not_depend_on_token_id_hardcoding() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn encode_with_specials_text_only_matches_plain_encode() {
     use project_willamette::tokenizer::PromptPart;
 
@@ -212,6 +223,7 @@ fn encode_with_specials_text_only_matches_plain_encode() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn encode_with_specials_inserts_special_verbatim() {
     use project_willamette::tokenizer::PromptPart;
 
@@ -239,6 +251,7 @@ fn encode_with_specials_inserts_special_verbatim() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn encode_with_specials_rejects_out_of_range_special_id() {
     use project_willamette::tokenizer::PromptPart;
 
@@ -257,6 +270,7 @@ fn encode_with_specials_rejects_out_of_range_special_id() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn encode_with_specials_with_leading_bos_special() {
     // Demonstrates the contract: BOS isn't auto-prepended. The caller
     // does it explicitly with a Special part if they want it.

@@ -37,8 +37,10 @@ const REL_TOL: f32 = 0.05;
 
 fn with_real_graph<F: FnOnce(&ModelGraph<'_>)>(f: F) {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!("SKIP: real GGUF not found at {}", MODEL_PATH);
-        return;
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
+            MODEL_PATH
+        );
     }
     if !std::arch::is_x86_feature_detected!("sse2") {
         eprintln!("SKIP: host has no SSE2");
@@ -111,6 +113,7 @@ fn compare(weight: &TensorView<'_>, input: &[f32], out_dim: usize, label: &str) 
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_sse2_i8_attn_q() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -120,6 +123,7 @@ fn scalar_vs_sse2_i8_attn_q() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_sse2_i8_ffn_gate() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -129,6 +133,7 @@ fn scalar_vs_sse2_i8_ffn_gate() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_sse2_i8_ffn_down() {
     with_real_graph(|g| {
         let n_ff = g.config.feed_forward_length as usize;
@@ -141,6 +146,7 @@ fn scalar_vs_sse2_i8_ffn_down() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn sse2_i8_zero_input_is_zero() {
     with_real_graph(|g| {
         let input = vec![0.0_f32; g.config.embedding_length as usize];

@@ -1,4 +1,5 @@
-//! BitNet b1.58 model definition (Stage 4-A: registry only, no forward).
+//! BitNet b1.58 model graph, forward/generation paths, KV cache, sampling, and
+//! runtime CPU-kernel dispatch.
 //!
 //! See [`docs/BITNET_FORWARD_PLAN.md`](../../docs/BITNET_FORWARD_PLAN.md) for
 //! the source-pinned topology this module implements.

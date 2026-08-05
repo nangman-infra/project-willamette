@@ -12,10 +12,13 @@ use project_willamette::tokenizer::Tokenizer;
 const MODEL_PATH: &str = "./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf";
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn run_pipeline_predicts_in_range_token_id() {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!("SKIP: real GGUF not found at {}", MODEL_PATH);
-        return;
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
+            MODEL_PATH
+        );
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open");
     let bytes = mmap.as_bytes();
@@ -36,10 +39,13 @@ fn run_pipeline_predicts_in_range_token_id() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn run_pipeline_is_deterministic() {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!("SKIP: real GGUF not found at {}", MODEL_PATH);
-        return;
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
+            MODEL_PATH
+        );
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open");
     let bytes = mmap.as_bytes();

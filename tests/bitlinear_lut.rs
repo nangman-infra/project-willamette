@@ -30,11 +30,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — LUT step-1 tests need it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -75,6 +74,7 @@ fn compare(weight: &TensorView<'_>, input: &[f32], out_dim: usize, label: &str) 
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_lut_attn_q() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -84,6 +84,7 @@ fn scalar_vs_lut_attn_q() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_lut_attn_k() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -93,6 +94,7 @@ fn scalar_vs_lut_attn_k() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_lut_attn_v() {
     with_real_graph(|g| {
         let input = realistic_input(g);
@@ -102,6 +104,7 @@ fn scalar_vs_lut_attn_v() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn scalar_vs_lut_ffn_gate() {
     with_real_graph(|g| {
         let input = realistic_input(g);

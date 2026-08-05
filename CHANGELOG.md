@@ -23,15 +23,33 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ## [Unreleased]
 
-Doc + dispatch-correctness changes since `v0.9.0-mvp`. **No release
-tag is cut on this content** per [[feedback-no-fake]] — the LUT
-dispatch landing is a fidelity / consistency improvement, not a
-user-visible performance gain (measured end-to-end tok/s on antix1
-unchanged). A future release that already has its own user-visible
-deliverable will absorb these as supporting changes.
+No entries yet.
+
+## [v0.10.0-mvp] — 2026-08-06
+
+Correctness and resilience release. This release makes chat turns
+transaction-safe, enforces model context limits, hardens GGUF parsing,
+and separates external-model tests from the default CI suite. It also
+includes the post-v0.9.0 LUT dispatch and profiling work.
 
 ### Changed
 
+* Chat turns now checkpoint KV-cache, sampler, RNG, and token position state.
+  Failures before output roll back atomically; failures after streamed output
+  preserve the successfully forwarded prefix so the session remains usable.
+* Generation and chat enforce the model's declared context length, detect
+  cache-size arithmetic/allocation failures, and avoid leaking EOS/custom stop
+  tokens through streaming callbacks.
+* Repetition penalty is applied once per distinct history token, matching the
+  Hugging Face convention instead of compounding with token frequency.
+* GGUF parsing now rejects excessive counts/nesting, arithmetic overflow,
+  incomplete quantisation blocks, unknown tensor layouts, duplicate offsets,
+  and tensor or I2_S scale-block overlap.
+* External-model integration tests use explicit `#[ignore]` markers. The
+  default CI suite reports them as ignored; `cargo test --all-targets --
+  --ignored` runs them when the pinned GGUF is available.
+* Runtime and reproducibility documentation now reflects v0.9.0 inference,
+  i8 KV cache, and NEON/SSE2/LUT dispatch behavior.
 * `src/model/dispatch.rs`, `src/model/bitlinear.rs`,
   `src/model/bitlinear_lut.rs`, `src/model/mod.rs` — new
   `Kernel::X86Sse2ScalarLut` variant; runtime split on
@@ -76,11 +94,8 @@ deliverable will absorb these as supporting changes.
 * `LIMITATIONS.md` § 2 — LUT row rewritten as "landed on main,
   fidelity OK, end-to-end tok/s unchanged".
 
-### Not in this release line
+### Deferred
 
-* `v0.10.0-mvp` tag. Held until a measurable user-visible
-  improvement is in place (bandwidth-side optimisation,
-  Phase III-B Llama support, Phase IV preprocessor).
 * RFC step 4 (SSSE3 LUT) implementation.
 
 ## [v0.9.0-mvp] — 2026-05-29

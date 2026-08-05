@@ -1,8 +1,8 @@
 //! Project Willamette CLI.
 //!
-//! Stage 1 implements only the `inspect` subcommand. `tokenize`, `run`, and any
-//! generation/inference paths intentionally do **not** exist yet — calling them
-//! would mean producing fake output.
+//! v0.10.0 exposes GGUF inspection and analysis, tokenization, inference,
+//! logits/bench tooling, interactive chat/TUI modes, and synthetic benchmark
+//! model generation.
 
 use std::path::{Path, PathBuf};
 
@@ -541,7 +541,27 @@ fn cmd_run(
     print!("Generating: ");
     std::io::stdout().flush().ok();
 
-    let max_seq_len = (prompt_ids.len() + max_new_tokens + 16).max(64);
+    let needed = prompt_ids
+        .len()
+        .checked_add(max_new_tokens.saturating_sub(1))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "prompt({}) + generated positions for max_new_tokens({}) overflows usize",
+                prompt_ids.len(),
+                max_new_tokens
+            )
+        })?;
+    let context_length = graph.config.context_length as usize;
+    if needed > context_length {
+        anyhow::bail!(
+            "prompt({}) + generated positions for max_new_tokens({}) = {} exceeds model context_length={}",
+            prompt_ids.len(),
+            max_new_tokens,
+            needed,
+            context_length
+        );
+    }
+    let max_seq_len = needed.saturating_add(16).max(64).min(context_length);
     // Streaming UTF-8 boundary-aware printer: a multi-byte Korean /
     // CJK / emoji codepoint is often split across two or three BPE
     // tokens. We accumulate raw bytes and only print up to the last
@@ -612,12 +632,12 @@ fn cmd_chat(args: &ChatArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
     let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
 
-    let mut engine = ChatEngine::new(
+    let mut engine = ChatEngine::try_new(
         &graph,
         tokenizer,
         build_sampling_params(args),
         args.max_seq_len,
-    );
+    )?;
     if let Some(sys) = args.system.as_deref() {
         engine.set_system_prompt(Some(sys.to_string()));
     }
@@ -735,12 +755,12 @@ fn cmd_tui(args: &ChatArgs) -> Result<()> {
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
 
-    let mut engine = ChatEngine::new(
+    let mut engine = ChatEngine::try_new(
         &graph,
         tokenizer,
         build_sampling_params(args),
         args.max_seq_len,
-    );
+    )?;
     if let Some(sys) = args.system.as_deref() {
         engine.set_system_prompt(Some(sys.to_string()));
     }

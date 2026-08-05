@@ -17,11 +17,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 4-D3 tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -31,6 +30,7 @@ where
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn block_forward_preserves_n_embd_and_is_finite() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -46,6 +46,7 @@ fn block_forward_preserves_n_embd_and_is_finite() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn block_forward_is_deterministic() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -60,6 +61,7 @@ fn block_forward_is_deterministic() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn full_block_differs_from_attention_only() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -100,6 +102,7 @@ fn full_block_differs_from_attention_only() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn full_block_differs_from_ffn_only() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -138,6 +141,7 @@ fn full_block_differs_from_ffn_only() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn same_function_handles_layer_0_and_layer_1() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;

@@ -20,11 +20,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 4-D4 tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -34,6 +33,7 @@ where
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn full_forward_returns_n_embd_finite_hidden() {
     with_real_graph(|g| {
         let h = forward_single_token_position_zero(g, 15339).expect("forward");
@@ -52,6 +52,7 @@ fn full_forward_returns_n_embd_finite_hidden() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn full_forward_is_deterministic() {
     with_real_graph(|g| {
         let a = forward_single_token_position_zero(g, 15339).expect("forward a");
@@ -61,6 +62,7 @@ fn full_forward_is_deterministic() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn full_forward_different_tokens_differ() {
     with_real_graph(|g| {
         let h_a = forward_single_token_position_zero(g, 15339).expect("forward 15339");

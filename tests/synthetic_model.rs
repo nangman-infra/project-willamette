@@ -2,8 +2,8 @@
 //!
 //! The real `microsoft/bitnet-b1.58-2B-4T-gguf` file is intentionally
 //! not in CI (1.1 GiB, plus the project rule against committing model
-//! files). Without it, every `tests/*.rs` test that does
-//! `Path::new(MODEL_PATH).exists()` SKIPs at runtime — leaving the
+//! files). Without it, real-model integration cases are explicitly
+//! ignored, which would otherwise leave the
 //! model load and forward-path code at 0 % CI coverage.
 //!
 //! This file builds a tiny in-memory GGUF (≈73 KB) that exercises the
@@ -39,8 +39,12 @@ use project_willamette::gguf::reader::{GgufFile, GGUF_MAGIC};
 use project_willamette::gguf::types::GgmlType;
 use project_willamette::model::cached_forward::forward_with_cache;
 use project_willamette::model::forward::forward_single_token_position_zero;
+use project_willamette::model::generate::{
+    generate_with_cache_and_sampler, greedy_generate_with_cache,
+};
 use project_willamette::model::kv_cache::KVCache;
 use project_willamette::model::multi_forward::multi_token_forward;
+use project_willamette::model::sampler::{Sampler, SamplingParams};
 use project_willamette::model::ModelGraph;
 
 // ── tiny model config ────────────────────────────────────────────────
@@ -426,4 +430,32 @@ fn synthetic_cached_vs_no_cache_agree_on_position_zero() {
             b
         );
     }
+}
+
+#[test]
+fn synthetic_eos_does_not_reach_tick_callback() {
+    let buf = build_synthetic_bitnet_gguf();
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let graph = ModelGraph::from_gguf(&gguf).expect("graph");
+
+    let generated = greedy_generate_with_cache(&graph, &[0], 1, Some(0), 2, |_, _, _| {
+        panic!("EOS token must not reach the tick callback")
+    })
+    .expect("generate");
+    assert!(generated.is_empty());
+}
+
+#[test]
+fn synthetic_custom_stop_does_not_reach_tick_callback() {
+    let buf = build_synthetic_bitnet_gguf();
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    let mut sampler = Sampler::new(SamplingParams::greedy());
+
+    let generated =
+        generate_with_cache_and_sampler(&graph, &[0], 1, None, &[0], 2, &mut sampler, |_, _, _| {
+            panic!("custom stop token must not reach the tick callback")
+        })
+        .expect("generate");
+    assert!(generated.is_empty());
 }

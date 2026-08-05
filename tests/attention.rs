@@ -18,11 +18,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 4-D1 tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -32,6 +31,7 @@ where
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn attention_block_forward_produces_2560_finite_output() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -75,6 +75,7 @@ fn attention_block_forward_produces_2560_finite_output() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn attention_block_forward_is_deterministic() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -104,6 +105,7 @@ fn attention_block_forward_is_deterministic() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn attention_block_forward_q_k_v_path_shapes() {
     // Confirm the intermediate Q/K/V shapes are what we expect.
     with_real_graph(|g| {
@@ -133,6 +135,7 @@ fn attention_block_forward_q_k_v_path_shapes() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn different_tokens_produce_different_attention_outputs() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;

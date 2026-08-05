@@ -15,11 +15,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 4-D5 tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -29,6 +28,7 @@ where
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn logits_have_vocab_size_length_and_are_finite() {
     with_real_graph(|g| {
         let hidden = forward_single_token_position_zero(g, 15339).unwrap();
@@ -42,6 +42,7 @@ fn logits_have_vocab_size_length_and_are_finite() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn logits_are_not_all_zero() {
     with_real_graph(|g| {
         let hidden = forward_single_token_position_zero(g, 15339).unwrap();
@@ -57,6 +58,7 @@ fn logits_are_not_all_zero() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn logits_are_deterministic() {
     with_real_graph(|g| {
         let hidden = forward_single_token_position_zero(g, 15339).unwrap();
@@ -67,6 +69,7 @@ fn logits_are_deterministic() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn argmax_returns_in_range_token_id() {
     with_real_graph(|g| {
         let hidden = forward_single_token_position_zero(g, 15339).unwrap();
@@ -82,6 +85,7 @@ fn argmax_returns_in_range_token_id() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn top_k_returns_in_range_token_ids() {
     with_real_graph(|g| {
         let hidden = forward_single_token_position_zero(g, 15339).unwrap();

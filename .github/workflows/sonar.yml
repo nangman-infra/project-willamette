@@ -37,9 +37,8 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run tests
-        # Real-model integration tests SKIP themselves when the GGUF is
-        # absent (see tests/*.rs `if !Path::new(MODEL_PATH).exists()`),
-        # so the suite runs cleanly without the 1.1 GiB model file.
+        # Real-model integration tests are explicitly ignored by default;
+        # synthetic/unit coverage runs without the 1.1 GiB model file.
         run: cargo test --all-targets
 
       - name: Run clippy
@@ -70,9 +69,8 @@ jobs:
           cargo clippy --all-targets --message-format=json -- -D warnings > sonar-reports/clippy.json
 
       - name: Generate coverage report
-        # Coverage will look low: real-model integration tests are
-        # SKIPped here because the 1.1 GiB GGUF is not in CI. The
-        # lib + synthetic GGUF tests still run.
+        # Coverage excludes ignored real-model integration tests because the
+        # 1.1 GiB GGUF is not in CI. Library + synthetic GGUF tests still run.
         run: cargo llvm-cov --all-targets --lcov --output-path sonar-reports/lcov.info
 
       - name: SonarQube Scan

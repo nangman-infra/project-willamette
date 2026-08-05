@@ -3,8 +3,7 @@
 //! Verifies that each Stage 4-B primitive (`embedding_gather_f16`,
 //! `rms_norm_f32`, `apply_rope_f32`, attention shape helpers) operates
 //! correctly on the actual `token_embd.weight` and per-layer norm tensors
-//! of `ggml-model-i2_s.gguf`. Skipped (SKIP message + pass) if the model
-//! file is missing.
+//! of `ggml-model-i2_s.gguf`. Real-model cases are ignored by default.
 //!
 //! No matmul, no full attention math, no logits, no sampling.
 
@@ -26,11 +25,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 4-B tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -63,6 +61,7 @@ fn f32_tensor_to_vec(t: &project_willamette::gguf::tensor::TensorView<'_>) -> Ve
 // ── 1. embedding row gather ────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn embedding_gather_hello_length_2560() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -88,6 +87,7 @@ fn embedding_gather_hello_length_2560() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn embedding_gather_korean_tokens_distinct_rows() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -113,6 +113,7 @@ fn embedding_gather_korean_tokens_distinct_rows() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn embedding_gather_out_of_range_errors() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -126,6 +127,7 @@ fn embedding_gather_out_of_range_errors() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn embedding_gather_length_mismatch_errors() {
     with_real_graph(|g| {
         let mut out_short = vec![0.0_f32; 100];
@@ -136,6 +138,7 @@ fn embedding_gather_length_mismatch_errors() {
 // ── 2. RMSNorm on real weights ────────────────────────────────────────
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn rms_norm_with_layer0_attn_norm_preserves_length() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -158,6 +161,7 @@ fn rms_norm_with_layer0_attn_norm_preserves_length() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn rms_norm_with_output_norm_preserves_length() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
@@ -184,6 +188,7 @@ fn rms_norm_with_output_norm_preserves_length() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn rms_norm_works_across_norm_tensor_widths() {
     with_real_graph(|g| {
         // ffn_sub_norm has width n_ff = 6912, not n_embd = 2560.
@@ -200,6 +205,7 @@ fn rms_norm_works_across_norm_tensor_widths() {
 // ── 3. RoPE primitive ─────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn rope_preserves_head_dim_length() {
     with_real_graph(|g| {
         let head_dim = g.config.head_dim as usize;
@@ -247,6 +253,7 @@ fn rope_uses_neox_for_bitnet_b158() {
 // ── 4. Attention shape primitives ─────────────────────────────────────
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn attention_shape_from_config_matches_inspect() {
     with_real_graph(|g| {
         let s = AttentionShape::from_config(

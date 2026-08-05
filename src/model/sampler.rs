@@ -6,6 +6,7 @@
 
 use crate::error::WillametteError;
 use crate::model::lm_head::argmax;
+use std::collections::HashSet;
 
 /// Deterministic 64-bit xorshift PRNG, seedable. No external dep, no
 /// global state. Used only for sampling; greedy never touches it.
@@ -83,6 +84,12 @@ pub struct Sampler {
     history: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SamplerCheckpoint {
+    rng_state: u64,
+    history_len: usize,
+}
+
 impl Sampler {
     pub fn new(params: SamplingParams) -> Self {
         let seed = params.seed;
@@ -97,6 +104,18 @@ impl Sampler {
     /// penalty). Callers should `observe` every newly emitted token.
     pub fn observe(&mut self, id: u32) {
         self.history.push(id);
+    }
+
+    pub(crate) fn checkpoint(&self) -> SamplerCheckpoint {
+        SamplerCheckpoint {
+            rng_state: self.rng.state,
+            history_len: self.history.len(),
+        }
+    }
+
+    pub(crate) fn rollback(&mut self, checkpoint: SamplerCheckpoint) {
+        self.rng.state = checkpoint.rng_state;
+        self.history.truncate(checkpoint.history_len);
     }
 
     /// Read-only view of the sampling configuration.
@@ -138,8 +157,9 @@ impl Sampler {
         }
         // HF convention: if logit > 0, divide; if logit < 0, multiply.
         // This guarantees the magnitude moves toward 0 regardless of sign.
+        let mut penalized = HashSet::new();
         for &id in &self.history {
-            if (id as usize) < logits.len() {
+            if (id as usize) < logits.len() && penalized.insert(id) {
                 let l = logits[id as usize];
                 logits[id as usize] = if l > 0.0 { l / r } else { l * r };
             }
@@ -327,6 +347,33 @@ mod tests {
     }
 
     #[test]
+    fn rollback_restores_history_and_rng() {
+        let params = SamplingParams {
+            temperature: 1.0,
+            top_k: None,
+            top_p: None,
+            repetition_penalty: Some(1.1),
+            seed: 12345,
+        };
+        let logits = vec![0.1_f32; 16];
+        let mut sampler = Sampler::new(params.clone());
+        sampler.observe(2);
+        let checkpoint = sampler.checkpoint();
+        let expected = sampler.sample(&logits).unwrap();
+        sampler.observe(expected);
+
+        sampler.rollback(checkpoint);
+
+        let mut clean = Sampler::new(params);
+        clean.observe(2);
+        assert_eq!(sampler.history, clean.history);
+        assert_eq!(
+            sampler.sample(&logits).unwrap(),
+            clean.sample(&logits).unwrap()
+        );
+    }
+
+    #[test]
     fn temperature_one_matches_uniform_sampling_distribution_shape() {
         let logits = vec![0.0_f32, 0.0, 0.0, 0.0];
         let mut s = Sampler::new(SamplingParams {
@@ -399,5 +446,24 @@ mod tests {
         // With seed 7 we just confirm it returns a valid id.
         let id = s.sample(&logits).unwrap();
         assert!(id < 4);
+    }
+
+    #[test]
+    fn repetition_penalty_applies_once_per_unique_history_token() {
+        let mut s = Sampler::new(SamplingParams {
+            temperature: 1.0,
+            top_k: None,
+            top_p: None,
+            repetition_penalty: Some(2.0),
+            seed: 7,
+        });
+        s.observe(1);
+        s.observe(1);
+        s.observe(2);
+        s.observe(2);
+
+        let mut logits = vec![0.0, 8.0, -3.0];
+        s.apply_repetition_penalty(&mut logits);
+        assert_eq!(logits, vec![0.0, 4.0, -6.0]);
     }
 }

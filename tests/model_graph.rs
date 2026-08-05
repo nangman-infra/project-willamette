@@ -2,7 +2,7 @@
 //!
 //! Verifies, against the real `ggml-model-i2_s.gguf`, that the model
 //! topology matches the source-pinned plan in `docs/BITNET_FORWARD_PLAN.md`.
-//! Each test skips with a SKIP message if the model file is missing.
+//! These tests are ignored by default because the model is external.
 
 use std::path::Path;
 
@@ -18,11 +18,10 @@ where
     F: FnOnce(&ModelGraph<'_>),
 {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!(
-            "SKIP: real GGUF not found at {} — Stage 4-A tests require it",
+        panic!(
+            "real GGUF not found at {}; see REPRODUCIBILITY.md",
             MODEL_PATH
         );
-        return;
     }
     let mmap = ModelMmap::open(MODEL_PATH).expect("open model");
     let bytes = mmap.as_bytes();
@@ -32,6 +31,7 @@ where
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn config_matches_inspect_log_values() {
     with_real_graph(|g| {
         let c = &g.config;
@@ -61,6 +61,7 @@ fn config_matches_inspect_log_values() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn graph_has_exactly_30_layers() {
     with_real_graph(|g| {
         assert_eq!(g.layers.len(), 30);
@@ -76,6 +77,7 @@ fn graph_has_exactly_30_layers() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn token_embd_is_f16_with_expected_shape() {
     with_real_graph(|g| {
         assert_eq!(g.token_embd.ggml_type, GgmlType::F16);
@@ -88,6 +90,7 @@ fn token_embd_is_f16_with_expected_shape() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn output_norm_is_f32_with_expected_shape() {
     with_real_graph(|g| {
         assert_eq!(g.output_norm.ggml_type, GgmlType::F32);
@@ -97,6 +100,7 @@ fn output_norm_is_f32_with_expected_shape() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn output_weight_is_absent_for_this_file() {
     // Our file (ggml-model-i2_s.gguf) does NOT ship a separate output.weight
     // tensor. The flag should reflect that.
@@ -111,6 +115,7 @@ fn output_weight_is_absent_for_this_file() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn lm_head_is_tied_to_token_embd() {
     with_real_graph(|g| {
         assert!(
@@ -124,6 +129,7 @@ fn lm_head_is_tied_to_token_embd() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn every_layer_has_4_f32_and_7_i2s_tensors() {
     with_real_graph(|g| {
         for layer in &g.layers {
@@ -168,6 +174,7 @@ fn every_layer_has_4_f32_and_7_i2s_tensors() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn every_layer_has_expected_shapes() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as u64;
@@ -193,6 +200,7 @@ fn every_layer_has_expected_shapes() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn graph_references_a_distinct_tensor_per_role_per_layer() {
     // Sanity: no two roles within the same layer point at the same TensorView,
     // and no two layers share a role.
@@ -236,6 +244,7 @@ fn graph_references_a_distinct_tensor_per_role_per_layer() {
 }
 
 #[test]
+#[ignore = "requires the external BitNet GGUF; see REPRODUCIBILITY.md"]
 fn graph_covers_exactly_332_tensor_references() {
     // 30 layers × 11 per-layer roles + token_embd + output_norm = 332
     // (lm_head is an alias, not a new tensor)

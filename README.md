@@ -49,7 +49,7 @@ Engineering rules every change is held to (full list in
 │   ── windowing / sparse tables     │         │                                          │
 │   ── target-ISA aware blocking     │         │                                          │
 └────────────────────────────────────┘         └──────────────────────────────────────────┘
-       NOT BUILT YET                                      WORKING TODAY (v0.9.0-mvp)
+       NOT BUILT YET                                      WORKING TODAY (v0.10.0-mvp)
 ```
 
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
@@ -58,7 +58,7 @@ work runs where compute is cheap, and the on-device runtime stays
 small. `willamette-prep` is the next major piece of work; what
 exists today is the runtime side, hardcoded to BitNet b1.58 2B.
 
-## Status: v0.9.0-mvp
+## Status: v0.10.0-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -80,7 +80,7 @@ What works **today**, on the path toward the thesis:
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **301** passing (Mac aarch64), 305 (x86 with SSE2 paths), 0 warnings, `cargo test --release` |
+| Tests | **228** default tests passing + **94** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
 | Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 
@@ -110,7 +110,7 @@ humble hardware:
 No toolchain, no compile time. Pick the tarball matching your host:
 
 ```bash
-TAG=v0.9.0-mvp
+TAG=v0.10.0-mvp
 TARGET=i686-unknown-linux-musl   # also: x86_64-unknown-linux-musl,
                                  #       aarch64-unknown-linux-musl,
                                  #       armv7-unknown-linux-musleabihf,
