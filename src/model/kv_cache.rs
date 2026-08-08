@@ -204,9 +204,7 @@ impl KVCache {
         let layer = &self.layers[layer_idx];
         let n_pos = layer.k_scales.len();
         let len = n_pos * self.kv_dim;
-        out_k.clear();
         out_k.resize(len, 0.0);
-        out_v.clear();
         out_v.resize(len, 0.0);
         for p in 0..n_pos {
             let s_k = layer.k_scales[p];

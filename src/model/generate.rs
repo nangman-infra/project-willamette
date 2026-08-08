@@ -13,7 +13,7 @@
 //! pure greedy argmax. Sampling lives in Stage 5-D.
 
 use crate::error::WillametteError;
-use crate::model::cached_forward::forward_with_cache;
+use crate::model::cached_forward::{forward_with_cache_into, ForwardWorkspace};
 use crate::model::forward::forward_single_token_position_zero;
 use crate::model::graph::ModelGraph;
 use crate::model::kv_cache::KVCache;
@@ -143,12 +143,20 @@ where
     let kv_dim = graph.config.kv_dim as usize;
     let n_layers = graph.layers.len();
     let mut cache = KVCache::try_new(n_layers, kv_dim, max_seq_len)?;
+    let mut workspace = ForwardWorkspace::new(graph);
 
     // Prefill: process every prompt token in order. Retain only the
     // final hidden — that's what predicts the first new token.
     let mut last_hidden: Vec<f32> = Vec::new();
     for (i, &tid) in prompt_ids.iter().enumerate() {
-        last_hidden = forward_with_cache(graph, &mut cache, tid, i as u32)?;
+        forward_with_cache_into(
+            graph,
+            &mut cache,
+            &mut workspace,
+            tid,
+            i as u32,
+            &mut last_hidden,
+        )?;
     }
 
     let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
@@ -166,7 +174,14 @@ where
         generated.push(next);
         // Don't forward unnecessarily after the final accepted token.
         if step + 1 < max_new_tokens {
-            last_hidden = forward_with_cache(graph, &mut cache, next, next_pos)?;
+            forward_with_cache_into(
+                graph,
+                &mut cache,
+                &mut workspace,
+                next,
+                next_pos,
+                &mut last_hidden,
+            )?;
             next_pos += 1;
         }
     }
@@ -220,10 +235,18 @@ where
     let kv_dim = graph.config.kv_dim as usize;
     let n_layers = graph.layers.len();
     let mut cache = KVCache::try_new(n_layers, kv_dim, max_seq_len)?;
+    let mut workspace = ForwardWorkspace::new(graph);
 
     let mut last_hidden: Vec<f32> = Vec::new();
     for (i, &tid) in prompt_ids.iter().enumerate() {
-        last_hidden = forward_with_cache(graph, &mut cache, tid, i as u32)?;
+        forward_with_cache_into(
+            graph,
+            &mut cache,
+            &mut workspace,
+            tid,
+            i as u32,
+            &mut last_hidden,
+        )?;
     }
 
     let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
@@ -239,7 +262,14 @@ where
         generated.push(next);
         sampler.observe(next);
         if step + 1 < max_new_tokens {
-            last_hidden = forward_with_cache(graph, &mut cache, next, next_pos)?;
+            forward_with_cache_into(
+                graph,
+                &mut cache,
+                &mut workspace,
+                next,
+                next_pos,
+                &mut last_hidden,
+            )?;
             next_pos += 1;
         }
     }

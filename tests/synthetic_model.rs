@@ -37,7 +37,9 @@ use byteorder::{LittleEndian, WriteBytesExt};
 
 use project_willamette::gguf::reader::{GgufFile, GGUF_MAGIC};
 use project_willamette::gguf::types::GgmlType;
-use project_willamette::model::cached_forward::forward_with_cache;
+use project_willamette::model::cached_forward::{
+    forward_with_cache, forward_with_cache_into, ForwardWorkspace,
+};
 use project_willamette::model::forward::forward_single_token_position_zero;
 use project_willamette::model::generate::{
     generate_with_cache_and_sampler, greedy_generate_with_cache,
@@ -389,6 +391,58 @@ fn synthetic_cached_forward_runs_for_two_positions() {
     assert_eq!(h1.len(), N_EMBD as usize);
     assert!(h1.iter().all(|v| v.is_finite()));
     assert_eq!(cache.position(), 2);
+}
+
+#[test]
+fn synthetic_workspace_path_matches_wrapper_and_reuses_output() {
+    let buf = build_synthetic_bitnet_gguf();
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    let mut wrapper_cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 4);
+    let mut workspace_cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 4);
+    let mut workspace = ForwardWorkspace::new(&graph);
+    let mut output = Vec::new();
+    let mut first_capacity = None;
+
+    for (position, token) in [0_u32, 1].into_iter().enumerate() {
+        let expected = forward_with_cache(&graph, &mut wrapper_cache, token, position as u32)
+            .expect("wrapper forward");
+        forward_with_cache_into(
+            &graph,
+            &mut workspace_cache,
+            &mut workspace,
+            token,
+            position as u32,
+            &mut output,
+        )
+        .expect("workspace forward");
+
+        assert_eq!(expected, output);
+        assert_eq!(wrapper_cache.position(), workspace_cache.position());
+        if position == 0 {
+            assert!(output.capacity() >= N_EMBD as usize);
+            first_capacity = Some(output.capacity());
+        } else {
+            assert_eq!(Some(output.capacity()), first_capacity);
+        }
+    }
+}
+
+#[test]
+fn synthetic_workspace_error_rolls_back_cache_and_clears_output() {
+    let buf = build_synthetic_bitnet_gguf();
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let mut graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    graph.layers[1].index = 99;
+    let mut cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 4);
+    let mut workspace = ForwardWorkspace::new(&graph);
+    let mut output = vec![42.0];
+
+    assert!(
+        forward_with_cache_into(&graph, &mut cache, &mut workspace, 0, 0, &mut output,).is_err()
+    );
+    assert_eq!(cache.position(), 0);
+    assert!(output.is_empty());
 }
 
 #[test]

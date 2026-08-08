@@ -39,7 +39,7 @@ within ±10 % (warm-cache decode-step variance).
 | CPU | Intel Pentium M 2.00 GHz (Banias/Dothan, family 6 model 13) |
 | Cores | 1 (no SMT) |
 | SIMD ceiling | SSE2 (no SSE3 / SSSE3 / SSE4 / AVX) |
-| RAM | 2 GiB |
+| RAM | 1 GiB (996 MiB visible) + 1 GiB swap |
 | OS | Debian 12 bookworm + antiX kernel `5.10.224-antix.1-486-smp` |
 | Toolchain | i686-unknown-linux-musl, cross-built on the CI runner |
 
@@ -62,6 +62,37 @@ bitnet.cpp's production CPU path implicitly requires** (see the
 2026-05-30 head-to-head section below). Many Mid-2012-class laptops,
 low-end x86 thin clients, and legacy desktops sit in this sub-AVX2
 band; this is the first time we have direct numbers on one.
+
+## 2026-08-08 — Cached-forward workspace allocation reuse
+
+`cached_forward` previously constructed fixed-size norm, Q/K/V,
+attention-output, FFN, and per-head score vectors inside every layer call.
+For the 30-layer / 20-head reference model, source-level accounting gives
+approximately 994 heap allocations per cached token. A reusable
+`ForwardWorkspace` now owns these buffers across prefill and decode tokens;
+the original allocation-returning API remains as a compatibility wrapper.
+
+The benchmark path was switched to the workspace API and compared against the
+published v0.10.0-mvp i686 binary on antix1. The CPU was allowed to reach its
+2.0 GHz state before retained samples; each result is the average of 10 decode
+steps. Commands were identical apart from the binary path:
+
+```bash
+willamette bench --model ~/models/ggml-model-i2_s.gguf --decode-steps 10
+```
+
+| Binary | Run 1 | Run 2 | Median | Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| v0.10.0-mvp baseline | 2825.9 ms | 2829.6 ms | 2827.8 ms | 0.35 tok/s |
+| workspace build | 2815.4 ms | 2813.9 ms | 2814.7 ms | 0.36 tok/s |
+
+The median observed difference is **0.46%**, below the project's ±10%
+reproducibility threshold and too small to attribute confidently to this
+change. This matches stage profiling: BitLinear dominates
+short-context decode on antix1. The useful result is removal of allocator churn
+and repeated KV scratch zero-fills, which should matter more as context length
+and scratch size grow. Stage 5-E smoke output remained exactly
+`[12366, 13, 12366]` / `" Paris. Paris"` for the three-token reference run.
 
 ## 2026-05-30 — Decode-step stage breakdown — where the 90 % goes
 

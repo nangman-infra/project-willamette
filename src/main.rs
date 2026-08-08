@@ -13,7 +13,7 @@ use project_willamette::chat::ChatEngine;
 use project_willamette::gguf::reader::{GgufFile, GgufValue, GGUF_MAGIC};
 use project_willamette::memory::mmap::ModelMmap;
 use project_willamette::model::bitlinear::bitlinear_i2s_matvec_f32;
-use project_willamette::model::cached_forward::forward_with_cache;
+use project_willamette::model::cached_forward::{forward_with_cache_into, ForwardWorkspace};
 use project_willamette::model::forward::forward_single_token_position_zero;
 use project_willamette::model::generate::generate_with_cache_and_sampler;
 use project_willamette::model::kv_cache::KVCache;
@@ -1083,9 +1083,18 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     // ── 3) Decode-step with KV cache ──
     let kv_dim = graph.config.kv_dim as usize;
     let mut cache = KVCache::new(graph.layers.len(), kv_dim, decode_steps + 8);
+    let mut workspace = ForwardWorkspace::new(&graph);
+    let mut cached_hidden = Vec::new();
     // Warm-up: prefill 1 token.
-    let _ = forward_with_cache(&graph, &mut cache, bench_token, 0)
-        .map_err(|e| anyhow::anyhow!("prefill: {}", e))?;
+    forward_with_cache_into(
+        &graph,
+        &mut cache,
+        &mut workspace,
+        bench_token,
+        0,
+        &mut cached_hidden,
+    )
+    .map_err(|e| anyhow::anyhow!("prefill: {}", e))?;
 
     // Discard any per-stage timings accumulated during warm-up / prefill
     // so only the measurement loop below contributes to the breakdown.
@@ -1096,8 +1105,15 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     let mut samples = 0usize;
     for step in 0..decode_steps {
         let t = Instant::now();
-        let _ = forward_with_cache(&graph, &mut cache, bench_token, (step + 1) as u32)
-            .map_err(|e| anyhow::anyhow!("decode step: {}", e))?;
+        forward_with_cache_into(
+            &graph,
+            &mut cache,
+            &mut workspace,
+            bench_token,
+            (step + 1) as u32,
+            &mut cached_hidden,
+        )
+        .map_err(|e| anyhow::anyhow!("decode step: {}", e))?;
         decode_total += t.elapsed().as_secs_f64();
         samples += 1;
     }

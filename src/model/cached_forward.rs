@@ -51,6 +51,76 @@ struct LayerCtx {
     scale: f32,
 }
 
+/// Reusable buffers for cached single-token forward passes.
+///
+/// Construct one workspace per generation/chat session and pass it to the
+/// `_into` APIs to avoid rebuilding layer and attention scratch vectors for
+/// every token. The compatibility wrappers below still allocate a temporary
+/// workspace for callers that prefer the original `Result<Vec<f32>>` API.
+pub struct ForwardWorkspace {
+    hidden: Vec<f32>,
+    scratch_k: Vec<f32>,
+    scratch_v: Vec<f32>,
+    x_norm: Vec<f32>,
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    attn_out: Vec<f32>,
+    scores: Vec<f32>,
+    sub_normed: Vec<f32>,
+    wo_out: Vec<f32>,
+    x_norm_ffn: Vec<f32>,
+    gate: Vec<f32>,
+    up: Vec<f32>,
+    fused: Vec<f32>,
+    fused_norm: Vec<f32>,
+    down: Vec<f32>,
+}
+
+impl ForwardWorkspace {
+    pub fn new(graph: &ModelGraph<'_>) -> Self {
+        let n_embd = graph.config.embedding_length as usize;
+        let kv_dim = graph.config.kv_dim as usize;
+        let n_ff = graph.config.feed_forward_length as usize;
+        Self {
+            hidden: vec![0.0; n_embd],
+            scratch_k: Vec::new(),
+            scratch_v: Vec::new(),
+            x_norm: vec![0.0; n_embd],
+            q: vec![0.0; n_embd],
+            k: vec![0.0; kv_dim],
+            v: vec![0.0; kv_dim],
+            attn_out: vec![0.0; n_embd],
+            scores: Vec::new(),
+            sub_normed: vec![0.0; n_embd],
+            wo_out: vec![0.0; n_embd],
+            x_norm_ffn: vec![0.0; n_embd],
+            gate: vec![0.0; n_ff],
+            up: vec![0.0; n_ff],
+            fused: vec![0.0; n_ff],
+            fused_norm: vec![0.0; n_ff],
+            down: vec![0.0; n_embd],
+        }
+    }
+
+    fn prepare(&mut self, ctx: &LayerCtx) {
+        self.hidden.resize(ctx.n_embd, 0.0);
+        self.x_norm.resize(ctx.n_embd, 0.0);
+        self.q.resize(ctx.n_embd, 0.0);
+        self.k.resize(ctx.kv_dim, 0.0);
+        self.v.resize(ctx.kv_dim, 0.0);
+        self.attn_out.resize(ctx.n_embd, 0.0);
+        self.sub_normed.resize(ctx.n_embd, 0.0);
+        self.wo_out.resize(ctx.n_embd, 0.0);
+        self.x_norm_ffn.resize(ctx.n_embd, 0.0);
+        self.gate.resize(ctx.n_ff, 0.0);
+        self.up.resize(ctx.n_ff, 0.0);
+        self.fused.resize(ctx.n_ff, 0.0);
+        self.fused_norm.resize(ctx.n_ff, 0.0);
+        self.down.resize(ctx.n_embd, 0.0);
+    }
+}
+
 #[inline]
 fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -72,7 +142,32 @@ pub fn forward_with_cache(
     token_id: u32,
     position: u32,
 ) -> Result<Vec<f32>, WillametteError> {
-    forward_with_cache_progress(graph, cache, token_id, position, |_| {})
+    let mut workspace = ForwardWorkspace::new(graph);
+    let mut output = Vec::new();
+    forward_with_cache_into(
+        graph,
+        cache,
+        &mut workspace,
+        token_id,
+        position,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+/// Allocation-reusing variant of [`forward_with_cache`].
+///
+/// On error, cache entries appended by this call are rolled back and `output`
+/// is cleared. Workspace contents are unspecified but safe to reuse.
+pub fn forward_with_cache_into(
+    graph: &ModelGraph<'_>,
+    cache: &mut KVCache,
+    workspace: &mut ForwardWorkspace,
+    token_id: u32,
+    position: u32,
+    output: &mut Vec<f32>,
+) -> Result<(), WillametteError> {
+    forward_with_cache_progress_into(graph, cache, workspace, token_id, position, output, |_| {})
 }
 
 /// Same as [`forward_with_cache`] but calls `on_layer(layer_idx)`
@@ -85,8 +180,35 @@ pub fn forward_with_cache_progress<F: FnMut(u32)>(
     cache: &mut KVCache,
     token_id: u32,
     position: u32,
-    mut on_layer: F,
+    on_layer: F,
 ) -> Result<Vec<f32>, WillametteError> {
+    let mut workspace = ForwardWorkspace::new(graph);
+    let mut output = Vec::new();
+    forward_with_cache_progress_into(
+        graph,
+        cache,
+        &mut workspace,
+        token_id,
+        position,
+        &mut output,
+        on_layer,
+    )?;
+    Ok(output)
+}
+
+/// Allocation-reusing variant of [`forward_with_cache_progress`].
+///
+/// On error, cache entries appended by this call are rolled back and `output`
+/// is cleared. Layer progress callbacks that already fired cannot be undone.
+pub fn forward_with_cache_progress_into<F: FnMut(u32)>(
+    graph: &ModelGraph<'_>,
+    cache: &mut KVCache,
+    workspace: &mut ForwardWorkspace,
+    token_id: u32,
+    position: u32,
+    output: &mut Vec<f32>,
+    mut on_layer: F,
+) -> Result<(), WillametteError> {
     let cfg = &graph.config;
     let ctx = LayerCtx {
         n_embd: cfg.embedding_length as usize,
@@ -103,35 +225,31 @@ pub fn forward_with_cache_progress<F: FnMut(u32)>(
     };
 
     validate_cache_inputs(graph, cache, token_id, position, ctx.kv_dim)?;
+    let checkpoint = cache.checkpoint();
+    output.clear();
+    let result = (|| {
+        workspace.prepare(&ctx);
 
-    let mut hidden = vec![0.0_f32; ctx.n_embd];
-    time_stage!("embedding", {
-        embedding_gather_f16(graph.token_embd, token_id, &mut hidden)?;
-    });
+        time_stage!("embedding", {
+            embedding_gather_f16(graph.token_embd, token_id, &mut workspace.hidden)?;
+        });
 
-    // Dequant scratch reused across layers — capacity stabilises at
-    // (position + 1) × kv_dim after the first growth.
-    let mut scratch_k: Vec<f32> = Vec::new();
-    let mut scratch_v: Vec<f32> = Vec::new();
+        for layer in &graph.layers {
+            forward_one_layer(layer, cache, workspace, &ctx, position)?;
+            on_layer(layer.index);
+        }
 
-    for layer in &graph.layers {
-        forward_one_layer(
-            layer,
-            cache,
-            &mut hidden,
-            &mut scratch_k,
-            &mut scratch_v,
-            &ctx,
-            position,
-        )?;
-        on_layer(layer.index);
+        output.resize(ctx.n_embd, 0.0);
+        time_stage!("output_norm", {
+            rms_norm_f32(&workspace.hidden, &graph.output_norm_f32, ctx.eps, output)?;
+        });
+        Ok(())
+    })();
+    if result.is_err() {
+        cache.rollback(checkpoint);
+        output.clear();
     }
-
-    let mut final_hidden = vec![0.0_f32; ctx.n_embd];
-    time_stage!("output_norm", {
-        rms_norm_f32(&hidden, &graph.output_norm_f32, ctx.eps, &mut final_hidden)?;
-    });
-    Ok(final_hidden)
+    result
 }
 
 fn validate_cache_inputs(
@@ -174,29 +292,28 @@ fn validate_cache_inputs(
 fn forward_one_layer(
     layer: &LayerWeights<'_>,
     cache: &mut KVCache,
-    hidden: &mut [f32],
-    scratch_k: &mut Vec<f32>,
-    scratch_v: &mut Vec<f32>,
+    workspace: &mut ForwardWorkspace,
     ctx: &LayerCtx,
     position: u32,
 ) -> Result<(), WillametteError> {
-    let mut x_norm = vec![0.0_f32; ctx.n_embd];
     time_stage!("attn_norm", {
-        rms_norm_f32(hidden, &layer.attn_norm_f32, ctx.eps, &mut x_norm)?;
+        rms_norm_f32(
+            &workspace.hidden,
+            &layer.attn_norm_f32,
+            ctx.eps,
+            &mut workspace.x_norm,
+        )?;
     });
 
-    let mut q = vec![0.0_f32; ctx.n_embd];
-    let mut k = vec![0.0_f32; ctx.kv_dim];
-    let mut v = vec![0.0_f32; ctx.kv_dim];
     time_stage!("matvec_qkv", {
-        bitlinear_i2s_matvec_f32(layer.attn_q, &x_norm, &mut q)?;
-        bitlinear_i2s_matvec_f32(layer.attn_k, &x_norm, &mut k)?;
-        bitlinear_i2s_matvec_f32(layer.attn_v, &x_norm, &mut v)?;
+        bitlinear_i2s_matvec_f32(layer.attn_q, &workspace.x_norm, &mut workspace.q)?;
+        bitlinear_i2s_matvec_f32(layer.attn_k, &workspace.x_norm, &mut workspace.k)?;
+        bitlinear_i2s_matvec_f32(layer.attn_v, &workspace.x_norm, &mut workspace.v)?;
     });
 
     time_stage!("rope", {
         apply_rope_multi_head(
-            &mut q,
+            &mut workspace.q,
             ctx.n_heads as u32,
             ctx.head_dim,
             ctx.n_rot,
@@ -205,7 +322,7 @@ fn forward_one_layer(
             RopeType::Neox,
         )?;
         apply_rope_multi_head(
-            &mut k,
+            &mut workspace.k,
             ctx.n_heads_kv,
             ctx.head_dim,
             ctx.n_rot,
@@ -217,61 +334,78 @@ fn forward_one_layer(
 
     let layer_idx = layer.index as usize;
     time_stage!("kv_append", {
-        cache.append(layer_idx, &k, &v)?;
+        cache.append(layer_idx, &workspace.k, &workspace.v)?;
     });
     time_stage!("kv_read_into", {
-        cache.read_into(layer_idx, scratch_k, scratch_v)?;
-    });
-    let n_past = scratch_k.len() / ctx.kv_dim;
-
-    let attn_out = time_stage!("attn_softmax_v", {
-        scaled_dot_product_attention(&q, scratch_k, scratch_v, n_past, ctx)
-    });
-
-    let mut sub_normed = vec![0.0_f32; ctx.n_embd];
-    time_stage!("attn_sub_norm", {
-        rms_norm_f32(
-            &attn_out,
-            &layer.attn_sub_norm_f32,
-            ctx.eps,
-            &mut sub_normed,
+        cache.read_into(
+            layer_idx,
+            &mut workspace.scratch_k,
+            &mut workspace.scratch_v,
         )?;
     });
-    let mut wo_out = vec![0.0_f32; ctx.n_embd];
+    let n_past = workspace.scratch_k.len() / ctx.kv_dim;
+
+    time_stage!("attn_softmax_v", {
+        scaled_dot_product_attention_into(
+            &workspace.q,
+            &workspace.scratch_k,
+            &workspace.scratch_v,
+            n_past,
+            ctx,
+            &mut workspace.attn_out,
+            &mut workspace.scores,
+        )
+    });
+
+    time_stage!("attn_sub_norm", {
+        rms_norm_f32(
+            &workspace.attn_out,
+            &layer.attn_sub_norm_f32,
+            ctx.eps,
+            &mut workspace.sub_normed,
+        )?;
+    });
     time_stage!("matvec_attn_output", {
-        bitlinear_i2s_matvec_f32(layer.attn_output, &sub_normed, &mut wo_out)?;
+        bitlinear_i2s_matvec_f32(
+            layer.attn_output,
+            &workspace.sub_normed,
+            &mut workspace.wo_out,
+        )?;
     });
     time_stage!("residual_attn", {
         for d in 0..ctx.n_embd {
-            hidden[d] += wo_out[d];
+            workspace.hidden[d] += workspace.wo_out[d];
         }
     });
 
-    apply_ffn_block(layer, hidden, ctx)?;
+    apply_ffn_block(layer, workspace, ctx)?;
     time_stage!("check_finite", {
-        check_finite_hidden(hidden, layer.index)?;
+        check_finite_hidden(&workspace.hidden, layer.index)?;
     });
     Ok(())
 }
 
-fn scaled_dot_product_attention(
+fn scaled_dot_product_attention_into(
     q: &[f32],
     cached_k: &[f32],
     cached_v: &[f32],
     n_past: usize,
     ctx: &LayerCtx,
-) -> Vec<f32> {
-    let mut attn_out = vec![0.0_f32; ctx.n_embd];
+    attn_out: &mut [f32],
+    scores: &mut Vec<f32>,
+) {
+    attn_out.fill(0.0);
     for h in 0..ctx.n_heads {
         let kv_h = kv_head_for_q_head(h as u32, ctx.shape.group_size) as usize;
         let q_h = &q[h * ctx.head_dim..(h + 1) * ctx.head_dim];
-        let mut scores = Vec::with_capacity(n_past);
+        scores.clear();
+        scores.reserve(n_past);
         for p in 0..n_past {
             let base = p * ctx.kv_dim + kv_h * ctx.head_dim;
             let k_h = &cached_k[base..base + ctx.head_dim];
             scores.push(dot_f32(q_h, k_h) * ctx.scale);
         }
-        softmax_inplace(&mut scores);
+        softmax_inplace(scores);
 
         let out_h = &mut attn_out[h * ctx.head_dim..(h + 1) * ctx.head_dim];
         for p in 0..n_past {
@@ -283,40 +417,43 @@ fn scaled_dot_product_attention(
             }
         }
     }
-    attn_out
 }
 
 fn apply_ffn_block(
     layer: &LayerWeights<'_>,
-    hidden: &mut [f32],
+    workspace: &mut ForwardWorkspace,
     ctx: &LayerCtx,
 ) -> Result<(), WillametteError> {
-    let mut x_norm_ffn = vec![0.0_f32; ctx.n_embd];
     time_stage!("ffn_norm", {
-        rms_norm_f32(hidden, &layer.ffn_norm_f32, ctx.eps, &mut x_norm_ffn)?;
+        rms_norm_f32(
+            &workspace.hidden,
+            &layer.ffn_norm_f32,
+            ctx.eps,
+            &mut workspace.x_norm_ffn,
+        )?;
     });
-    let mut gate = vec![0.0_f32; ctx.n_ff];
-    let mut up = vec![0.0_f32; ctx.n_ff];
     time_stage!("matvec_ffn_gate_up", {
-        bitlinear_i2s_matvec_f32(layer.ffn_gate, &x_norm_ffn, &mut gate)?;
-        bitlinear_i2s_matvec_f32(layer.ffn_up, &x_norm_ffn, &mut up)?;
+        bitlinear_i2s_matvec_f32(layer.ffn_gate, &workspace.x_norm_ffn, &mut workspace.gate)?;
+        bitlinear_i2s_matvec_f32(layer.ffn_up, &workspace.x_norm_ffn, &mut workspace.up)?;
     });
-    let mut fused = vec![0.0_f32; ctx.n_ff];
     time_stage!("ffn_relu2_emul", {
-        relu_square(&mut gate);
-        elementwise_mul(&gate, &up, &mut fused)?;
+        relu_square(&mut workspace.gate);
+        elementwise_mul(&workspace.gate, &workspace.up, &mut workspace.fused)?;
     });
-    let mut fused_norm = vec![0.0_f32; ctx.n_ff];
     time_stage!("ffn_sub_norm", {
-        rms_norm_f32(&fused, &layer.ffn_sub_norm_f32, ctx.eps, &mut fused_norm)?;
+        rms_norm_f32(
+            &workspace.fused,
+            &layer.ffn_sub_norm_f32,
+            ctx.eps,
+            &mut workspace.fused_norm,
+        )?;
     });
-    let mut down = vec![0.0_f32; ctx.n_embd];
     time_stage!("matvec_ffn_down", {
-        bitlinear_i2s_matvec_f32(layer.ffn_down, &fused_norm, &mut down)?;
+        bitlinear_i2s_matvec_f32(layer.ffn_down, &workspace.fused_norm, &mut workspace.down)?;
     });
     time_stage!("residual_ffn", {
         for d in 0..ctx.n_embd {
-            hidden[d] += down[d];
+            workspace.hidden[d] += workspace.down[d];
         }
     });
     Ok(())

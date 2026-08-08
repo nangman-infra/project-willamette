@@ -23,7 +23,22 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ## [Unreleased]
 
-No entries yet.
+### Changed
+
+* Cached generation, chat, and benchmark paths now reuse a session-level
+  `ForwardWorkspace` for hidden, Q/K/V, attention-score, FFN, and KV-dequant
+  scratch buffers. The original `forward_with_cache -> Vec<f32>` API remains
+  available as a compatibility wrapper.
+* `KVCache::read_into` retains scratch lengths and overwrites them directly,
+  avoiding a full zero-fill before dequantisation on every layer.
+
+### Measured
+
+* antix1 (Pentium M 2.0 GHz, i686 scalar-LUT backend), 10-step warm decode:
+  v0.10.0 baseline median 2827.8 ms/token versus workspace median
+  2814.7 ms/token, a 0.46% observed difference. Greedy output remains byte-identical.
+  The change is retained for allocation and long-context memory stability, not
+  advertised as a material short-context throughput gain.
 
 ## [v0.10.0-mvp] — 2026-08-06
 

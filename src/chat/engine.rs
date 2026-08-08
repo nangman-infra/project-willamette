@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::error::WillametteError;
-use crate::model::cached_forward::{forward_with_cache, forward_with_cache_progress};
+use crate::model::cached_forward::{
+    forward_with_cache_into, forward_with_cache_progress_into, ForwardWorkspace,
+};
 use crate::model::graph::ModelGraph;
 use crate::model::kv_cache::KVCache;
 use crate::model::lm_head::compute_logits_from_graph;
@@ -215,6 +217,7 @@ pub struct ChatEngine<'g, 'a> {
     graph: &'g ModelGraph<'a>,
     tokenizer: Tokenizer,
     cache: KVCache,
+    forward_workspace: ForwardWorkspace,
     sampler: Sampler,
     history: Vec<ChatMessage>,
     /// Token position the NEXT prefill / generation step will write at.
@@ -277,6 +280,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             graph,
             tokenizer,
             cache: KVCache::try_new(n_layers, kv_dim, max_seq_len)?,
+            forward_workspace: ForwardWorkspace::new(graph),
             sampler: Sampler::new(sampling),
             history: Vec::new(),
             next_pos: 0,
@@ -518,7 +522,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         let mut last_hidden = Vec::new();
         for (i, &tid) in prompt_tokens.iter().enumerate() {
             let pos = self.next_pos + i as u32;
-            last_hidden = forward_with_cache(self.graph, &mut self.cache, tid, pos)?;
+            self.forward_with_optional_progress(tid, pos, &mut last_hidden)?;
             self.sampler.observe(tid);
         }
         self.next_pos += prompt_tokens.len() as u32;
@@ -534,13 +538,29 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         &mut self,
         token: u32,
         position: u32,
-    ) -> Result<Vec<f32>, WillametteError> {
+        output: &mut Vec<f32>,
+    ) -> Result<(), WillametteError> {
         if let Some(progress) = self.progress.clone() {
-            forward_with_cache_progress(self.graph, &mut self.cache, token, position, |layer_idx| {
-                progress.current_layer.store(layer_idx, Ordering::Relaxed);
-            })
+            forward_with_cache_progress_into(
+                self.graph,
+                &mut self.cache,
+                &mut self.forward_workspace,
+                token,
+                position,
+                output,
+                |layer_idx| {
+                    progress.current_layer.store(layer_idx, Ordering::Relaxed);
+                },
+            )
         } else {
-            forward_with_cache(self.graph, &mut self.cache, token, position)
+            forward_with_cache_into(
+                self.graph,
+                &mut self.cache,
+                &mut self.forward_workspace,
+                token,
+                position,
+                output,
+            )
         }
     }
 
@@ -610,8 +630,8 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 &mut response_text,
             );
             self.sampler.observe(next);
-            last_hidden = match self.forward_with_optional_progress(next, self.next_pos) {
-                Ok(hidden) => hidden,
+            match self.forward_with_optional_progress(next, self.next_pos, &mut last_hidden) {
+                Ok(()) => {}
                 Err(error) => {
                     self.cache.rollback(cache_checkpoint);
                     self.sampler.rollback(sampler_checkpoint);
@@ -620,7 +640,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                         visible_text: response_text[..tick_flushed_up_to].to_string(),
                     });
                 }
-            };
+            }
             self.next_pos += 1;
             self.note_token_emitted();
             self.update_kv_cache_estimate();
