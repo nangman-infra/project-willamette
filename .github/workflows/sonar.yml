@@ -93,7 +93,6 @@ jobs:
         continue-on-error: true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
         shell: bash {0}  # NOT `bash -e` — we want to keep printing even after a jq parse fail
         run: |
           set +e
@@ -107,6 +106,7 @@ jobs:
             exit 0
           fi
           ce_task_url=$(grep '^ceTaskUrl=' "${report_file}" | cut -d= -f2-)
+          server_url=$(grep '^serverUrl=' "${report_file}" | cut -d= -f2-)
           if [ -z "${ce_task_url}" ]; then
             echo "[gate breakdown] no ceTaskUrl in ${report_file}"
             exit 0
@@ -141,7 +141,7 @@ jobs:
           fi
           status_json=$(curl --location --location-trusted --max-redirs 10 \
             --silent --fail --show-error --user "${SONAR_TOKEN}:" \
-            "${SONAR_HOST_URL}/api/qualitygates/project_status?analysisId=${analysis_id}")
+            "${server_url}/api/qualitygates/project_status?analysisId=${analysis_id}")
           overall=$(echo "${status_json}" | jq -r '.projectStatus.status // "UNKNOWN"' 2>/dev/null)
           echo "Overall Quality Gate: ${overall}"
           echo
