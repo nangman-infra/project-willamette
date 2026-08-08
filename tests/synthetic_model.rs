@@ -38,7 +38,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use project_willamette::gguf::reader::{GgufFile, GGUF_MAGIC};
 use project_willamette::gguf::types::GgmlType;
 use project_willamette::model::cached_forward::{
-    forward_with_cache, forward_with_cache_into, ForwardWorkspace,
+    forward_with_cache, forward_with_cache_into, forward_with_cache_progress, ForwardWorkspace,
 };
 use project_willamette::model::forward::forward_single_token_position_zero;
 use project_willamette::model::generate::{
@@ -426,6 +426,23 @@ fn synthetic_workspace_path_matches_wrapper_and_reuses_output() {
             assert_eq!(Some(output.capacity()), first_capacity);
         }
     }
+}
+
+#[test]
+fn synthetic_progress_wrapper_reports_each_layer() {
+    let buf = build_synthetic_bitnet_gguf();
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    let mut cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 4);
+    let mut visited = Vec::new();
+
+    let output = forward_with_cache_progress(&graph, &mut cache, 0, 0, |layer| {
+        visited.push(layer);
+    })
+    .expect("progress forward");
+
+    assert_eq!(output.len(), N_EMBD as usize);
+    assert_eq!(visited, (0..N_LAYERS).collect::<Vec<_>>());
 }
 
 #[test]
