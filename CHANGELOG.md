@@ -25,6 +25,10 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ### Changed
 
+* Release archives now ship a standalone `willamette-prep` binary for the
+  pinned Q6_K embedding artifact. The runtime's existing
+  `repack-embedding-q6k` subcommand remains available and produces identical
+  bytes.
 * Embedding gather and the tied lm-head now consume either F16 or standard
   Q6_K while all transformer BitLinear tensors remain I2_S-only.
 * `repack-embedding-q6k` derives a 0.745 GiB low-memory artifact from the

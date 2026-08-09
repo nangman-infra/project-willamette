@@ -77,10 +77,14 @@ I2_S tensor and tokenizer byte is copied unchanged.
 | Changed tensor | `token_embd.weight`: F16 656,670,720 bytes → Q6_K 269,337,600 bytes |
 
 ```bash
-cargo run --release -- repack-embedding-q6k \
+cargo run --release --bin willamette-prep -- \
   --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf \
   --output ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf
 ```
+
+The compatibility interface
+`cargo run --release -- repack-embedding-q6k --model SOURCE --output DEST`
+calls the same repacker and produces identical bytes.
 
 Quality comparison uses the same WikiText-2 raw test prefix for both artifacts:
 

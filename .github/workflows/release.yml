@@ -109,24 +109,27 @@ jobs:
         # explicit `strip` call also drops the symbol table on
         # toolchains that don't honour the manifest flag.
         run: |
-          BIN="target/${{ matrix.target }}/release/project-willamette"
-          if [ -f "$BIN" ]; then
-            case "${{ matrix.target }}" in
-              *-apple-darwin) strip -x "$BIN" || true ;;
-              *)              strip    "$BIN" || true ;;
-            esac
-          fi
+          for BIN in \
+            "target/${{ matrix.target }}/release/project-willamette" \
+            "target/${{ matrix.target }}/release/willamette-prep"; do
+            if [ -f "$BIN" ]; then
+              case "${{ matrix.target }}" in
+                *-apple-darwin) strip -x "$BIN" || true ;;
+                *)              strip    "$BIN" || true ;;
+              esac
+            fi
+          done
 
       - name: Package tarball + sha256
         id: package
-        # Rename the binary from `project-willamette` → `willamette`
-        # inside the archive so the user types `./willamette` not
-        # `./project-willamette`. The crate name stays unchanged.
+        # Rename the runtime from `project-willamette` → `willamette` and
+        # ship the offline prep binary beside it.
         run: |
           set -euo pipefail
           NAME="willamette-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
           cp "target/${{ matrix.target }}/release/project-willamette" "dist/$NAME/willamette"
+          cp "target/${{ matrix.target }}/release/willamette-prep" "dist/$NAME/willamette-prep"
           # Include README + license + changelog so the distribution
           # is self-contained.
           cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$NAME/" 2>/dev/null || true

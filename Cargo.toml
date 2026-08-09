@@ -5,6 +5,7 @@ edition = "2021"
 description = "Rust-native, mmap-backed runtime for the official microsoft/BitNet-b1.58-2B-4T 1.58-bit GGUF."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+default-run = "project-willamette"
 
 # Backend selection is `cfg`-based and runtime-dispatched:
 #   * aarch64 uses NEON when detected.
