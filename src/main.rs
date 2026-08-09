@@ -17,9 +17,9 @@ use project_willamette::model::cached_forward::{forward_with_cache_into, Forward
 use project_willamette::model::forward::forward_single_token_position_zero;
 use project_willamette::model::generate::generate_with_cache_and_sampler;
 use project_willamette::model::kv_cache::KVCache;
-use project_willamette::model::lm_head::{argmax, compute_logits_from_graph, top_k};
+use project_willamette::model::lm_head::{argmax, compute_logits_from_graph, cross_entropy, top_k};
 use project_willamette::model::multi_forward::multi_token_forward;
-use project_willamette::model::primitives::embedding_gather_f16;
+use project_willamette::model::primitives::embedding_gather;
 use project_willamette::model::sampler::{Sampler, SamplingParams};
 use project_willamette::model::ModelGraph;
 use project_willamette::tokenizer::Tokenizer;
@@ -100,6 +100,15 @@ enum Command {
         /// Path to the .gguf model file.
         #[arg(long)]
         model: PathBuf,
+    },
+    /// Derive a GGUF with only the tied F16 embedding converted to Q6_K.
+    RepackEmbeddingQ6k {
+        /// Source GGUF containing an F16 token_embd.weight tensor.
+        #[arg(long)]
+        model: PathBuf,
+        /// New GGUF path. Existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
     },
     /// Ternary weight distribution analysis — counts -1 / 0 / +1 across
     /// every BitLinear (I2_S) tensor. The zero fraction is the upper
@@ -186,6 +195,21 @@ enum Command {
         #[arg(long, default_value_t = false)]
         no_bos: bool,
     },
+    /// Score a UTF-8 corpus with autoregressive cross-entropy and perplexity.
+    Perplexity {
+        /// Path to the .gguf model file.
+        #[arg(long)]
+        model: PathBuf,
+        /// UTF-8 corpus file to score.
+        #[arg(long)]
+        file: PathBuf,
+        /// Maximum next-token transitions to score.
+        #[arg(long, default_value_t = 256)]
+        max_tokens: usize,
+        /// Suppress BOS even if tokenizer metadata requests it.
+        #[arg(long, default_value_t = false)]
+        no_bos: bool,
+    },
     /// Stage 9-E: ratatui-based full-screen chat TUI.
     ///
     /// Same engine as `chat` but with a proper history view, input
@@ -265,6 +289,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Inspect { model } => cmd_inspect(&model),
+        Command::RepackEmbeddingQ6k { model, output } => cmd_repack_embedding_q6k(&model, &output),
         Command::Analyze { model } => cmd_analyze(&model),
         Command::Tokenize {
             model,
@@ -305,6 +330,12 @@ fn main() -> Result<()> {
             top_k,
             no_bos,
         } => cmd_logits(&model, &prompt, top_k, no_bos),
+        Command::Perplexity {
+            model,
+            file,
+            max_tokens,
+            no_bos,
+        } => cmd_perplexity(&model, &file, max_tokens, no_bos),
         Command::Chat { chat } => cmd_chat(&chat),
         Command::Tui { chat } => cmd_tui(&chat),
         Command::SynthGguf { output, preset } => cmd_synth_gguf(&output, preset.into()),
@@ -371,6 +402,15 @@ fn cmd_inspect(path: &Path) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn cmd_repack_embedding_q6k(path: &Path, output: &Path) -> Result<()> {
+    let mmap =
+        ModelMmap::open(path).with_context(|| format!("opening model file: {}", path.display()))?;
+    let size = project_willamette::gguf::repack::repack_embedding_q6k(mmap.as_bytes(), output)
+        .with_context(|| format!("writing Q6_K model: {}", output.display()))?;
+    println!("Wrote {} bytes to {}", size, output.display());
     Ok(())
 }
 
@@ -964,6 +1004,105 @@ fn cmd_logits(path: &Path, prompt: &str, top_k_n: usize, no_bos: bool) -> Result
     Ok(())
 }
 
+fn cmd_perplexity(path: &Path, file_path: &Path, max_tokens: usize, no_bos: bool) -> Result<()> {
+    use std::time::Instant;
+
+    if max_tokens == 0 {
+        anyhow::bail!("--max-tokens must be at least 1");
+    }
+    let text = std::fs::read_to_string(file_path)
+        .with_context(|| format!("reading UTF-8 corpus: {}", file_path.display()))?;
+    let mmap =
+        ModelMmap::open(path).with_context(|| format!("opening model file: {}", path.display()))?;
+    let gguf = GgufFile::parse(mmap.as_bytes())
+        .map_err(|error| anyhow::anyhow!("GGUF parse error: {}", error))?;
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata)
+        .map_err(|error| anyhow::anyhow!("tokenizer load failed: {}", error))?;
+    let graph = ModelGraph::from_gguf(&gguf)
+        .map_err(|error| anyhow::anyhow!("model graph load failed: {}", error))?;
+    if tokenizer.vocab_size() != graph.config.vocab_size as usize {
+        anyhow::bail!(
+            "tokenizer vocab size {} != model vocab size {}",
+            tokenizer.vocab_size(),
+            graph.config.vocab_size
+        );
+    }
+    if max_tokens > graph.config.context_length as usize {
+        anyhow::bail!(
+            "--max-tokens {} exceeds model context length {}",
+            max_tokens,
+            graph.config.context_length
+        );
+    }
+
+    let mut options = tokenizer.default_encode_options();
+    options.add_bos = options.add_bos && !no_bos;
+    options.add_eos = false;
+    let mut token_ids = tokenizer
+        .encode(&text, options)
+        .map_err(|error| anyhow::anyhow!("corpus encode failed: {}", error))?;
+    let encoded_tokens = token_ids.len();
+    let scored_tokens = encoded_tokens.saturating_sub(1).min(max_tokens);
+    if scored_tokens == 0 {
+        anyhow::bail!(
+            "corpus provides no next-token transitions (encoded token count: {})",
+            encoded_tokens
+        );
+    }
+    token_ids.truncate(scored_tokens + 1);
+
+    let mut cache = KVCache::try_new(
+        graph.layers.len(),
+        graph.config.kv_dim as usize,
+        scored_tokens,
+    )
+    .map_err(|error| anyhow::anyhow!("KV cache allocation failed: {}", error))?;
+    let mut workspace = ForwardWorkspace::new(&graph);
+    let mut hidden = Vec::new();
+    let mut total_nll = 0.0_f64;
+    let started = Instant::now();
+
+    for (position, pair) in token_ids.windows(2).enumerate() {
+        forward_with_cache_into(
+            &graph,
+            &mut cache,
+            &mut workspace,
+            pair[0],
+            position as u32,
+            &mut hidden,
+        )
+        .map_err(|error| anyhow::anyhow!("forward at position {} failed: {}", position, error))?;
+        let logits = compute_logits_from_graph(&hidden, &graph).map_err(|error| {
+            anyhow::anyhow!("lm-head at position {} failed: {}", position, error)
+        })?;
+        total_nll += cross_entropy(&logits, pair[1]).map_err(|error| {
+            anyhow::anyhow!("cross-entropy at position {} failed: {}", position, error)
+        })?;
+        if (position + 1).is_multiple_of(16) || position + 1 == scored_tokens {
+            eprintln!("scored {}/{} tokens", position + 1, scored_tokens);
+        }
+    }
+
+    let elapsed = started.elapsed().as_secs_f64();
+    let mean_nll = total_nll / scored_tokens as f64;
+    println!("# willamette perplexity");
+    println!("model:          {}", path.display());
+    println!("corpus:         {}", file_path.display());
+    println!("embedding:      {}", graph.token_embd.ggml_type.name());
+    println!("add_bos:        {}", options.add_bos);
+    println!("encoded_tokens: {}", encoded_tokens);
+    println!("scored_tokens:  {}", scored_tokens);
+    println!("total_nll:      {:.9}", total_nll);
+    println!("mean_nll:       {:.9} nats/token", mean_nll);
+    println!("perplexity:     {:.9}", mean_nll.exp());
+    println!("elapsed:        {:.3} s", elapsed);
+    println!(
+        "throughput:     {:.3} tokens/s",
+        scored_tokens as f64 / elapsed
+    );
+    Ok(())
+}
+
 fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     use std::time::Instant;
 
@@ -1004,7 +1143,7 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
 
     // ── 1) Single BitLinear I2_S matvec (attn_q in layer 0) ──
     let mut x = vec![0.0_f32; n_embd];
-    embedding_gather_f16(graph.token_embd, bench_token, &mut x)
+    embedding_gather(graph.token_embd, bench_token, &mut x)
         .map_err(|e| anyhow::anyhow!("embed: {}", e))?;
     let attn_q = graph.layers[0].attn_q;
     let mv_in = attn_q.shape[0] as usize;
@@ -1155,7 +1294,11 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     let token_avg_ms = decode_avg_ms + lm_head_avg_ms + selection_avg_ms;
     println!("Steady-state token generation estimate:");
     println!("  Cached forward: {:.1} ms", decode_avg_ms);
-    println!("  Tied F16 lm_head: {:.1} ms", lm_head_avg_ms);
+    println!(
+        "  Tied {} lm_head: {:.1} ms",
+        graph.lm_head.ggml_type.name(),
+        lm_head_avg_ms
+    );
     println!("  Argmax:         {:.1} ms", selection_avg_ms);
     println!("  Total:          {:.1} ms", token_avg_ms);
     println!("  Throughput:     {:.2} tokens/sec", 1000.0 / token_avg_ms);

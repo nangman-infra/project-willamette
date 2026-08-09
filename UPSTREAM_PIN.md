@@ -46,6 +46,7 @@ submodule SHA).
 | ------ | ----: | ----------- |
 | `GGML_TYPE_F32`  | `0`  | ggml.h:357 |
 | `GGML_TYPE_F16`  | `1`  | ggml.h:358 |
+| `GGML_TYPE_Q6_K` | `14` | ggml.h:371 |
 | `GGML_TYPE_I2_S` | `36` | ggml.h:393 |
 | `GGML_TYPE_I8_S` | `37` | ggml.h:394 |
 | `GGML_TYPE_TL1`  | `38` | ggml.h:395 |
@@ -54,6 +55,16 @@ submodule SHA).
 `src/gguf/types.rs` in this repo MUST agree with these values. Any new ggml
 type added upstream that we want to support requires updating both this table
 and `from_raw`/`to_raw` in the same commit.
+
+## Q6_K embedding layout
+
+The tied embedding may also use standard Q6_K from the pinned llama.cpp
+submodule. `ggml/src/ggml-common.h` defines `QK_K = 256` and
+`block_q6_K` as 128 low-quant bytes, 64 high-quant bytes, 16 signed subgroup
+scales, and one f16 super-block scale (210 bytes total). The scalar bit and
+scale mapping is pinned by `dequantize_row_q6_K` in
+`ggml/src/ggml-quants.c:2977..3006`; the reference artifact conversion follows
+`quantize_row_q6_K_ref` at lines 2907..2975.
 
 ## I2_S / TL1 / TL2 implementation candidates
 

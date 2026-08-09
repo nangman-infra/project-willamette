@@ -102,6 +102,7 @@ pub struct GgufFile<'a> {
     pub metadata: HashMap<String, GgufValue>,
     pub tensors: Vec<TensorView<'a>>,
     pub alignment: u64,
+    pub(crate) tensor_info_offset: u64,
 }
 
 impl<'a> GgufFile<'a> {
@@ -199,6 +200,7 @@ impl<'a> GgufFile<'a> {
             data.len().saturating_sub(cur.position() as usize),
             24,
         )?;
+        let tensor_info_offset = cur.position();
         let mut raw_infos: Vec<RawTensorInfo> = Vec::new();
         raw_infos
             .try_reserve_exact(tensor_count as usize)
@@ -388,6 +390,7 @@ impl<'a> GgufFile<'a> {
             metadata,
             tensors,
             alignment,
+            tensor_info_offset,
         })
     }
 }
@@ -664,6 +667,11 @@ fn validate_array(
 /// For types whose block layout is not implemented, returns `None` so the
 /// caller can use raw inter-tensor offsets.
 fn compute_tensor_byte_len(shape: &[u64], ggml_type: GgmlType) -> Result<Option<u64>, String> {
+    if ggml_type == GgmlType::Q6K {
+        return TensorView::q6k_expected_byte_len(shape)
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
     let n_elements = shape.iter().try_fold(1u64, |elements, dim| {
         elements.checked_mul(*dim).ok_or_else(|| {
             format!(
@@ -698,7 +706,6 @@ fn compute_tensor_byte_len(shape: &[u64], ggml_type: GgmlType) -> Result<Option<
         GgmlType::Q3K => Some((256, 110)),
         GgmlType::Q4K => Some((256, 144)),
         GgmlType::Q5K => Some((256, 176)),
-        GgmlType::Q6K => Some((256, 210)),
         GgmlType::Q8K => Some((256, 292)),
 
         // ── BitNet I2_S: 128 ternary elements per 32-byte block ──

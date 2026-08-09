@@ -85,7 +85,7 @@ impl<'a> ModelGraph<'a> {
 
         // ── top-level tensors ──
         let token_embd = require_tensor(&by_name, "token_embd.weight")?;
-        check_dtype(token_embd, GgmlType::F16)?;
+        check_dtype_one_of(token_embd, &[GgmlType::F16, GgmlType::Q6K])?;
         check_shape(
             token_embd,
             &[config.embedding_length as u64, config.vocab_size as u64],
@@ -96,7 +96,7 @@ impl<'a> ModelGraph<'a> {
         check_shape(output_norm, &[config.embedding_length as u64])?;
 
         let (lm_head, has_output_weight_tensor) = if let Some(out) = by_name.get("output.weight") {
-            check_dtype(out, GgmlType::F16)?;
+            check_dtype_one_of(out, &[GgmlType::F16, GgmlType::Q6K])?;
             check_shape(
                 out,
                 &[config.embedding_length as u64, config.vocab_size as u64],
@@ -269,6 +269,24 @@ fn check_dtype(t: &TensorView<'_>, expected: GgmlType) -> Result<(), WillametteE
             t.name,
             expected.name(),
             expected.to_raw(),
+            t.ggml_type.name(),
+            t.ggml_type.to_raw(),
+        )));
+    }
+    Ok(())
+}
+
+fn check_dtype_one_of(t: &TensorView<'_>, expected: &[GgmlType]) -> Result<(), WillametteError> {
+    if !expected.contains(&t.ggml_type) {
+        let names = expected
+            .iter()
+            .map(|dtype| dtype.name())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        return Err(WillametteError::GgufParse(format!(
+            "tensor {:?}: expected dtype {}, got {} ({})",
+            t.name,
+            names,
             t.ggml_type.name(),
             t.ggml_type.to_raw(),
         )));

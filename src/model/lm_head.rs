@@ -10,9 +10,9 @@
 //!   logits[v] = Σᵢ token_embd[v, i] * final_hidden[i]
 //! ```
 //!
-//! `token_embd.weight` is F16 with shape `[embedding_length, vocab_size]`,
-//! i.e. row `v` (slow axis) holds the embedding for vocab id `v` as
-//! `n_embd` little-endian f16s.
+//! `token_embd.weight` is F16 or Q6_K with shape
+//! `[embedding_length, vocab_size]`. Row `v` holds the embedding for vocab id
+//! `v` contiguously in GGML's row layout.
 //!
 //! We decode each row on the fly to avoid a 1.2 GiB f32 cache.
 
@@ -21,19 +21,20 @@ use crate::gguf::tensor::TensorView;
 use crate::gguf::types::GgmlType;
 use crate::model::graph::ModelGraph;
 use crate::model::primitives::f16_to_f32;
+use crate::model::q6_k;
 use rayon::prelude::*;
 
 /// Compute the full vocab-size logit vector by dotting `final_hidden`
-/// against each row of an F16 `token_embd` table.
+/// against each row of an F16 or Q6_K `token_embd` table.
 pub fn compute_logits(
     final_hidden: &[f32],
     token_embd: &TensorView<'_>,
     embedding_length: u32,
     vocab_size: u32,
 ) -> Result<Vec<f32>, WillametteError> {
-    if token_embd.ggml_type != GgmlType::F16 {
+    if !matches!(token_embd.ggml_type, GgmlType::F16 | GgmlType::Q6K) {
         return Err(WillametteError::GgufParse(format!(
-            "compute_logits: token_embd is {} (raw {}), expected F16",
+            "compute_logits: token_embd is {} (raw {}), expected F16 or Q6_K",
             token_embd.ggml_type.name(),
             token_embd.ggml_type.to_raw()
         )));
@@ -52,8 +53,17 @@ pub fn compute_logits(
             n_embd
         )));
     }
-    let row_bytes = n_embd * 2;
-    let expected = row_bytes * (vocab_size as usize);
+    let row_bytes = match token_embd.ggml_type {
+        GgmlType::F16 => n_embd.checked_mul(2),
+        GgmlType::Q6K => TensorView::q6k_expected_byte_len(&[embedding_length as u64])
+            .ok()
+            .and_then(|bytes| usize::try_from(bytes).ok()),
+        _ => unreachable!("dtype checked above"),
+    }
+    .ok_or_else(|| WillametteError::GgufParse("compute_logits: row size overflow".to_string()))?;
+    let expected = row_bytes.checked_mul(vocab_size as usize).ok_or_else(|| {
+        WillametteError::GgufParse("compute_logits: tensor size overflow".to_string())
+    })?;
     if token_embd.data.len() != expected {
         return Err(WillametteError::GgufParse(format!(
             "compute_logits: token_embd.data.len()={} != expected {}",
@@ -62,20 +72,24 @@ pub fn compute_logits(
         )));
     }
 
-    let mut logits = vec![0.0_f32; vocab_size as usize];
-    logits.par_iter_mut().enumerate().for_each(|(v, logit)| {
-        let row = &token_embd.data[v * row_bytes..(v + 1) * row_bytes];
-        let mut s = 0.0_f32;
-        for i in 0..n_embd {
-            let lo = row[2 * i] as u16;
-            let hi = row[2 * i + 1] as u16;
-            let bits = lo | (hi << 8);
-            let w = f16_to_f32(bits);
-            s += w * final_hidden[i];
-        }
-        *logit = s;
-    });
-    Ok(logits)
+    (0..vocab_size as usize)
+        .into_par_iter()
+        .map(|v| {
+            let row = &token_embd.data[v * row_bytes..(v + 1) * row_bytes];
+            match token_embd.ggml_type {
+                GgmlType::F16 => {
+                    let mut sum = 0.0_f32;
+                    for i in 0..n_embd {
+                        let bits = u16::from_le_bytes([row[2 * i], row[2 * i + 1]]);
+                        sum += f16_to_f32(bits) * final_hidden[i];
+                    }
+                    Ok(sum)
+                }
+                GgmlType::Q6K => q6_k::dot_row(row, final_hidden),
+                _ => unreachable!("dtype checked above"),
+            }
+        })
+        .collect()
 }
 
 /// Convenience: compute_logits with all four shape arguments pulled from
@@ -90,6 +104,41 @@ pub fn compute_logits_from_graph(
         graph.config.embedding_length,
         graph.config.vocab_size,
     )
+}
+
+/// Numerically stable negative log-likelihood for one target token.
+pub fn cross_entropy(logits: &[f32], target_id: u32) -> Result<f64, WillametteError> {
+    if logits.is_empty() {
+        return Err(WillametteError::GgufParse(
+            "cross_entropy: logits are empty".to_string(),
+        ));
+    }
+    let target = target_id as usize;
+    if target >= logits.len() {
+        return Err(WillametteError::GgufParse(format!(
+            "cross_entropy: target_id {target_id} out of range for {} logits",
+            logits.len()
+        )));
+    }
+    if let Some((index, value)) = logits
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(WillametteError::GgufParse(format!(
+            "cross_entropy: logit {index} is not finite ({value})"
+        )));
+    }
+
+    let max_logit = logits
+        .iter()
+        .map(|&value| f64::from(value))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let shifted_exp_sum: f64 = logits
+        .iter()
+        .map(|&value| (f64::from(value) - max_logit).exp())
+        .sum();
+    Ok((max_logit - f64::from(logits[target])) + shifted_exp_sum.ln())
 }
 
 /// Return the vocab id with the highest logit. Returns `None` only if
@@ -160,5 +209,22 @@ mod tests {
         let logits = vec![0.1_f32, 0.5];
         let top = top_k(&logits, 0);
         assert!(top.is_empty());
+    }
+
+    #[test]
+    fn cross_entropy_is_stable_for_large_logits() {
+        let nll = cross_entropy(&[1000.0, 1000.0], 0).unwrap();
+        assert!((nll - std::f64::consts::LN_2).abs() < 1e-12);
+        let unlikely = cross_entropy(&[0.0, -1000.0], 1).unwrap();
+        assert!(unlikely.is_finite());
+        assert!((unlikely - 1000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cross_entropy_rejects_invalid_input() {
+        assert!(cross_entropy(&[], 0).is_err());
+        assert!(cross_entropy(&[0.0], 1).is_err());
+        assert!(cross_entropy(&[0.0, f32::NAN], 0).is_err());
+        assert!(cross_entropy(&[f32::INFINITY], 0).is_err());
     }
 }

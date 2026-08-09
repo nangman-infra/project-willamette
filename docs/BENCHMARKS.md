@@ -117,6 +117,61 @@ penalty. Acceptance requires output/perplexity checks plus true-token A/B on
 both hosts. FFN-specific kernel work remains the second track: it dominates
 transformer forward, but not complete token generation on mbp2012.
 
+### Q6_K tied-embedding result
+
+The narrow experiment converted only `token_embd.weight`; all 210 transformer
+BitLinear tensors remain byte-identical I2_S. The artifact fell from
+1,187,801,280 to 800,468,160 bytes, with the embedding itself shrinking from
+656,670,720 to 269,337,600 bytes. SHA256 is
+`492e4d2a8db2eefc5f8c86acd08eea6707294de67ce871b5d732e9bfcb468376`.
+
+| Host | Cached forward | lm-head | True token total | True tok/s | Prior true tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| antix1, 1 thread | 2888.0 ms | 3393.5 ms | 6282.0 ms | **0.16** | 0.08 |
+| mbp2012, 4 threads | 331.6 ms | 359.6 ms | 691.3 ms | **1.45** | 1.29 |
+
+On antix1 the smaller artifact removes the interleaved page-thrashing penalty:
+cached forward returns from about 8.04 seconds to 2.89 seconds. The prompt-inclusive
+three-token run improved from 50.20 to 34.28 seconds. On mbp2012 it improved
+from 4.24 to 4.03 seconds, so the scalar Q6_K consumer did not trade low-memory
+performance for a regression on the dual-core host.
+
+All four Stage 5-E five-token greedy outputs remain byte-identical to the F16
+artifact: `hello`, `안녕하세요`, `The capital of France is`, and `1 + 1 =`.
+
+The corpus gate uses the first 1,024 contiguous next-token transitions of
+WikiText-2 `wiki.test.raw` (`SHA256 173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08`),
+with one BOS and no implicit EOS:
+
+| Embedding | Mean NLL | Perplexity | Relative to F16 |
+| --- | ---: | ---: | ---: |
+| F16 | 2.657898859 | 14.266282121 | baseline |
+| Q6_K | 2.658394439 | 14.273353951 | **+0.0496%** |
+
+The measured regression is well below the 1% acceptance threshold, so the
+Q6_K tied embedding passes the prep-artifact quality gate.
+
+### Q6_K x86 SSE2 lm-head
+
+The Q6_K-by-f32 projection now unpacks four adjacent six-bit weights directly
+into SSE2 lanes. It requires no SSE3/SSSE3 instructions and therefore runs on
+the Pentium-M antix1 host. The scalar decoder remains the portable reference.
+
+| Host | Q6_K lm-head scalar | Q6_K lm-head SSE2 | Full token scalar | Full token SSE2 |
+| --- | ---: | ---: | ---: | ---: |
+| antix1, 1 thread | 3381.3 ms | **1324.3 ms** (2.55×) | 6291.3 ms / 0.16 tok/s | **4243.5 ms / 0.24 tok/s** |
+| mbp2012, 4 threads | 359.6 ms | **93.5 ms** (3.85×) | 689.0 ms / 1.45 tok/s | **433.7 ms / 2.31 tok/s** |
+
+Prompt-inclusive three-token runtime improved from 34.28 to 27.98 seconds on
+antix1 and from 4.03 to 3.15 seconds on mbp2012. Same-host scalar/SSE2 greedy
+token sequences match for all four Stage 5-E prompts on mbp2012 and for the
+reference France prompt on antix1.
+
+On mbp2012, the first 256 WikiText-2 transitions measured scalar Q6_K
+perplexity 34.403326938 versus SSE2 34.403321427, a -0.000016% difference.
+The SIMD reduction order changes individual low bits but not measured corpus
+quality.
+
 ## 2026-08-08 — Cached-forward workspace allocation reuse
 
 `cached_forward` previously constructed fixed-size norm, Q/K/V,

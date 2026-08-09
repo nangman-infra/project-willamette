@@ -27,8 +27,7 @@ use crate::model::bitlinear::bitlinear_i2s_matvec_f32;
 use crate::model::ffn::{elementwise_mul, relu_square};
 use crate::model::graph::ModelGraph;
 use crate::model::primitives::{
-    attention_scale, embedding_gather_f16, kv_head_for_q_head, rms_norm_f32, AttentionShape,
-    RopeType,
+    attention_scale, embedding_gather, kv_head_for_q_head, rms_norm_f32, AttentionShape, RopeType,
 };
 
 #[inline]
@@ -80,7 +79,7 @@ pub fn multi_token_forward(
     let mut hidden: Vec<Vec<f32>> = Vec::with_capacity(m);
     for &tid in token_ids {
         let mut e = vec![0.0_f32; n_embd];
-        embedding_gather_f16(graph.token_embd, tid, &mut e)?;
+        embedding_gather(graph.token_embd, tid, &mut e)?;
         hidden.push(e);
     }
 

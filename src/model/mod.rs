@@ -26,6 +26,9 @@ pub mod kv_cache;
 pub mod lm_head;
 pub mod multi_forward;
 pub mod primitives;
+pub mod q6_k;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod q6_k_sse2;
 pub mod sampler;
 pub mod stage_timing;
 

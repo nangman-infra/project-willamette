@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
             exit 0 ;;
         --)
             shift; EXTRA_ARGS=("$@"); break ;;
-        tui|chat|inspect|bench|run|tokenize|logits)
+        tui|chat|inspect|bench|run|tokenize|logits|perplexity)
             MODE="$1"; shift
             EXTRA_ARGS=("$@"); break ;;
         *)

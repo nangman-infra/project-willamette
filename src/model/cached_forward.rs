@@ -30,8 +30,7 @@ use crate::model::ffn::{elementwise_mul, relu_square};
 use crate::model::graph::{LayerWeights, ModelGraph};
 use crate::model::kv_cache::KVCache;
 use crate::model::primitives::{
-    attention_scale, embedding_gather_f16, kv_head_for_q_head, rms_norm_f32, AttentionShape,
-    RopeType,
+    attention_scale, embedding_gather, kv_head_for_q_head, rms_norm_f32, AttentionShape, RopeType,
 };
 use crate::model::stage_timing::time_stage;
 
@@ -231,7 +230,7 @@ pub fn forward_with_cache_progress_into<F: FnMut(u32)>(
         workspace.prepare(&ctx);
 
         time_stage!("embedding", {
-            embedding_gather_f16(graph.token_embd, token_id, &mut workspace.hidden)?;
+            embedding_gather(graph.token_embd, token_id, &mut workspace.hidden)?;
         });
 
         for layer in &graph.layers {

@@ -79,8 +79,9 @@ What works **today**, on the path toward the thesis:
 | Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui full-screen) |
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
+| Q6_K tied embedding | ✅ scalar gather + runtime SSE2 lm-head on x86; `repack-embedding-q6k` produces a 0.745 GiB artifact |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **231** default tests passing + **94** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
+| Tests | **239** default tests passing + **94** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
 | Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 
@@ -89,8 +90,8 @@ What does **not** work yet but is on the roadmap toward the thesis:
 | Property | Value |
 | -------- | ----- |
 | Model coverage beyond the BitNet family (Llama / Mistral / Phi / Gemma) | ❌ BitNet family (`bitnet-b1.58` / `bitnet-25` / `bitnet`) accepted today; non-BitNet architectures pending Phase III-B — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
-| Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ only `I2_S` |
-| `willamette-prep` (offline preprocessor) | ❌ not started — thesis's missing half |
+| Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ BitLinear remains `I2_S`-only; tied embedding additionally supports Q6_K |
+| `willamette-prep` (offline preprocessor) | ⚠️ narrow Q6_K embedding repacker landed; general artifact linker not started |
 | AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
 | LUT (TL1/TL2) kernel | ❌ design RFC drafted 2026-05-30 ([`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md)); plan-then-act, ≥ 1.3× measurement gate before any code lands |
 | MMX-era / sub-SSE2 kernel | ❌ not started |
@@ -158,6 +159,20 @@ If the SHA256 differs, the file is corrupt or a different revision —
 the layout pins documented in [`docs/I2_S_LAYOUT.md`](docs/I2_S_LAYOUT.md)
 are only guaranteed against this one byte stream.
 
+For memory-constrained hosts, derive the pinned Q6_K-embedding artifact without
+changing any transformer I2_S tensor:
+
+```bash
+cargo run --release -- repack-embedding-q6k \
+  --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf \
+  --output ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf
+shasum -a 256 ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf
+# 492e4d2a8db2eefc5f8c86acd08eea6707294de67ce871b5d732e9bfcb468376
+```
+
+The derived file is 800,468,160 bytes (0.745 GiB). Existing output paths are
+never overwritten.
+
 ### 3. Build
 
 ```bash
@@ -193,9 +208,11 @@ Full text:        "The capital of France is Paris. Paris"
 
 ```text
 willamette inspect    --model PATH
+willamette repack-embedding-q6k --model PATH --output PATH
 willamette analyze    --model PATH
 willamette tokenize   --model PATH --text TEXT [--no-bos] [--add-eos]
 willamette logits     --model PATH --prompt TEXT [--top-k N] [--no-bos]
+willamette perplexity --model PATH --file UTF8_PATH [--max-tokens N] [--no-bos]
 willamette run        --model PATH --prompt TEXT
                       [--max-new-tokens N]
                       [--no-bos]
@@ -217,6 +234,12 @@ willamette --version
 
 * `inspect` — Stage 1. Dumps every metadata key + every tensor's raw
   ggml_type, shape, offset, and byte length. No inference.
+* `repack-embedding-q6k` — Streams the pinned F16 tied embedding through the
+  standard Q6_K reference quantisation layout and shifts later GGUF offsets.
+  All transformer tensors remain byte-identical I2_S.
+* `perplexity` — Scores contiguous next-token transitions with the cached
+  autoregressive path and stable f64 log-sum-exp. Defaults to 256 transitions
+  and refuses to exceed the model context.
 * `analyze` — Counts -1 / 0 / +1 across every BitLinear (I2_S) tensor.
   Reports the zero fraction (the upper bound on what sparsity-aware
   skipping could save). Real 2B: 28.9 / 42.2 / 28.9 %.

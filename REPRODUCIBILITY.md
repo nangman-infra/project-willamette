@@ -62,6 +62,46 @@ shasum -a 256 ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf
 If the value differs, your downloaded file does not match the layout
 pins in [`docs/I2_S_LAYOUT.md`](docs/I2_S_LAYOUT.md).
 
+### Derived Q6_K embedding artifact
+
+The runtime can derive an additional low-memory artifact from the exact source
+above. Only `token_embd.weight` changes from F16 to Q6_K; every transformer
+I2_S tensor and tokenizer byte is copied unchanged.
+
+| Property | Value |
+| -------- | ----- |
+| File name | `ggml-model-i2_s-embed-q6_k.gguf` |
+| Size | `800,468,160` bytes (0.745 GiB) |
+| SHA256 | `492e4d2a8db2eefc5f8c86acd08eea6707294de67ce871b5d732e9bfcb468376` |
+| Source SHA256 | `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162` |
+| Changed tensor | `token_embd.weight`: F16 656,670,720 bytes → Q6_K 269,337,600 bytes |
+
+```bash
+cargo run --release -- repack-embedding-q6k \
+  --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf \
+  --output ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf
+```
+
+Quality comparison uses the same WikiText-2 raw test prefix for both artifacts:
+
+| Property | Value |
+| -------- | ----- |
+| Archive URL | `https://huggingface.co/datasets/ggml-org/ci/resolve/main/wikitext-2-raw-v1.zip` |
+| Archive SHA256 | `ef7edb566e3e2b2d31b29c1fdb0c89a4cc683597484c3dc2517919c615435a11` |
+| `wiki.test.raw` SHA256 | `173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08` |
+| Scored transitions | first 1,024, one metadata-default BOS, no implicit EOS |
+| F16 perplexity | `14.266282121` |
+| Q6_K perplexity | `14.273353951` (`+0.0496%`) |
+
+```bash
+willamette perplexity --model MODEL.gguf \
+  --file wikitext-2-raw/wiki.test.raw --max-tokens 1024
+```
+
+This is a relative artifact-quality gate over an identical runtime and token
+sequence, not a claim that the number is directly comparable to another
+framework's chunking or cache policy.
+
 ## 4. Pinned upstream
 
 See [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md) for the canonical table; the

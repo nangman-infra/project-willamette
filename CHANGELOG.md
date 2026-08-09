@@ -25,6 +25,14 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ### Changed
 
+* Embedding gather and the tied lm-head now consume either F16 or standard
+  Q6_K while all transformer BitLinear tensors remain I2_S-only.
+* `repack-embedding-q6k` derives a 0.745 GiB low-memory artifact from the
+  pinned official GGUF by streaming only the tied embedding conversion.
+* `perplexity` scores a bounded UTF-8 corpus prefix through the real cached
+  autoregressive path with stable f64 cross-entropy.
+* Q6_K lm-head rows use a runtime-detected SSE2 dot kernel on x86/i686 while
+  retaining the scalar implementation as the portable reference.
 * The tied F16 lm-head now computes independent vocabulary rows through the
   existing Rayon pool. On mbp2012 this reduced the measured projection from
   838 ms to 446 ms with four threads and improved steady-state full-token
@@ -38,6 +46,14 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ### Measured
 
+* The Q6_K artifact improves complete steady-state throughput from 0.08 to
+  0.16 tok/s on antix1 and from 1.29 to 1.45 tok/s on mbp2012. The four
+  Stage 5-E five-token greedy outputs remain byte-identical to F16.
+* On the first 1,024 WikiText-2 raw test transitions, Q6_K perplexity is
+  14.273354 versus F16 14.266282, a 0.0496% regression.
+* Q6_K SSE2 reduced lm-head time from 3381.3 to 1324.3 ms on antix1 and
+  from 359.6 to 93.5 ms on mbp2012. Complete throughput reached 0.24 and
+  2.31 tok/s respectively, with same-host greedy parity preserved.
 * `willamette bench` now reports cached forward, tied lm-head, argmax, and their
   true steady-state token total separately. The previously reported decode
   throughput was forward-only. Before lm-head parallelisation, the projection

@@ -113,9 +113,18 @@ pub fn embedding_gather_f16(
             token_embd.ggml_type.to_raw()
         )));
     }
+    embedding_gather(token_embd, token_id, out)
+}
+
+/// Gather one F16 or Q6_K embedding row into an f32 buffer.
+pub fn embedding_gather(
+    token_embd: &TensorView<'_>,
+    token_id: u32,
+    out: &mut [f32],
+) -> Result<(), WillametteError> {
     if token_embd.shape.len() != 2 {
         return Err(WillametteError::GgufParse(format!(
-            "embedding_gather_f16: tensor {:?} is not 2-D (shape={:?})",
+            "embedding_gather: tensor {:?} is not 2-D (shape={:?})",
             token_embd.name, token_embd.shape
         )));
     }
@@ -124,24 +133,43 @@ pub fn embedding_gather_f16(
 
     if out.len() != n_embd {
         return Err(WillametteError::GgufParse(format!(
-            "embedding_gather_f16: out.len()={} != n_embd={}",
+            "embedding_gather: out.len()={} != n_embd={}",
             out.len(),
             n_embd
         )));
     }
     if token_id as usize >= n_vocab {
         return Err(WillametteError::GgufParse(format!(
-            "embedding_gather_f16: token_id {} out of range (vocab_size={})",
+            "embedding_gather: token_id {} out of range (vocab_size={})",
             token_id, n_vocab
         )));
     }
 
-    let row_bytes = n_embd * 2;
-    let byte_offset = (token_id as usize) * row_bytes;
-    let end = byte_offset + row_bytes;
+    let row_bytes = match token_embd.ggml_type {
+        GgmlType::F16 => n_embd.checked_mul(2),
+        GgmlType::Q6K if n_embd.is_multiple_of(TensorView::Q6K_ELEMENTS_PER_BLOCK as usize) => {
+            (n_embd / TensorView::Q6K_ELEMENTS_PER_BLOCK as usize)
+                .checked_mul(TensorView::Q6K_BYTES_PER_BLOCK as usize)
+        }
+        GgmlType::Q6K => None,
+        other => {
+            return Err(WillametteError::GgufParse(format!(
+                "embedding_gather: tensor {:?} is {}, expected F16 or Q6_K",
+                token_embd.name,
+                other.name()
+            )));
+        }
+    }
+    .ok_or_else(|| WillametteError::GgufParse("embedding row size overflow".to_string()))?;
+    let byte_offset = (token_id as usize)
+        .checked_mul(row_bytes)
+        .ok_or_else(|| WillametteError::GgufParse("embedding row offset overflow".to_string()))?;
+    let end = byte_offset
+        .checked_add(row_bytes)
+        .ok_or_else(|| WillametteError::GgufParse("embedding row end overflow".to_string()))?;
     if end > token_embd.data.len() {
         return Err(WillametteError::GgufParse(format!(
-            "embedding_gather_f16: row bytes [{}..{}) exceed tensor data len {}",
+            "embedding_gather: row bytes [{}..{}) exceed tensor data len {}",
             byte_offset,
             end,
             token_embd.data.len()
@@ -149,13 +177,18 @@ pub fn embedding_gather_f16(
     }
     let row = &token_embd.data[byte_offset..end];
 
-    for i in 0..n_embd {
-        let lo = row[2 * i] as u16;
-        let hi = row[2 * i + 1] as u16;
-        let bits = lo | (hi << 8);
-        out[i] = f16_to_f32(bits);
+    match token_embd.ggml_type {
+        GgmlType::F16 => {
+            for i in 0..n_embd {
+                let lo = row[2 * i] as u16;
+                let hi = row[2 * i + 1] as u16;
+                out[i] = f16_to_f32(lo | (hi << 8));
+            }
+            Ok(())
+        }
+        GgmlType::Q6K => crate::model::q6_k::dequantize_row(row, out),
+        _ => unreachable!("dtype checked above"),
     }
-    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────
