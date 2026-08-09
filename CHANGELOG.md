@@ -25,6 +25,10 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ### Changed
 
+* The tied F16 lm-head now computes independent vocabulary rows through the
+  existing Rayon pool. On mbp2012 this reduced the measured projection from
+  838 ms to 446 ms with four threads and improved steady-state full-token
+  throughput from 0.86 to 1.29 tok/s; the single-core antix1 path is unchanged.
 * Cached generation, chat, and benchmark paths now reuse a session-level
   `ForwardWorkspace` for hidden, Q/K/V, attention-score, FFN, and KV-dequant
   scratch buffers. The original `forward_with_cache -> Vec<f32>` API remains
@@ -34,6 +38,12 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ### Measured
 
+* `willamette bench` now reports cached forward, tied lm-head, argmax, and their
+  true steady-state token total separately. The previously reported decode
+  throughput was forward-only. Before lm-head parallelisation, the projection
+  was 38.4% of true token time on antix1 and 67.5% on mbp2012. On antix1, its
+  626 MiB scan also evicts transformer pages from the 996 MiB machine, raising
+  interleaved cached-forward time from 2.81 s to about 8.04 s.
 * antix1 (Pentium M 2.0 GHz, i686 scalar-LUT backend), 10-step warm decode:
   v0.10.0 baseline median 2827.8 ms/token versus workspace median
   2814.7 ms/token, a 0.46% observed difference. Greedy output remains byte-identical.

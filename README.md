@@ -80,7 +80,7 @@ What works **today**, on the path toward the thesis:
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **230** default tests passing + **94** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
+| Tests | **231** default tests passing + **94** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
 | Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 

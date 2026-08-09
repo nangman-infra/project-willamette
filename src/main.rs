@@ -1102,6 +1102,9 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     project_willamette::model::stage_timing::reset();
 
     let mut decode_total = 0.0_f64;
+    let mut lm_head_total = 0.0_f64;
+    let mut selection_total = 0.0_f64;
+    let mut token_checksum = 0_u32;
     let mut samples = 0usize;
     for step in 0..decode_steps {
         let t = Instant::now();
@@ -1115,6 +1118,15 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("decode step: {}", e))?;
         decode_total += t.elapsed().as_secs_f64();
+
+        let t = Instant::now();
+        let logits = compute_logits_from_graph(&cached_hidden, &graph)
+            .map_err(|e| anyhow::anyhow!("lm head: {}", e))?;
+        lm_head_total += t.elapsed().as_secs_f64();
+
+        let t = Instant::now();
+        token_checksum ^= argmax(&logits).unwrap_or(0);
+        selection_total += t.elapsed().as_secs_f64();
         samples += 1;
     }
     let decode_avg_ms = if samples > 0 {
@@ -1128,6 +1140,34 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     );
     println!("  Time:           {:.1} ms", decode_avg_ms);
     println!("  Throughput:     {:.2} tokens/sec", 1000.0 / decode_avg_ms);
+    println!();
+
+    let lm_head_avg_ms = if samples > 0 {
+        (lm_head_total / samples as f64) * 1000.0
+    } else {
+        0.0
+    };
+    let selection_avg_ms = if samples > 0 {
+        (selection_total / samples as f64) * 1000.0
+    } else {
+        0.0
+    };
+    let token_avg_ms = decode_avg_ms + lm_head_avg_ms + selection_avg_ms;
+    println!("Steady-state token generation estimate:");
+    println!("  Cached forward: {:.1} ms", decode_avg_ms);
+    println!("  Tied F16 lm_head: {:.1} ms", lm_head_avg_ms);
+    println!("  Argmax:         {:.1} ms", selection_avg_ms);
+    println!("  Total:          {:.1} ms", token_avg_ms);
+    println!("  Throughput:     {:.2} tokens/sec", 1000.0 / token_avg_ms);
+    if token_avg_ms > 0.0 {
+        println!(
+            "  Share:          forward {:.1}% / lm_head {:.1}% / argmax {:.1}%",
+            decode_avg_ms * 100.0 / token_avg_ms,
+            lm_head_avg_ms * 100.0 / token_avg_ms,
+            selection_avg_ms * 100.0 / token_avg_ms
+        );
+    }
+    println!("  Token checksum: {}", token_checksum);
     println!();
 
     // ── 3.5) Per-stage decode breakdown (cfg-gated) ──

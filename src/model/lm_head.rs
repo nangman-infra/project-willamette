@@ -21,6 +21,7 @@ use crate::gguf::tensor::TensorView;
 use crate::gguf::types::GgmlType;
 use crate::model::graph::ModelGraph;
 use crate::model::primitives::f16_to_f32;
+use rayon::prelude::*;
 
 /// Compute the full vocab-size logit vector by dotting `final_hidden`
 /// against each row of an F16 `token_embd` table.
@@ -62,7 +63,7 @@ pub fn compute_logits(
     }
 
     let mut logits = vec![0.0_f32; vocab_size as usize];
-    for v in 0..vocab_size as usize {
+    logits.par_iter_mut().enumerate().for_each(|(v, logit)| {
         let row = &token_embd.data[v * row_bytes..(v + 1) * row_bytes];
         let mut s = 0.0_f32;
         for i in 0..n_embd {
@@ -72,8 +73,8 @@ pub fn compute_logits(
             let w = f16_to_f32(bits);
             s += w * final_hidden[i];
         }
-        logits[v] = s;
-    }
+        *logit = s;
+    });
     Ok(logits)
 }
 

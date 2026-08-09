@@ -63,6 +63,60 @@ bitnet.cpp's production CPU path implicitly requires** (see the
 low-end x86 thin clients, and legacy desktops sit in this sub-AVX2
 band; this is the first time we have direct numbers on one.
 
+## 2026-08-09 — True token cost: tied lm-head dominates
+
+Earlier `bench` decode throughput stopped after cached transformer forward and
+did not include the tied `token_embd.weight` projection used by real
+generation. The benchmark now times that projection and argmax after every
+cached forward. The F16 table is `128256 × 2560 × 2 = 656,670,720` bytes
+(626.3 MiB), all scanned once per generated token.
+
+Five-step warm-page runs used the official model and
+`RAYON_NUM_THREADS=1`. Values below are medians of three complete benchmark
+runs before lm-head parallelisation:
+
+| Host | Cached forward | F16 lm-head | Argmax | True token total | True tok/s | lm-head share |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| antix1, 1 thread | 8042.8 ms | 5020.1 ms | 0.5 ms | 13064.3 ms | **0.08** | 38.4% |
+| mbp2012, 1 thread | 327.3 ms | 679.9 ms | 0.1 ms | 1006.8 ms | **0.99** | 67.5% |
+
+The antix1 forward number needs special care: the same workspace binary runs
+forward-only at 2811.6 ms, but alternating that pass with the 626 MiB lm-head
+scan raises forward to about 8.0 seconds. The 1.106 GiB model exceeds the
+host's 996 MiB RAM; embedding and transformer pages evict one another. This is
+real generation behaviour, not an independent-stage sum.
+
+An end-to-end greedy check (six prompt tokens + three generated tokens) agreed
+with the decomposition: 50.20 seconds on antix1 and 4.93 seconds on mbp2012,
+with identical `[12366, 13, 12366]` / `" Paris. Paris"` output.
+
+### Immediate CPU result — parallel vocabulary rows
+
+Each vocabulary dot product is independent. Switching the outer lm-head loop
+to the existing Rayon pool preserves each row's scalar accumulation order and
+therefore its logits while using both mbp2012 cores:
+
+| mbp2012 setting | F16 lm-head | True token total | True tok/s |
+| --- | ---: | ---: | ---: |
+| `RAYON_NUM_THREADS=1` | 838 ms | 1168 ms | 0.86 |
+| `RAYON_NUM_THREADS=4` | **446 ms** | **773 ms** | **1.29** |
+
+This is a 1.88× lm-head improvement and about 1.51× steady-state token
+improvement. The prompt-inclusive three-token smoke run fell from 4.93 to
+4.24 seconds; prefill remains outside the lm-head optimisation. antix1 is
+single-core and stays unchanged.
+
+### Decision
+
+The first prep-backed runtime experiment should be a quantised tied embedding,
+not a speculative generic converter. Q6_K is the upstream BitNet recommendation
+after its quality evaluation. Reducing this tensor from 626 MiB to roughly
+257 MiB can both reduce the direct scan and bring the complete antix1 artifact
+below physical RAM, potentially removing the much larger page-thrashing
+penalty. Acceptance requires output/perplexity checks plus true-token A/B on
+both hosts. FFN-specific kernel work remains the second track: it dominates
+transformer forward, but not complete token generation on mbp2012.
+
 ## 2026-08-08 — Cached-forward workspace allocation reuse
 
 `cached_forward` previously constructed fixed-size norm, Q/K/V,
