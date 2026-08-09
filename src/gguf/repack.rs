@@ -78,6 +78,49 @@ fn descriptor_fields(
     Ok((dtype_offset, tensor_offset, tensor_offset + 8))
 }
 
+fn write_repacked_file(
+    source: &[u8],
+    header: &[u8],
+    embedding: &TensorView<'_>,
+    old_embedding_end: u64,
+    temp_path: &Path,
+    output_path: &Path,
+    temp_created: &mut bool,
+) -> Result<(), WillametteError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)?;
+    *temp_created = true;
+    let mut output = BufWriter::with_capacity(1024 * 1024, file);
+    output.write_all(header)?;
+    let row_elements = embedding.shape[0] as usize;
+    let f16_row_bytes = row_elements * 2;
+    let q6_row_bytes = row_elements / 256 * 210;
+    let mut row = vec![0.0_f32; row_elements];
+    let mut quantized = vec![0u8; q6_row_bytes];
+    for f16_bytes in embedding.data.chunks_exact(f16_row_bytes) {
+        for (index, bytes) in f16_bytes.chunks_exact(2).enumerate() {
+            row[index] = f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+        }
+        if let Some((index, value)) = row.iter().enumerate().find(|(_, value)| !value.is_finite()) {
+            return Err(WillametteError::GgufParse(format!(
+                "token_embd.weight contains non-finite value {value} at row element {index}"
+            )));
+        }
+        q6_k::quantize_row(&row, &mut quantized)?;
+        output.write_all(&quantized)?;
+    }
+    output.write_all(&source[old_embedding_end as usize..])?;
+    output.flush()?;
+    output.get_ref().sync_all()?;
+    drop(output);
+
+    // Publishing via a hard link is atomic and never replaces an existing path.
+    std::fs::hard_link(temp_path, output_path)?;
+    Ok(())
+}
+
 /// Create a derived GGUF whose tied `token_embd.weight` is standard Q6_K.
 pub fn repack_embedding_q6k(source: &[u8], output_path: &Path) -> Result<u64, WillametteError> {
     let gguf = GgufFile::parse(source)?;
@@ -165,42 +208,15 @@ pub fn repack_embedding_q6k(source: &[u8], output_path: &Path) -> Result<u64, Wi
     let temp_path = output_path.with_file_name(temp_name);
 
     let mut temp_created = false;
-    let write_result = (|| -> Result<(), WillametteError> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        temp_created = true;
-        let mut output = BufWriter::with_capacity(1024 * 1024, file);
-        output.write_all(&header)?;
-        let row_elements = embedding.shape[0] as usize;
-        let f16_row_bytes = row_elements * 2;
-        let q6_row_bytes = row_elements / 256 * 210;
-        let mut row = vec![0.0_f32; row_elements];
-        let mut quantized = vec![0u8; q6_row_bytes];
-        for f16_bytes in embedding.data.chunks_exact(f16_row_bytes) {
-            for (index, bytes) in f16_bytes.chunks_exact(2).enumerate() {
-                row[index] = f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
-            }
-            if let Some((index, value)) =
-                row.iter().enumerate().find(|(_, value)| !value.is_finite())
-            {
-                return Err(WillametteError::GgufParse(format!(
-                    "token_embd.weight contains non-finite value {value} at row element {index}"
-                )));
-            }
-            q6_k::quantize_row(&row, &mut quantized)?;
-            output.write_all(&quantized)?;
-        }
-        output.write_all(&source[old_embedding_end as usize..])?;
-        output.flush()?;
-        output.get_ref().sync_all()?;
-        drop(output);
-
-        // Publishing via a hard link is atomic and never replaces an existing path.
-        std::fs::hard_link(&temp_path, output_path)?;
-        Ok(())
-    })();
+    let write_result = write_repacked_file(
+        source,
+        &header,
+        embedding,
+        old_embedding_end,
+        &temp_path,
+        output_path,
+        &mut temp_created,
+    );
     let cleanup_result = temp_created.then(|| std::fs::remove_file(&temp_path));
     match (write_result, cleanup_result) {
         (Ok(()), _) => {}

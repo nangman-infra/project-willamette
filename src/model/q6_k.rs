@@ -100,30 +100,44 @@ fn nearest_int(value: f32) -> i32 {
     (((value + 12_582_912.0).to_bits() & 0x007f_ffff) as i32) - 0x0040_0000
 }
 
-fn make_qx_quants(input: &[f32], levels: &mut [i8]) -> f32 {
+fn signed_abs_max(input: &[f32]) -> f32 {
     let mut max = 0.0_f32;
-    let mut abs_max = 0.0_f32;
     for &value in input {
-        if value.abs() > abs_max {
-            abs_max = value.abs();
+        if value.abs() > max.abs() {
             max = value;
         }
     }
-    if abs_max < 1e-15 {
+    max
+}
+
+fn store_levels(input: &[f32], levels: &mut [i8], inverse_scale: f32) {
+    for (level, &value) in levels.iter_mut().zip(input) {
+        *level = (nearest_int(inverse_scale * value).clamp(-32, 31) + 32) as i8;
+    }
+}
+
+fn weighted_sums(input: &[f32], inverse_scale: f32) -> (f32, f32) {
+    let mut sum_lx = 0.0_f32;
+    let mut sum_l2 = 0.0_f32;
+    for &value in input {
+        let level = nearest_int(inverse_scale * value).clamp(-32, 31);
+        let weight = value * value;
+        sum_lx += weight * value * level as f32;
+        sum_l2 += weight * (level * level) as f32;
+    }
+    (sum_lx, sum_l2)
+}
+
+fn make_qx_quants(input: &[f32], levels: &mut [i8]) -> f32 {
+    let max = signed_abs_max(input);
+    if max.abs() < 1e-15 {
         levels.fill(0);
         return 0.0;
     }
 
     let mut inverse_scale = -32.0 / max;
-    let mut sum_lx = 0.0_f32;
-    let mut sum_l2 = 0.0_f32;
-    for (index, &value) in input.iter().enumerate() {
-        let level = nearest_int(inverse_scale * value).clamp(-32, 31);
-        levels[index] = (level + 32) as i8;
-        let weight = value * value;
-        sum_lx += weight * value * level as f32;
-        sum_l2 += weight * (level * level) as f32;
-    }
+    store_levels(input, levels, inverse_scale);
+    let (mut sum_lx, mut sum_l2) = weighted_sums(input, inverse_scale);
     let mut scale = if sum_l2 != 0.0 { sum_lx / sum_l2 } else { 0.0 };
     let mut best = scale * sum_lx;
     for adjustment in -9..=9 {
@@ -131,18 +145,9 @@ fn make_qx_quants(input: &[f32], levels: &mut [i8]) -> f32 {
             continue;
         }
         inverse_scale = -(32.0 + 0.1 * adjustment as f32) / max;
-        sum_lx = 0.0;
-        sum_l2 = 0.0;
-        for &value in input {
-            let level = nearest_int(inverse_scale * value).clamp(-32, 31);
-            let weight = value * value;
-            sum_lx += weight * value * level as f32;
-            sum_l2 += weight * (level * level) as f32;
-        }
+        (sum_lx, sum_l2) = weighted_sums(input, inverse_scale);
         if sum_l2 > 0.0 && sum_lx * sum_lx > best * sum_l2 {
-            for (index, &value) in input.iter().enumerate() {
-                levels[index] = (nearest_int(inverse_scale * value).clamp(-32, 31) + 32) as i8;
-            }
+            store_levels(input, levels, inverse_scale);
             scale = sum_lx / sum_l2;
             best = scale * sum_lx;
         }
@@ -150,65 +155,84 @@ fn make_qx_quants(input: &[f32], levels: &mut [i8]) -> f32 {
     scale
 }
 
+fn quantize_group_scales(input: &[f32], levels: &mut [i8; 256]) -> ([f32; 16], f32) {
+    let mut scales = [0.0_f32; 16];
+    let mut max_scale = 0.0_f32;
+    for (group, scale_slot) in scales.iter_mut().enumerate() {
+        let scale = make_qx_quants(
+            &input[group * 16..(group + 1) * 16],
+            &mut levels[group * 16..(group + 1) * 16],
+        );
+        *scale_slot = scale;
+        if scale.abs() > max_scale.abs() {
+            max_scale = scale;
+        }
+    }
+    (scales, max_scale)
+}
+
+fn requantize_groups(
+    input: &[f32],
+    levels: &mut [i8; 256],
+    scales: &[f32; 16],
+    inverse_scale: f32,
+    d: f32,
+) -> [i8; 16] {
+    let mut quant_scales = [0i8; 16];
+    for (group, (&scale, quant_scale)) in scales.iter().zip(&mut quant_scales).enumerate() {
+        *quant_scale = nearest_int(inverse_scale * scale).min(127) as i8;
+        let group_scale = d * *quant_scale as f32;
+        if group_scale != 0.0 {
+            for index in 0..16 {
+                let level = nearest_int(input[group * 16 + index] / group_scale).clamp(-32, 31);
+                levels[group * 16 + index] = (level + 32) as i8;
+            }
+        }
+    }
+    quant_scales
+}
+
+fn pack_block(levels: &[i8; 256], quant_scales: &[i8; 16], d_bits: u16, output: &mut [u8]) {
+    for half in 0..2 {
+        let source = half * 128;
+        let ql = half * 64;
+        let qh = 128 + half * 32;
+        for index in 0..32 {
+            let q1 = levels[source + index] as u8;
+            let q2 = levels[source + index + 32] as u8;
+            let q3 = levels[source + index + 64] as u8;
+            let q4 = levels[source + index + 96] as u8;
+            output[ql + index] = (q1 & 0x0f) | ((q3 & 0x0f) << 4);
+            output[ql + index + 32] = (q2 & 0x0f) | ((q4 & 0x0f) << 4);
+            output[qh + index] = (q1 >> 4) | ((q2 >> 4) << 2) | ((q3 >> 4) << 4) | ((q4 >> 4) << 6);
+        }
+    }
+    for (destination, &scale) in output[192..208].iter_mut().zip(quant_scales) {
+        *destination = scale as u8;
+    }
+    output[208..210].copy_from_slice(&d_bits.to_le_bytes());
+}
+
+fn quantize_block(input: &[f32], output: &mut [u8]) {
+    let mut levels = [0i8; 256];
+    let (scales, max_scale) = quantize_group_scales(input, &mut levels);
+    if max_scale.abs() < 1e-15 {
+        output.fill(0);
+        return;
+    }
+
+    let inverse_scale = -128.0 / max_scale;
+    let d_bits = f16::from_f32(1.0 / inverse_scale).to_bits();
+    let d = f16::from_bits(d_bits).to_f32();
+    let quant_scales = requantize_groups(input, &mut levels, &scales, inverse_scale, d);
+    pack_block(&levels, &quant_scales, d_bits, output);
+}
+
 /// Quantize one f32 row to standard GGML Q6_K blocks.
 pub fn quantize_row(input: &[f32], output: &mut [u8]) -> Result<(), WillametteError> {
     validate_row(output, input.len())?;
     for (input_block, output_block) in input.chunks_exact(256).zip(output.chunks_exact_mut(210)) {
-        let mut levels = [0i8; 256];
-        let mut scales = [0.0_f32; 16];
-        let mut max_scale = 0.0_f32;
-        let mut max_abs_scale = 0.0_f32;
-        for group in 0..16 {
-            let scale = make_qx_quants(
-                &input_block[group * 16..(group + 1) * 16],
-                &mut levels[group * 16..(group + 1) * 16],
-            );
-            scales[group] = scale;
-            if scale.abs() > max_abs_scale {
-                max_abs_scale = scale.abs();
-                max_scale = scale;
-            }
-        }
-        if max_abs_scale < 1e-15 {
-            output_block.fill(0);
-            continue;
-        }
-
-        let inverse_scale = -128.0 / max_scale;
-        let d_bits = f16::from_f32(1.0 / inverse_scale).to_bits();
-        let d = f16::from_bits(d_bits).to_f32();
-        let mut quant_scales = [0i8; 16];
-        for group in 0..16 {
-            quant_scales[group] = nearest_int(inverse_scale * scales[group]).min(127) as i8;
-            let group_scale = d * quant_scales[group] as f32;
-            if group_scale != 0.0 {
-                for index in 0..16 {
-                    let level =
-                        nearest_int(input_block[group * 16 + index] / group_scale).clamp(-32, 31);
-                    levels[group * 16 + index] = (level + 32) as i8;
-                }
-            }
-        }
-
-        for half in 0..2 {
-            let source = half * 128;
-            let ql = half * 64;
-            let qh = 128 + half * 32;
-            for index in 0..32 {
-                let q1 = levels[source + index] as u8;
-                let q2 = levels[source + index + 32] as u8;
-                let q3 = levels[source + index + 64] as u8;
-                let q4 = levels[source + index + 96] as u8;
-                output_block[ql + index] = (q1 & 0x0f) | ((q3 & 0x0f) << 4);
-                output_block[ql + index + 32] = (q2 & 0x0f) | ((q4 & 0x0f) << 4);
-                output_block[qh + index] =
-                    (q1 >> 4) | ((q2 >> 4) << 2) | ((q3 >> 4) << 4) | ((q4 >> 4) << 6);
-            }
-        }
-        for (destination, &scale) in output_block[192..208].iter_mut().zip(&quant_scales) {
-            *destination = scale as u8;
-        }
-        output_block[208..210].copy_from_slice(&d_bits.to_le_bytes());
+        quantize_block(input_block, output_block);
     }
     Ok(())
 }
