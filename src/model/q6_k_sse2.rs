@@ -68,7 +68,8 @@ pub(super) unsafe fn dot_row_sse2_validated(row: &[u8], input: &[f32]) -> f32 {
                 for chunk in 0..4 {
                     let l = band * 16 + chunk * 4;
                     let mut quants = [[0i32; 4]; 4];
-                    for lane in 0..4 {
+                    let mut lane = 0;
+                    while lane < 4 {
                         let index = l + lane;
                         let low_13 = block[ql_base + index];
                         let low_24 = block[ql_base + index + 32];
@@ -77,6 +78,7 @@ pub(super) unsafe fn dot_row_sse2_validated(row: &[u8], input: &[f32]) -> f32 {
                         quants[1][lane] = ((low_24 & 0x0f) | (((high >> 2) & 3) << 4)) as i32 - 32;
                         quants[2][lane] = ((low_13 >> 4) | (((high >> 4) & 3) << 4)) as i32 - 32;
                         quants[3][lane] = ((low_24 >> 4) | (((high >> 6) & 3) << 4)) as i32 - 32;
+                        lane += 1;
                     }
                     accumulate(
                         &mut accumulators[0],
