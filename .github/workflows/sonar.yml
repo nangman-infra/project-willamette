@@ -157,6 +157,16 @@ jobs:
             .projectStatus.conditions[]?
             | "  \(.status)  \(.metricKey)  actual=\(.actualValue // "n/a")  threshold=\(.comparator) \(.errorThreshold)"
           ' 2>/dev/null
+          echo
+          echo "Open new-code issues:"
+          curl --location --location-trusted --max-redirs 10 \
+            --silent --fail --show-error --user "${SONAR_TOKEN}:" --get \
+            --data-urlencode "componentKeys=project-willamette" \
+            --data-urlencode "resolved=false" \
+            --data-urlencode "inNewCodePeriod=true" \
+            "${server_url}/api/issues/search" \
+            | jq -r '.issues[]? | "  \(.rule)  \(.component):\(.line // 0)  \(.message)"' \
+            2>/dev/null
           exit 0
 
       - name: SonarQube Quality Gate
