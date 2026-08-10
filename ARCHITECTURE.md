@@ -25,7 +25,7 @@ flowchart TB
     subgraph MODEL["Model · src/model/*"]
         cfg[BitNetConfig]
         graph[ModelGraph<br/>332 TensorView refs]
-        embed["embedding_gather_f16<br/>(F16 → f32)"]
+        embed["embedding_gather<br/>(F16 / Q6_K → f32)"]
         layer[/"transformer block × 30<br/>(attention + FFN)"/]
         out_norm[output_norm RMSNorm]
         lm["lm_head = tied token_embd<br/>logits over 128256 vocab"]
@@ -62,7 +62,7 @@ flowchart TB
     layer --> out_norm
     out_norm --> lm
     layer -. matvec calls .-> disp
-    lm -. F16 row dot product .-> embed
+    lm -. F16 / Q6_K row dot product .-> embed
     disp -- aarch64 + NEON --> neon
     disp -- x86 + SSSE3 --> sse2
     disp -- x86 + SSE2 only --> lut
@@ -103,6 +103,7 @@ flowchart TB
 | synth | Synthetic GGUF builder for benchmarking (tiny/small/medium presets) | `src/synth.rs` |
 | 9 | Multi-turn chat + TUI | `src/chat/*`, `src/main.rs::{cmd_chat,cmd_tui}` |
 | 10-D | i8 KV cache + i8 activation kernels | `src/model/{kv_cache,bitlinear_neon,bitlinear_sse2}.rs` |
+| prep | GGUF artifact planning, relocation, and Q6_K profile | `src/bin/willamette-prep.rs`, `src/gguf/{linker,repack}.rs` |
 
 ## Memory layout (per token, decode step)
 
@@ -111,7 +112,8 @@ flowchart TB
     └── packed I2_S row 6912 / 4 = 1728 bytes  ┐
                                                 ├── read directly
     └── F32 norm weights (10–28 KiB each)     ┘
-    └── F16 token_embd (656 MiB)              ┘ row gather on lm_head step
+    └── F16 token_embd (626 MiB source) or Q6_K (257 MiB artifact)
+                                                row gather + lm_head scan
 
   per-call scratch (allocated then freed)
     ├── x_hidden       : 2560 × f32 = 10 KiB
@@ -130,7 +132,7 @@ flowchart TB
 ## Numerical pipeline
 
 ```text
-token id   ── embed F16→f32 ──► hidden (n_embd = 2560)
+token id   ── embed F16/Q6_K→f32 ──► hidden (n_embd = 2560)
 
 repeat 30 times:
   hidden ── RMSNorm(attn_norm) ─► xN
@@ -154,7 +156,7 @@ repeat 30 times:
   hidden ── + h2               ─► hidden  (residual #2)
 
 hidden ── RMSNorm(output_norm) ─► hidden_final
-hidden_final ── dot with tied token_embd (F16) ─► logits (128256)
+hidden_final ── dot with tied token_embd (F16/Q6_K) ─► logits (128256)
 logits ── Sampler.sample()    ─► next token id
 ```
 

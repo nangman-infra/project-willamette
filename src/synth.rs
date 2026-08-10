@@ -292,15 +292,24 @@ fn align(offset: u64, alignment: u64) -> u64 {
 /// numerical assertions still hold), every code is `0` so every
 /// BitLinear matvec returns 0.
 pub fn build_gguf(preset: Preset, random_weights: bool) -> Vec<u8> {
-    build_gguf_with_config(preset.config(), random_weights)
+    build_gguf_with_config(preset.config(), random_weights, false)
 }
 
 #[cfg(test)]
 pub(crate) fn build_gguf_for_config(cfg: Config, random_weights: bool) -> Vec<u8> {
-    build_gguf_with_config(cfg, random_weights)
+    build_gguf_with_config(cfg, random_weights, false)
 }
 
-fn build_gguf_with_config(cfg: Config, random_weights: bool) -> Vec<u8> {
+#[cfg(test)]
+pub(crate) fn build_gguf_with_output_weight(cfg: Config) -> Vec<u8> {
+    build_gguf_with_config(cfg, false, true)
+}
+
+fn build_gguf_with_config(
+    cfg: Config,
+    random_weights: bool,
+    include_output_weight: bool,
+) -> Vec<u8> {
     let mut rng = Xorshift64::new(cfg.seed);
 
     // 1) Tensor list.
@@ -311,6 +320,14 @@ fn build_gguf_with_config(cfg: Config, random_weights: bool) -> Vec<u8> {
         ggml_type: GgmlType::F16,
         data: f16_tensor_bytes_all_ones((cfg.n_embd * cfg.vocab_size) as usize),
     });
+    if include_output_weight {
+        tensors.push(TensorDesc {
+            name: "output.weight".to_string(),
+            shape: vec![cfg.n_embd as u64, cfg.vocab_size as u64],
+            ggml_type: GgmlType::F16,
+            data: f16_tensor_bytes_all_ones((cfg.n_embd * cfg.vocab_size) as usize),
+        });
+    }
     tensors.push(TensorDesc {
         name: "output_norm.weight".to_string(),
         shape: vec![cfg.n_embd as u64],

@@ -1,6 +1,6 @@
 # Limitations — Project Willamette v0.10.0-mvp
 
-*Last revised 2026-08-09 (Q6_K tied-embedding measurement cycle).*
+*Last revised 2026-08-11 (artifact-linker foundation).*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
@@ -34,12 +34,12 @@ Anything outside this combination returns a typed error
   the design path for them is
   [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md)
   § 5.4 (Phase III-B).
-* **Other BitLinear quantisations.** F32, F16, Q4_0, Q4_K, Q8_0, IQ4_XS,
-  TL1, TL2, … will parse via `willamette inspect` (the GGUF reader
-  enumerates them and labels them by raw u32) but the BitLinear matvec
-  refuses to operate on anything except `BitNetI2S`. The tied embedding and
-  lm-head additionally support standard Q6_K; this is not a general Q6_K
-  matrix-multiplication kernel.
+* **Other BitLinear quantisations.** The GGUF reader labels implemented layouts
+  such as F32, F16, Q4_0, Q4_K, Q8_0, and Q6_K, but rejects types whose byte
+  layout is not implemented instead of guessing their tensor boundaries. The
+  BitLinear matvec refuses to operate on anything except `BitNetI2S`. The tied
+  embedding and lm-head additionally support standard Q6_K; this is not a
+  general Q6_K matrix-multiplication kernel.
 * **Other tokenizer models.** `tokenizer.ggml.model = "llama"` (i.e.
   SentencePiece-Unigram) is rejected. The tokenizer factory in
   `src/tokenizer/mod.rs` returns `UnsupportedTokenizer` for any model
@@ -69,7 +69,7 @@ the scaling curve, not at the exact numbers.
 | Apple Silicon with `+dotprod` / FEAT_DotProd | hardware present on the M4 dev host; the stable-Rust `vdotq_s32` intrinsic remains unused (kernel keeps `vmull_s8`-style widening for parity). Switching is an `RUSTFLAGS="--cfg willamette_i8_activations"` flag away. |
 | Apple Silicon with FEAT_I8MM / SME / SME2 | hardware present on M4; intrinsics not in stable Rust → unused. |
 | Multi-threading | `rayon` per-row BitLinear matvec parallelism (Stage 10-C). 1-thread and 4-thread transformer-forward runs on mbp2012 remain within noise because that path is memory-bandwidth bound. The tied F16 lm-head is different: parallel vocabulary rows measured 838 ms → 446 ms and improved complete steady-state throughput 0.86 → 1.29 tok/s on mbp2012. antix1 remains single-core. See `docs/BENCHMARKS.md` 2026-08-09. |
-| **Q6_K tied embedding** | Supported by scalar gather, a narrow streaming repacker, and runtime SSE2 lm-head dot products on x86/i686. The 0.745 GiB artifact plus SSE2 reaches 0.24 tok/s on antix1 and 2.31 tok/s on mbp2012. A 1,024-transition WikiText-2 prefix measured 14.273354 perplexity versus F16 14.266282 (+0.0496%); same-host scalar/SSE2 output matches on the reference prompts. |
+| **Q6_K tied embedding** | Supported by scalar gather, the `embedding-q6-k` artifact-linker profile, and runtime SSE2 lm-head dot products on x86/i686. The linker can relocate a transformed tensor from any physical slot and recomputes alignment, but this remains the only production transform profile. The 0.745 GiB artifact plus SSE2 reaches 0.24 tok/s on antix1 and 2.31 tok/s on mbp2012. A 1,024-transition WikiText-2 prefix measured 14.273354 perplexity versus F16 14.266282 (+0.0496%); same-host scalar/SSE2 output matches on the reference prompts. |
 | bitnet.cpp same-machine comparison on sub-AVX2 hosts | bitnet.cpp's x86 production CPU path (both the default `ggml-bitnet-mad` scalar fallback and the `BITNET_X86_TL2` LUT path) **effectively assumes AVX2**. On Ivy Bridge (no AVX2): the default build crashes with `SIGILL`, the `GGML_AVX2=OFF` build emits garbage (`!!!!!`), and the LUT build fails to compile. Willamette's hand-written SSE2 i8 kernel produces byte-identical Stage 5-E output on the same machine — see `docs/BENCHMARKS.md` 2026-05-30 § "bitnet.cpp head-to-head". The reference comparison in `docs/REFERENCE_COMPATIBILITY.md` therefore stays on AVX2-capable hosts. |
 | GPU (CUDA / Metal / Vulkan / ROCm) | not implemented (out of scope by thesis). |
 | Batched / multi-token-per-step decoding | the multi-token path exists for prompt prefill, but per-step decode is single-token. |
@@ -119,8 +119,8 @@ happen" guards:
   [`crate::model::architecture::registry`] (today: the BitNet
   family — `bitnet-b1.58`, `bitnet-25`, `bitnet`).
 * `UnsupportedTensorType(N)` — any tensor whose raw `u32` ggml_type is
-  not one of the small set we recognise. `inspect` will print the raw
-  number; if that number is genuinely a new BitNet type, upgrade
+  not one of the small set we recognise. If that number is genuinely a new
+  BitNet type, upgrade
   [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md) and `src/gguf/types.rs`
   together.
 * `UnsupportedTokenizer("…")` — described above.

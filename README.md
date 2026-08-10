@@ -55,9 +55,11 @@ Engineering rules every change is held to (full list in
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
 Runtime / `bitnet.cpp`'s `quantize` use: the expensive once-per-model
 work runs where compute is cheap, and the on-device runtime stays
-small. `willamette-prep` now implements the first narrow artifact path: it
-converts the tied F16 embedding to Q6_K while preserving every transformer
-I2_S tensor. General architecture and target-aware linking remain roadmap work.
+small. `willamette-prep` now has a format-correct GGUF linker and one production
+profile: it plans every aligned tensor offset, converts the tied F16 embedding
+to Q6_K, and preserves every transformer I2_S slot. Additional transform
+profiles, architecture conversion, and target-aware blocking remain roadmap
+work.
 
 ## Status: v0.10.0-mvp
 
@@ -80,9 +82,9 @@ What works **today**, on the path toward the thesis:
 | Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui full-screen) |
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
-| `willamette-prep` / Q6_K tied embedding | ✅ standalone prep binary plus compatible runtime subcommand produce the same 0.745 GiB artifact; scalar gather + runtime SSE2 lm-head on x86 |
+| `willamette-prep` artifact linker / Q6_K tied embedding | ✅ explicit plan + full GGUF relocation + dry-run; standalone prep binary and compatible runtime subcommand produce the same 0.745 GiB artifact; scalar gather + runtime SSE2 lm-head on x86 |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **241** default tests passing + **94** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
+| Tests | **247** default tests passing + **95** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
 | Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 
@@ -92,7 +94,7 @@ What does **not** work yet but is on the roadmap toward the thesis:
 | -------- | ----- |
 | Model coverage beyond the BitNet family (Llama / Mistral / Phi / Gemma) | ❌ BitNet family (`bitnet-b1.58` / `bitnet-25` / `bitnet`) accepted today; non-BitNet architectures pending Phase III-B — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
 | Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ BitLinear remains `I2_S`-only; tied embedding additionally supports Q6_K |
-| General `willamette-prep` artifact linker beyond the tied Q6_K embedding | ❌ architecture conversion, activation analysis, sparse tables, and target-ISA blocking not started |
+| Additional `willamette-prep` transform profiles beyond the tied Q6_K embedding | ❌ architecture conversion, activation analysis, sparse tables, and target-ISA blocking not started; generic GGUF relocation mechanics are implemented |
 | AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
 | LUT (TL1/TL2) kernel | ❌ design RFC drafted 2026-05-30 ([`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md)); plan-then-act, ≥ 1.3× measurement gate before any code lands |
 | MMX-era / sub-SSE2 kernel | ❌ not started |
@@ -166,7 +168,8 @@ changing any transformer I2_S tensor:
 ```bash
 cargo run --release --bin willamette-prep -- \
   --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf \
-  --output ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf
+  --output ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf \
+  --profile embedding-q6-k
 shasum -a 256 ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf
 # 492e4d2a8db2eefc5f8c86acd08eea6707294de67ce871b5d732e9bfcb468376
 ```
@@ -175,6 +178,15 @@ The derived file is 800,468,160 bytes (0.745 GiB). Existing output paths are
 never overwritten. Release tarballs include `willamette-prep`; source builds
 also retain `cargo run --release -- repack-embedding-q6k -- ...` as a
 byte-identical compatibility interface.
+
+Inspect the validated architecture, tensor change, sizes, and relocated offsets
+without creating a file:
+
+```bash
+cargo run --release --bin willamette-prep -- \
+  --model SOURCE.gguf --output DEST.gguf \
+  --profile embedding-q6-k --dry-run
+```
 
 ### 3. Build
 
@@ -211,6 +223,7 @@ Full text:        "The capital of France is Paris. Paris"
 
 ```text
 willamette-prep --model PATH --output PATH
+                 [--profile embedding-q6-k] [--dry-run]
 
 willamette inspect    --model PATH
 willamette repack-embedding-q6k --model PATH --output PATH
@@ -239,11 +252,13 @@ willamette --version
 
 * `inspect` — Stage 1. Dumps every metadata key + every tensor's raw
   ggml_type, shape, offset, and byte length. No inference.
-* `willamette-prep` / `repack-embedding-q6k` — The standalone offline tool and
-  runtime compatibility command stream the pinned F16 tied embedding through
-  the standard Q6_K reference quantisation layout and shift later GGUF offsets.
-  Both interfaces produce identical bytes; all transformer tensors remain
-  byte-identical I2_S.
+* `willamette-prep` / `repack-embedding-q6k` — The standalone offline linker
+  validates a profile, computes every aligned output tensor offset, patches the
+  GGUF directory, and streams copied or transformed physical tensor slots. The
+  default `embedding-q6-k` profile converts the tied F16 embedding through the
+  standard Q6_K reference quantiser. `--dry-run` prints the plan without an
+  output file. The runtime compatibility command produces identical bytes; all
+  transformer tensors remain byte-identical I2_S.
 * `perplexity` — Scores contiguous next-token transitions with the cached
   autoregressive path and stable f64 log-sum-exp. Defaults to 256 transitions
   and refuses to exceed the model context.

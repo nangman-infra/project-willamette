@@ -1,3 +1,4 @@
+pub mod linker;
 pub mod reader;
 pub mod repack;
 pub mod tensor;

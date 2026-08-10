@@ -25,6 +25,11 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 
 ### Changed
 
+* `willamette-prep` now plans and relocates every GGUF tensor through a generic
+  artifact linker before applying the `embedding-q6-k` profile. The transformed
+  tensor no longer has to be physically first and its size delta no longer has
+  to be an alignment multiple. `--dry-run` prints the validated plan without
+  writing a file; the original `repack_embedding_q6k` API remains a wrapper.
 * Release archives now ship a standalone `willamette-prep` binary for the
   pinned Q6_K embedding artifact. The runtime's existing
   `repack-embedding-q6k` subcommand remains available and produces identical

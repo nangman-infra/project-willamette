@@ -11,7 +11,7 @@ reproduce a result, check this file first.
 
 | Tool | Version |
 | ---- | ------- |
-| Rust toolchain | `rustc 1.94.0` (stable) — see `rust-toolchain.toml` (none currently — uses `rustup default stable`) |
+| Rust toolchain | `rustc 1.94.0` — pinned by `rust-toolchain.toml` |
 | Cargo | `cargo 1.94.0` (matches Rust) |
 | Apple `clang` for C++ side (bitnet.cpp build only) | `clang version 21` (Xcode CommandLineTools 1267) |
 | CMake (bitnet.cpp build only) | `4.3.2` (Homebrew) |
@@ -79,12 +79,26 @@ I2_S tensor and tokenizer byte is copied unchanged.
 ```bash
 cargo run --release --bin willamette-prep -- \
   --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf \
-  --output ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf
+  --output ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s-embed-q6_k.gguf \
+  --profile embedding-q6-k
 ```
+
+Use `--dry-run` with the same arguments to validate the source graph and print
+the complete size/offset plan without creating the output path. The linker
+recomputes every aligned tensor offset, so the transformed embedding need not
+be the first physical tensor and its size reduction need not be an alignment
+multiple.
 
 The compatibility interface
 `cargo run --release -- repack-embedding-q6k --model SOURCE --output DEST`
 calls the same repacker and produces identical bytes.
+
+When the pinned external model is present, reproduce both the output size and
+SHA256 regression gate with:
+
+```bash
+cargo test --test artifact_linker -- --ignored
+```
 
 Quality comparison uses the same WikiText-2 raw test prefix for both artifacts:
 

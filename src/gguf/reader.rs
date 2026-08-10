@@ -96,13 +96,20 @@ impl GgufValue {
 ///
 /// All tensor data is zero-copy — the `TensorView.data` slices point directly
 /// into the source byte buffer (which is backed by mmap).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TensorDescriptorLocation {
+    pub dtype_offset: u64,
+    pub relative_offset_offset: u64,
+}
+
 pub struct GgufFile<'a> {
     pub version: u32,
     pub tensor_count: u64,
     pub metadata: HashMap<String, GgufValue>,
     pub tensors: Vec<TensorView<'a>>,
     pub alignment: u64,
-    pub(crate) tensor_info_offset: u64,
+    pub(crate) data_section_start: u64,
+    pub(crate) tensor_descriptors: Vec<TensorDescriptorLocation>,
 }
 
 impl<'a> GgufFile<'a> {
@@ -200,12 +207,17 @@ impl<'a> GgufFile<'a> {
             data.len().saturating_sub(cur.position() as usize),
             24,
         )?;
-        let tensor_info_offset = cur.position();
         let mut raw_infos: Vec<RawTensorInfo> = Vec::new();
         raw_infos
             .try_reserve_exact(tensor_count as usize)
             .map_err(|e| {
                 WillametteError::GgufParse(format!("allocating tensor directory: {}", e))
+            })?;
+        let mut tensor_descriptors = Vec::new();
+        tensor_descriptors
+            .try_reserve_exact(tensor_count as usize)
+            .map_err(|e| {
+                WillametteError::GgufParse(format!("allocating descriptor locations: {}", e))
             })?;
         for i in 0..tensor_count {
             let name = read_gguf_string(&mut cur)
@@ -229,11 +241,13 @@ impl<'a> GgufFile<'a> {
                 })?;
                 shape.push(dim);
             }
+            let dtype_offset = cur.position();
             let raw_type = cur.read_u32::<LittleEndian>().map_err(|e| {
                 WillametteError::GgufParse(format!("tensor[{}] ggml_type: {}", i, e))
             })?;
             let ggml_type = GgmlType::from_raw(raw_type);
 
+            let relative_offset_offset = cur.position();
             let relative_offset = cur
                 .read_u64::<LittleEndian>()
                 .map_err(|e| WillametteError::GgufParse(format!("tensor[{}] offset: {}", i, e)))?;
@@ -243,6 +257,10 @@ impl<'a> GgufFile<'a> {
                 shape,
                 ggml_type,
                 relative_offset,
+            });
+            tensor_descriptors.push(TensorDescriptorLocation {
+                dtype_offset,
+                relative_offset_offset,
             });
         }
 
@@ -390,7 +408,8 @@ impl<'a> GgufFile<'a> {
             metadata,
             tensors,
             alignment,
-            tensor_info_offset,
+            data_section_start,
+            tensor_descriptors,
         })
     }
 }
