@@ -451,30 +451,7 @@ fn cmd_tokenize(path: &Path, text: &str, no_bos: bool, force_eos: bool) -> Resul
         .decode(&ids)
         .map_err(|e| anyhow::anyhow!("decode failed: {}", e))?;
 
-    // Build the expected decoded string given the options used.
-    let expected = if tokenizer.model_type == "llama" {
-        // SentencePiece decode removes its synthetic dummy prefix. Control
-        // BOS/EOS pieces do not emit bytes.
-        text.to_string()
-    } else {
-        let mut s = String::new();
-        if opts.add_bos {
-            if let Some(bos) = tokenizer.bos_id {
-                if let Some(t) = tokenizer.token_str(bos) {
-                    s.push_str(t);
-                }
-            }
-        }
-        s.push_str(text);
-        if opts.add_eos {
-            if let Some(eos) = tokenizer.eos_id {
-                if let Some(t) = tokenizer.token_str(eos) {
-                    s.push_str(t);
-                }
-            }
-        }
-        s
-    };
+    let expected = expected_tokenize_decode(&tokenizer, text, opts.add_bos, opts.add_eos);
     let roundtrip_ok = decoded == expected;
 
     let token_strings: Vec<String> = ids
@@ -512,6 +489,35 @@ fn cmd_tokenize(path: &Path, text: &str, no_bos: bool, force_eos: bool) -> Resul
     }
 
     Ok(())
+}
+
+fn expected_tokenize_decode(
+    tokenizer: &Tokenizer,
+    text: &str,
+    add_bos: bool,
+    add_eos: bool,
+) -> String {
+    // SentencePiece control BOS/EOS pieces emit no bytes, and decode removes
+    // the synthetic dummy prefix.
+    if tokenizer.model_type == "llama" {
+        return text.to_string();
+    }
+
+    let mut expected = String::new();
+    if add_bos {
+        append_token_display(&mut expected, tokenizer, tokenizer.bos_id);
+    }
+    expected.push_str(text);
+    if add_eos {
+        append_token_display(&mut expected, tokenizer, tokenizer.eos_id);
+    }
+    expected
+}
+
+fn append_token_display(output: &mut String, tokenizer: &Tokenizer, id: Option<u32>) {
+    if let Some(token) = id.and_then(|id| tokenizer.token_str(id)) {
+        output.push_str(token);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

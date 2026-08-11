@@ -568,43 +568,57 @@ fn encode_sentencepiece(
         .map(|c| Some(c.to_string()))
         .collect::<Vec<_>>();
 
-    loop {
-        let mut best: Option<(usize, usize, f32)> = None;
-        let live = symbols
-            .iter()
-            .enumerate()
-            .filter_map(|(index, symbol)| symbol.as_ref().map(|symbol| (index, symbol)))
-            .collect::<Vec<_>>();
-        for pair in live.windows(2) {
-            let merged = format!("{}{}", pair[0].1, pair[1].1);
-            let Some(&token) = token_to_id.get(&merged) else {
-                continue;
-            };
-            let candidate = (pair[0].0, pair[1].0, scores[token as usize]);
-            if best.is_none_or(|current| {
-                candidate.2 > current.2 || (candidate.2 == current.2 && candidate.0 < current.0)
-            }) {
-                best = Some(candidate);
-            }
-        }
-        let Some((left, right, _)) = best else {
-            break;
-        };
+    while let Some((left, right)) = best_sentencepiece_merge(&symbols, scores, token_to_id) {
         let right_symbol = symbols[right].take().unwrap();
         symbols[left].as_mut().unwrap().push_str(&right_symbol);
     }
 
     for symbol in symbols.into_iter().flatten() {
-        if let Some(&token) = token_to_id.get(&symbol) {
-            ids.push(token);
-        } else {
-            for byte in symbol.as_bytes() {
-                let piece = format!("<0x{byte:02X}>");
-                ids.push(token_to_id.get(&piece).copied().unwrap_or(unknown_id));
-            }
-        }
+        emit_sentencepiece_symbol(&symbol, unknown_id, token_to_id, ids);
     }
     Ok(())
+}
+
+fn best_sentencepiece_merge(
+    symbols: &[Option<String>],
+    scores: &[f32],
+    token_to_id: &HashMap<String, u32>,
+) -> Option<(usize, usize)> {
+    let live = symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(index, symbol)| symbol.as_ref().map(|symbol| (index, symbol)))
+        .collect::<Vec<_>>();
+    let mut best: Option<(usize, usize, f32)> = None;
+    for pair in live.windows(2) {
+        let merged = format!("{}{}", pair[0].1, pair[1].1);
+        let Some(&token) = token_to_id.get(&merged) else {
+            continue;
+        };
+        let candidate = (pair[0].0, pair[1].0, scores[token as usize]);
+        if best.is_none_or(|current| {
+            candidate.2 > current.2 || (candidate.2 == current.2 && candidate.0 < current.0)
+        }) {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(left, right, _)| (left, right))
+}
+
+fn emit_sentencepiece_symbol(
+    symbol: &str,
+    unknown_id: u32,
+    token_to_id: &HashMap<String, u32>,
+    ids: &mut Vec<u32>,
+) {
+    if let Some(&token) = token_to_id.get(symbol) {
+        ids.push(token);
+        return;
+    }
+    for byte in symbol.as_bytes() {
+        let piece = format!("<0x{byte:02X}>");
+        ids.push(token_to_id.get(&piece).copied().unwrap_or(unknown_id));
+    }
 }
 
 fn decode_sentencepiece(
