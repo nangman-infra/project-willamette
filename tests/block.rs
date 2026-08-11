@@ -69,7 +69,7 @@ fn full_block_differs_from_attention_only() {
         embedding_gather_f16(g.token_embd, 15339, &mut x).unwrap();
 
         let attn_w = f32_tensor_to_vec(g.layers[0].attn_norm).unwrap();
-        let asn_w = f32_tensor_to_vec(g.layers[0].attn_sub_norm).unwrap();
+        let asn_w = f32_tensor_to_vec(g.layers[0].attn_sub_norm.unwrap()).unwrap();
         let mut attn_only = vec![0.0_f32; n_embd];
         attention_block_forward_position_zero(
             &x,
@@ -110,7 +110,7 @@ fn full_block_differs_from_ffn_only() {
         embedding_gather_f16(g.token_embd, 15339, &mut x).unwrap();
 
         let fn_w = f32_tensor_to_vec(g.layers[0].ffn_norm).unwrap();
-        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm).unwrap();
+        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm.unwrap()).unwrap();
         let mut ffn_only = vec![0.0_f32; n_embd];
         ffn_block_forward(
             &x,

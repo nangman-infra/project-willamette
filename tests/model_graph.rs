@@ -136,9 +136,9 @@ fn every_layer_has_4_f32_and_7_i2s_tensors() {
             // F32 norm tensors (4)
             for (label, t) in [
                 ("attn_norm", layer.attn_norm),
-                ("attn_sub_norm", layer.attn_sub_norm),
+                ("attn_sub_norm", layer.attn_sub_norm.unwrap()),
                 ("ffn_norm", layer.ffn_norm),
-                ("ffn_sub_norm", layer.ffn_sub_norm),
+                ("ffn_sub_norm", layer.ffn_sub_norm.unwrap()),
             ] {
                 assert_eq!(
                     t.ggml_type,
@@ -183,9 +183,9 @@ fn every_layer_has_expected_shapes() {
 
         for layer in &g.layers {
             assert_eq!(layer.attn_norm.shape, vec![n_embd]);
-            assert_eq!(layer.attn_sub_norm.shape, vec![n_embd]);
+            assert_eq!(layer.attn_sub_norm.unwrap().shape, vec![n_embd]);
             assert_eq!(layer.ffn_norm.shape, vec![n_embd]);
-            assert_eq!(layer.ffn_sub_norm.shape, vec![n_ff]);
+            assert_eq!(layer.ffn_sub_norm.unwrap().shape, vec![n_ff]);
 
             assert_eq!(layer.attn_q.shape, vec![n_embd, n_embd]);
             assert_eq!(layer.attn_k.shape, vec![n_embd, kv_dim]);
@@ -213,12 +213,12 @@ fn graph_references_a_distinct_tensor_per_role_per_layer() {
                 ("attn_k", layer.attn_k),
                 ("attn_v", layer.attn_v),
                 ("attn_output", layer.attn_output),
-                ("attn_sub_norm", layer.attn_sub_norm),
+                ("attn_sub_norm", layer.attn_sub_norm.unwrap()),
                 ("ffn_norm", layer.ffn_norm),
                 ("ffn_gate", layer.ffn_gate),
                 ("ffn_up", layer.ffn_up),
                 ("ffn_down", layer.ffn_down),
-                ("ffn_sub_norm", layer.ffn_sub_norm),
+                ("ffn_sub_norm", layer.ffn_sub_norm.unwrap()),
             ] {
                 let addr = t as *const _ as usize;
                 all_addrs.push((addr, role));

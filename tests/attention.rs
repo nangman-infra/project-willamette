@@ -39,7 +39,7 @@ fn attention_block_forward_produces_2560_finite_output() {
         embedding_gather_f16(g.token_embd, 15339, &mut x).unwrap();
 
         let an = f32_tensor_to_vec(g.layers[0].attn_norm).unwrap();
-        let asn = f32_tensor_to_vec(g.layers[0].attn_sub_norm).unwrap();
+        let asn = f32_tensor_to_vec(g.layers[0].attn_sub_norm.unwrap()).unwrap();
 
         let mut out = vec![0.0_f32; n_embd];
         attention_block_forward_position_zero(
@@ -82,7 +82,7 @@ fn attention_block_forward_is_deterministic() {
         let mut x = vec![0.0_f32; n_embd];
         embedding_gather_f16(g.token_embd, 15339, &mut x).unwrap();
         let an = f32_tensor_to_vec(g.layers[0].attn_norm).unwrap();
-        let asn = f32_tensor_to_vec(g.layers[0].attn_sub_norm).unwrap();
+        let asn = f32_tensor_to_vec(g.layers[0].attn_sub_norm.unwrap()).unwrap();
 
         let mut a = vec![0.0_f32; n_embd];
         let mut b = vec![0.0_f32; n_embd];
@@ -140,7 +140,7 @@ fn different_tokens_produce_different_attention_outputs() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
         let an = f32_tensor_to_vec(g.layers[0].attn_norm).unwrap();
-        let asn = f32_tensor_to_vec(g.layers[0].attn_sub_norm).unwrap();
+        let asn = f32_tensor_to_vec(g.layers[0].attn_sub_norm.unwrap()).unwrap();
 
         let mut x_a = vec![0.0_f32; n_embd];
         let mut x_b = vec![0.0_f32; n_embd];

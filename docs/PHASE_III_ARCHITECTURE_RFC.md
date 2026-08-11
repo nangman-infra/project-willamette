@@ -1,6 +1,6 @@
 # Phase III RFC — Generic Model Architecture support
 
-*Status: draft, 2026-05-29.*
+*Status: accepted; steps 2-5 implemented for classic Llama F16/Q4_0/Q8_0, 2026-08-12.*
 *Owner: pandora0667. Reviewer: collaborator (Claude).*
 
 ## 1. Why this exists
@@ -154,7 +154,7 @@ pub trait ModelArchitecture: Send + Sync + 'static {
     /// tensors including `attn_sub_norm` and `ffn_sub_norm`. Llama2
     /// impl returns nine (no sub_norms). Used by ModelGraph::from_gguf
     /// instead of the current fixed list.
-    fn layer_tensor_names(&self) -> &'static [LayerTensorRole];
+    fn layer_tensor_roles(&self) -> &'static [LayerTensorRole];
 
     /// Forward-graph variant. Today's BitNet path lives behind one
     /// variant; vanilla Llama2 behind another. Avoids embedding the
@@ -229,7 +229,7 @@ impl ModelArchitecture for BitNetArchitecture {
         let embedding_length  = required_u32(meta, &format!("{prefix}.embedding_length"))?;
         // …same fields as today, just templated…
     }
-    fn layer_tensor_names(&self) -> &'static [LayerTensorRole] {
+    fn layer_tensor_roles(&self) -> &'static [LayerTensorRole] {
         &[
             LayerTensorRole::AttnNorm, LayerTensorRole::AttnSubNorm,
             LayerTensorRole::AttnQ, LayerTensorRole::AttnK,
@@ -243,31 +243,24 @@ impl ModelArchitecture for BitNetArchitecture {
 }
 ```
 
-### 5.4 Reserved entry point — `LlamaArchitecture` placeholder
+### 5.4 Implemented entry point — `LlamaArchitecture`
 
-Not implemented; merely a documentation + test gate so the next phase
-has a named target:
+The first Phase III-B vertical slice implements:
 
 ```rust
 // src/model/architecture/llama.rs
 //
-// TODO Phase III-B: when we have a Llama 2 / Llama 3 GGUF to test,
-// the impl shape is:
-//
 //   architecture_strings → ["llama"]
 //   metadata_prefix      → "llama" (single)
-//   layer_tensor_names   → 9 (no sub_norms)
+//   layer_tensor_roles   → 9 (no sub_norms)
 //   forward_variant      → ForwardVariant::VanillaLlama
 //
-// Forward graph: cached_forward.rs grows a `match variant` and a
-// VanillaLlama arm that skips the two sub-norm calls. BitLinear
-// matvec stays as-is for I2_S; new Linear matvec kernel needed for
-// F16 / Q4_K_M Llama weights (Phase III-C).
+// Forward graph: VanillaLlama skips the two BitNet sub-norm calls and uses
+// normal RoPE, SiLU/SwiGLU, and F16/Q4_0/Q8_0 Linear.
 ```
 
-This is the principled-design half — the registry knows where the
-seam is, so the next arch is "fill in this file" rather than "audit
-twelve files."
+Pinned 260K GQA and 15M MHA TinyStories artifacts exercise both the seam and
+the complete cached generation path against llama.cpp.
 
 ## 6. Migration plan
 
@@ -279,24 +272,26 @@ Five PR-sized steps, each shippable:
    (Microsoft 2B unchanged). Aramis / Bifrost now load. Run a quality
    sanity on antix1 (the original A-track goal, now actually
    reachable).
-3. **`ModelGraph::from_gguf` consults `arch.layer_tensor_names()`.**
+3. **`ModelGraph::from_gguf` consults `arch.layer_tensor_roles()`.**
    Drops the hard-coded list; behaviour identical for BitNet.
-4. **`cached_forward.rs` dispatches on `forward_variant()`.** Body
-   unchanged for `BitNetSubNorm`; the other arm panics with a
-   `not yet implemented for variant {:?}` until step 5.
-5. **`LlamaArchitecture` impl + `VanillaLlama` forward arm + Linear
-   matvec kernel.** Phase III-B onwards; not in scope for the first
-   Phase III ship.
+4. **Forward entry points dispatch on `forward_variant()`.** Bodies are
+   unchanged for `BitNetSubNorm`; reserved variants return typed
+   `NotImplemented` errors before computation until step 5.
+5. **`LlamaArchitecture` impl + `VanillaLlama` forward arm + F16/Q4_0/Q8_0
+   Linear matvec kernels.** Implemented for classic unscaled full-head RoPE
+   GGUFs. Llama 3 and Mistral remain follow-up work.
 
-Steps 2–4 are the actual Phase III deliverable. Step 5 is Phase III-B.
+Steps 2–4 are the original Phase III deliverable. The narrow step-5 classic
+Llama slice is the first Phase III-B implementation.
 
 ## 7. Tests / acceptance
 
 * `tests/synthetic_model.rs` keeps passing (no behaviour change for
   BitNet b1.58 path).
-* New `tests/architecture_registry.rs`: round-trips at least
-  `bitnet-b1.58`, `bitnet-25`, `bitnet`; rejects `llama` with
-  `UnsupportedArchitecture` until step 5.
+* `tests/architecture_registry.rs` round-trips `bitnet-b1.58`, `bitnet-25`,
+  `bitnet`, and `llama`, including their role and forward-variant contracts.
+* `tests/llama_f16.rs` checks artifact SHA256, prompt token IDs, full/cached
+  forward parity, and greedy generation against pinned llama.cpp output.
 * `willamette inspect --model aramis.gguf` no longer errors (the file
   is loadable; the test asserts the `BitNetConfig` round-trips its
   hyperparams).
@@ -323,8 +318,9 @@ Steps 2–4 are the actual Phase III deliverable. Step 5 is Phase III-B.
   models into the runtime's format is a separate workstream. This
   RFC only covers the runtime *reading* whatever the preprocessor
   emits.
-* **New SIMD kernel for Linear (non-ternary) matvec.** Class 3 needs
-  it. Phase III-C ticket, not this RFC.
-* **Tokenizer generality.** Today's `gpt2` BPE handles BitNet family.
-  SentencePiece / Llama-3 BPE pre-tokeniser variants are a separate
-  tokenizer-RFC.
+* **Additional quantized/SIMD Linear matvec.** The classic Llama slice implements
+  scalar Q4_0/Q8_0; other standard GGUF quant types and dedicated SIMD
+  acceleration remain future work.
+* **Tokenizer generality.** `gpt2` BPE handles the BitNet family and classic
+  `llama` SentencePiece BPE handles the acceptance artifacts. Llama 3 and other
+  tokenizer normalizer/pre-tokenizer variants remain separate work.

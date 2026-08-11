@@ -15,6 +15,7 @@ must be changed in a single commit that cites the new SHA.
 | ---- | ------ | --- | ----------- |
 | `microsoft/BitNet` | `main` | `01eb415772c342d9f20dc42772f1583ae1e5b102` | 2026-05-24 |
 | `Eddie-Wang1120/llama.cpp` (submodule `3rdparty/llama.cpp`) | _detached_ | `1f86f058de0c3f4098dedae2ae8653c335c868a1` | 2026-05-24 |
+| `ggml-org/llama.cpp` | `master` | `704485942ab54bbbbf1f241b3550ffba35f5f37e` | 2026-08-11 |
 
 Reproduce:
 
@@ -37,6 +38,23 @@ Both SHAs above should match exactly.
 | SHA256 | `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162` |
 | Verified | 2026-05-23 via `shasum -a 256` |
 
+Classic Llama F16 is checked against `shibatch/stories-converted` revision
+`4724c9612ac3278f58aa2dbd4d79457e2672247d`:
+
+| File | Size | SHA256 |
+| ---- | ---: | ------ |
+| `stories260K.F16.gguf` | 601,248 bytes | `57a81ed1c8b032ba29319eae80c3e568dbb5a16ce665a09da1a0efe2e4eb69e3` |
+| `stories15M.F16.gguf` | 49,550,112 bytes | `35111216f325b8feb5b895095cfc7df1b6652368cb4893e9004a25825f517f54` |
+
+The practical instruct gate pins `second-state/SmolLM-135M-Instruct-GGUF`
+revision `24b2243231d5a7b55cbd3f35a99ce2eda85c0310`:
+
+| File | Size | SHA256 |
+| ---- | ---: | ------ |
+| `SmolLM-135M-Instruct-f16.gguf` | 270,885,792 bytes | `1fc02c21fba7874b15955d21dc59182aeae382abea412419ffd2fbaa84861790` |
+| `SmolLM-135M-Instruct-Q4_0.gguf` | 91,726,752 bytes | `a637fd6dcfd1b1333779ce2db780996cf4ed2a64aa0f9f6be0bb46689eb232a1` |
+| `SmolLM-135M-Instruct-Q8_0.gguf` | 144,810,912 bytes | `76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8795ef4d23c23c1f0` |
+
 ## ggml_type enum — source of truth
 
 File: `3rdparty/llama.cpp/ggml/include/ggml.h` (lines 357..396 at the pinned
@@ -46,6 +64,8 @@ submodule SHA).
 | ------ | ----: | ----------- |
 | `GGML_TYPE_F32`  | `0`  | ggml.h:357 |
 | `GGML_TYPE_F16`  | `1`  | ggml.h:358 |
+| `GGML_TYPE_Q4_0` | `2`  | ggml.h:359 |
+| `GGML_TYPE_Q8_0` | `8`  | ggml.h:365 |
 | `GGML_TYPE_Q6_K` | `14` | ggml.h:371 |
 | `GGML_TYPE_I2_S` | `36` | ggml.h:393 |
 | `GGML_TYPE_I8_S` | `37` | ggml.h:394 |

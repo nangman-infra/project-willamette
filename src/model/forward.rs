@@ -20,7 +20,7 @@
 //! is Stage 5-B / 5-C.
 
 use crate::error::WillametteError;
-use crate::model::block::transformer_block_forward_position_zero;
+use crate::model::block::transformer_block_forward_position_zero_variant;
 use crate::model::graph::ModelGraph;
 use crate::model::primitives::{embedding_gather, rms_norm_f32};
 
@@ -37,7 +37,13 @@ pub fn forward_single_token_position_zero(
 
     let mut hidden_b = vec![0.0_f32; n_embd];
     for layer in &graph.layers {
-        transformer_block_forward_position_zero(&hidden_a, layer, &graph.config, &mut hidden_b)?;
+        transformer_block_forward_position_zero_variant(
+            &hidden_a,
+            layer,
+            &graph.config,
+            graph.forward_variant,
+            &mut hidden_b,
+        )?;
         std::mem::swap(&mut hidden_a, &mut hidden_b);
         // Defensive: if any layer produced non-finite values we want to
         // fail loudly at the boundary, not 29 layers later.

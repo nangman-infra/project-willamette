@@ -22,10 +22,11 @@
 //! instead of the single position-0 pair.
 
 use crate::error::WillametteError;
+use crate::model::architecture::ForwardVariant;
 use crate::model::attention::{apply_rope_multi_head, softmax_inplace};
-use crate::model::bitlinear::bitlinear_i2s_matvec_f32;
-use crate::model::ffn::{elementwise_mul, relu_square};
+use crate::model::ffn::{elementwise_mul, relu_square, silu};
 use crate::model::graph::ModelGraph;
+use crate::model::linear::linear_matvec_f32;
 use crate::model::primitives::{
     attention_scale, embedding_gather, kv_head_for_q_head, rms_norm_f32, AttentionShape, RopeType,
 };
@@ -87,9 +88,7 @@ pub fn multi_token_forward(
     for layer in &graph.layers {
         // Stage 10-A: norm weights are pre-decoded in ModelGraph.
         let attn_norm_w = &layer.attn_norm_f32;
-        let attn_sub_norm_w = &layer.attn_sub_norm_f32;
         let ffn_norm_w = &layer.ffn_norm_f32;
-        let ffn_sub_norm_w = &layer.ffn_sub_norm_f32;
 
         // ── attention half ──
         // x_norm per token.
@@ -108,9 +107,9 @@ pub fn multi_token_forward(
             let mut q = vec![0.0_f32; n_embd];
             let mut k = vec![0.0_f32; kv_dim];
             let mut v = vec![0.0_f32; kv_dim];
-            bitlinear_i2s_matvec_f32(layer.attn_q, &x_norms[t], &mut q)?;
-            bitlinear_i2s_matvec_f32(layer.attn_k, &x_norms[t], &mut k)?;
-            bitlinear_i2s_matvec_f32(layer.attn_v, &x_norms[t], &mut v)?;
+            linear_matvec_f32(layer.attn_q, &x_norms[t], &mut q)?;
+            linear_matvec_f32(layer.attn_k, &x_norms[t], &mut k)?;
+            linear_matvec_f32(layer.attn_v, &x_norms[t], &mut v)?;
             apply_rope_multi_head(
                 &mut q,
                 cfg.head_count,
@@ -118,7 +117,7 @@ pub fn multi_token_forward(
                 n_rot,
                 t as u32,
                 freq_base,
-                RopeType::Neox,
+                rope_type(graph.forward_variant),
             )?;
             apply_rope_multi_head(
                 &mut k,
@@ -127,7 +126,7 @@ pub fn multi_token_forward(
                 n_rot,
                 t as u32,
                 freq_base,
-                RopeType::Neox,
+                rope_type(graph.forward_variant),
             )?;
             qs.push(q);
             ks.push(k);
@@ -165,9 +164,20 @@ pub fn multi_token_forward(
         // attn_sub_norm + Wo + residual #1 (in place on hidden[t]).
         for t in 0..m {
             let mut sub_normed = vec![0.0_f32; n_embd];
-            rms_norm_f32(&attn_outs[t], attn_sub_norm_w, eps, &mut sub_normed)?;
+            let projection_input = match graph.forward_variant {
+                ForwardVariant::BitNetSubNorm => {
+                    let weights = layer.attn_sub_norm_f32.as_deref().ok_or_else(|| {
+                        WillametteError::GgufParse(
+                            "BitNet layer is missing attn_sub_norm".to_string(),
+                        )
+                    })?;
+                    rms_norm_f32(&attn_outs[t], weights, eps, &mut sub_normed)?;
+                    &sub_normed
+                }
+                ForwardVariant::VanillaLlama => &attn_outs[t],
+            };
             let mut wo_out = vec![0.0_f32; n_embd];
-            bitlinear_i2s_matvec_f32(layer.attn_output, &sub_normed, &mut wo_out)?;
+            linear_matvec_f32(layer.attn_output, projection_input, &mut wo_out)?;
             for d in 0..n_embd {
                 hidden[t][d] += wo_out[d];
             }
@@ -189,15 +199,29 @@ pub fn multi_token_forward(
 
             let mut gate = vec![0.0_f32; n_ff];
             let mut up = vec![0.0_f32; n_ff];
-            bitlinear_i2s_matvec_f32(layer.ffn_gate, &x_norm, &mut gate)?;
-            bitlinear_i2s_matvec_f32(layer.ffn_up, &x_norm, &mut up)?;
-            relu_square(&mut gate);
+            linear_matvec_f32(layer.ffn_gate, &x_norm, &mut gate)?;
+            linear_matvec_f32(layer.ffn_up, &x_norm, &mut up)?;
+            match graph.forward_variant {
+                ForwardVariant::BitNetSubNorm => relu_square(&mut gate),
+                ForwardVariant::VanillaLlama => silu(&mut gate),
+            }
             let mut fused = vec![0.0_f32; n_ff];
             elementwise_mul(&gate, &up, &mut fused)?;
             let mut fused_norm = vec![0.0_f32; n_ff];
-            rms_norm_f32(&fused, ffn_sub_norm_w, eps, &mut fused_norm)?;
+            let down_input = match graph.forward_variant {
+                ForwardVariant::BitNetSubNorm => {
+                    let weights = layer.ffn_sub_norm_f32.as_deref().ok_or_else(|| {
+                        WillametteError::GgufParse(
+                            "BitNet layer is missing ffn_sub_norm".to_string(),
+                        )
+                    })?;
+                    rms_norm_f32(&fused, weights, eps, &mut fused_norm)?;
+                    &fused_norm
+                }
+                ForwardVariant::VanillaLlama => &fused,
+            };
             let mut down = vec![0.0_f32; n_embd];
-            bitlinear_i2s_matvec_f32(layer.ffn_down, &fused_norm, &mut down)?;
+            linear_matvec_f32(layer.ffn_down, down_input, &mut down)?;
             for d in 0..n_embd {
                 hidden[t][d] += down[d];
             }
@@ -218,4 +242,11 @@ pub fn multi_token_forward(
     let mut final_hidden = vec![0.0_f32; n_embd];
     rms_norm_f32(&hidden[m - 1], on_w, eps, &mut final_hidden)?;
     Ok(final_hidden)
+}
+
+fn rope_type(variant: ForwardVariant) -> RopeType {
+    match variant {
+        ForwardVariant::BitNetSubNorm => RopeType::Neox,
+        ForwardVariant::VanillaLlama => RopeType::Norm,
+    }
 }

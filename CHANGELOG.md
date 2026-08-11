@@ -12,18 +12,48 @@ rather than a stabilised library.
 | ------ | ----- |
 | Bug fix (same intent, corrected result) | `patch` |
 | Public CLI / API addition (new subcommand, new public function) | `minor` |
-| Public CLI / API change or removal (breaking) | `major` |
+| Public CLI / API change or removal while pre-1.0 (breaking) | `minor` |
+| Public CLI / API change or removal after 1.0 (breaking) | `major` |
 | Internal-only (CI, refactor, docs, clippy cleanup) | _no bump; only `[Unreleased]` notes_ |
 | Model compatibility breakage (new ggml_type required, new tokenizer pre mandatory) | `major` or `minor`, sized by user impact |
 
-The `-mvp` suffix is kept while iterating in `v0.1.x` and `v0.2.x`.
-It will be dropped on the first release we feel comfortable advertising
-as a stable library — at which point the next tag becomes `v0.3.0`
-(or `v1.0.0` if there is also a public API guarantee).
+The `-mvp` suffix is kept while the crate remains pre-1.0 without a stable
+public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+## [v0.11.0-mvp] — 2026-08-12
+
+Classic Llama and SmolLM compatibility release. This release adds the narrow
+F16/Q4_0/Q8_0 Llama runtime, source-pinned tokenizer and generation parity,
+low-memory multi-host validation, and a generic GGUF artifact-linker seam.
+
 ### Changed
+
+* Added the first non-BitNet vertical slice: classic Llama/Llama-2 F16 GGUFs
+  now load and run through normal RoPE, GQA/MHA attention, SiLU/SwiGLU, F16
+  Linear, separate or tied lm-heads, and `llama` SentencePiece BPE. Pinned 260K
+  and 15M TinyStories prompt and greedy token IDs match llama.cpp exactly.
+* Added the `smollm` GPT-2 pre-tokenizer, including individual-digit splitting
+  and its intentionally incomplete byte vocabulary. The pinned
+  SmolLM-135M-Instruct F16 tokenizer and greedy arithmetic output match
+  llama.cpp exactly.
+* Added the classic Llama Q8_0 vertical slice: strict row-local GGUF layout
+  validation plus scalar embedding, Linear, and lm-head kernels. The pinned
+  SmolLM-135M-Instruct Q8_0 arithmetic golden matches llama.cpp; its 10-token
+  sky completion is identical to F16 on Apple M4, HP ProBook 430 G6, mbp2012,
+  and antix1 while the artifact and measured peak RSS are about half the F16
+  size.
+* Added the classic Llama Q4_0 vertical slice with strict 32-element/18-byte
+  row validation, GGML half-block nibble ordering, and scalar embedding,
+  Linear, and lm-head consumers. The pinned mixed Q4_0/Q8_0 SmolLM artifact
+  matches llama.cpp on the arithmetic golden and runs on all four validation
+  hosts, but fails the bounded quality gate and is not the recommended default.
+* Completed Phase III architecture steps 3-4: registered architectures now
+  declare their per-layer `LayerTensorRole` set and `ForwardVariant`.
+  `ModelGraph` builds its layer directory from that contract instead of a
+  fixed tensor-name list; BitNet sub-norm behavior is unchanged, while future
+  variants fail with `NotImplemented` before any forward computation.
 
 * `willamette-prep` now plans and relocates every GGUF tensor through a generic
   artifact linker before applying the `embedding-q6-k` profile. The transformed
@@ -53,8 +83,31 @@ as a stable library — at which point the next tag becomes `v0.3.0`
 * `KVCache::read_into` retains scratch lengths and overwrites them directly,
   avoiding a full zero-fill before dequantisation on every layer.
 
+### Compatibility
+
+* Phase III changes the public `LayerWeights` sub-norm fields to `Option` and
+  extends the public `ModelArchitecture` trait. This is a deliberate 0.x API
+  break carried by the v0.11.0 minor release.
+
 ### Measured
 
+* The pinned 260K Llama F16 acceptance model produced tokenizer IDs
+  `[1, 385, 328]` and greedy IDs `[432, 261, 376, 298, 315]` on the antix1
+  i686/Pentium-M host, matching llama.cpp and the Apple Silicon run exactly.
+* The pinned 15M Llama F16 model reaches about 6.4 steady-state tok/s on
+  antix1. A 50-token run completed in 8.25 seconds with 40,220 kB `/proc`
+  VmHWM, 95% CPU, zero major page faults, and zero process swap; its first ten
+  IDs match the llama.cpp golden exactly.
+* SmolLM-135M-Instruct F16 reaches about 0.765 steady-state tok/s on antix1.
+  Actual `/proc` peak RSS is 281,324 kB (274.7 MiB), split into 14,184 kB
+  anonymous and 267,140 kB file-backed RSS, with zero process swap. It answers
+  `2 + 2` with `4` and identifies Paris as the capital of France on-device.
+* On the first 1,024 WikiText-2 raw test transitions, SmolLM Q8_0 perplexity is
+  13.489455 versus F16 13.440679, a 0.3629% regression.
+* SmolLM Q4_0 reaches 50.0 / 15.5 / 9.09 / 0.873 tok/s on Apple M4, HP
+  ProBook, mbp2012, and antix1 respectively, but is slower than Q8_0 on each
+  host. Its 1,024-transition perplexity is 16.031291, a 19.274% regression
+  versus F16, so the extra memory reduction does not pass the quality gate.
 * The Q6_K artifact improves complete steady-state throughput from 0.08 to
   0.16 tok/s on antix1 and from 1.29 to 1.45 tok/s on mbp2012. The four
   Stage 5-E five-token greedy outputs remain byte-identical to F16.

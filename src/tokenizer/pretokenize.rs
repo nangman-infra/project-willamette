@@ -37,7 +37,15 @@ use std::sync::OnceLock;
 
 static GPT2_RE_PUNCT: OnceLock<Regex> = OnceLock::new();
 static GPT2_RE_MAIN: OnceLock<Regex> = OnceLock::new();
+static SMOLLM_RE_MAIN: OnceLock<Regex> = OnceLock::new();
 static GPT2_RE_DIGITS: OnceLock<Regex> = OnceLock::new();
+static SMOLLM_RE_DIGIT: OnceLock<Regex> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Gpt2PreTokenizer {
+    Default,
+    SmolLm,
+}
 
 fn re_punct() -> &'static Regex {
     GPT2_RE_PUNCT.get_or_init(|| {
@@ -52,8 +60,22 @@ fn re_main() -> &'static Regex {
     })
 }
 
+fn re_smollm_main() -> &'static Regex {
+    SMOLLM_RE_MAIN.get_or_init(|| {
+        // Omitting `\s+(?!\S)` is intentional. Trailing whitespace is emitted
+        // as the unmatched gap, while internal runs leave their final space
+        // available to the optional-space word branch.
+        Regex::new(r#"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+"#)
+            .expect("SmolLM main regex must compile")
+    })
+}
+
 fn re_digits() -> &'static Regex {
     GPT2_RE_DIGITS.get_or_init(|| Regex::new(r#"\p{N}+"#).expect("DEFAULT regex 3 must compile"))
+}
+
+fn re_individual_digit() -> &'static Regex {
+    SMOLLM_RE_DIGIT.get_or_init(|| Regex::new(r#"\p{N}"#).expect("SmolLM digit regex must compile"))
 }
 
 /// Split one chunk by a single regex into a vector of substring
@@ -141,6 +163,96 @@ pub(super) fn gpt2_pretokenize(text: &str) -> Vec<&str> {
     step3
 }
 
+/// SmolLM applies `\p{N}` before the GPT-2 main expression, making every
+/// decimal digit its own pre-token. Source: `LLAMA_VOCAB_PRE_TYPE_SMOLLM` in
+/// pinned llama.cpp `704485942ab54bbbbf1f241b3550ffba35f5f37e`.
+fn smollm_pretokenize(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut digits_extracted = Vec::new();
+    let mut last = 0;
+    for matched in re_individual_digit().find_iter(text) {
+        if matched.start() > last {
+            digits_extracted.push((false, &text[last..matched.start()]));
+        }
+        digits_extracted.push((true, matched.as_str()));
+        last = matched.end();
+    }
+    if last < text.len() {
+        digits_extracted.push((false, &text[last..]));
+    }
+
+    let mut output = Vec::new();
+    for (matched, chunk) in digits_extracted {
+        if matched {
+            output.push(chunk);
+        } else {
+            output.extend(smollm_split_main(chunk));
+        }
+    }
+    output
+}
+
+fn smollm_split_main(chunk: &str) -> Vec<&str> {
+    let mut output = Vec::new();
+    let mut last = 0;
+    for matched in re_smollm_main().find_iter(chunk) {
+        if matched.start() > last {
+            split_internal_whitespace(
+                &chunk[last..matched.start()],
+                matched.as_str().starts_with(' '),
+                &mut output,
+            );
+        }
+        output.push(matched.as_str());
+        last = matched.end();
+    }
+    if last < chunk.len() {
+        // This corresponds to llama.cpp's trailing `\s+(?!\S)` branch.
+        output.push(&chunk[last..]);
+    }
+    output
+}
+
+fn split_internal_whitespace<'a>(
+    gap: &'a str,
+    next_match_has_space: bool,
+    output: &mut Vec<&'a str>,
+) {
+    if !gap.chars().all(char::is_whitespace) {
+        output.push(gap);
+        return;
+    }
+    if next_match_has_space {
+        output.push(gap);
+        return;
+    }
+    let mut index = 0;
+    while index < gap.len() {
+        if gap.as_bytes()[index] == b' ' {
+            let start = index;
+            let current = gap[index..].chars().next().unwrap();
+            index += current.len_utf8();
+            while index < gap.len() && gap[index..].starts_with(current) {
+                index += current.len_utf8();
+            }
+            output.push(&gap[start..index]);
+        } else {
+            let width = gap[index..].chars().next().unwrap().len_utf8();
+            output.push(&gap[index..index + width]);
+            index += width;
+        }
+    }
+}
+
+pub(super) fn pretokenize(text: &str, kind: Gpt2PreTokenizer) -> Vec<&str> {
+    match kind {
+        Gpt2PreTokenizer::Default => gpt2_pretokenize(text),
+        Gpt2PreTokenizer::SmolLm => smollm_pretokenize(text),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +303,24 @@ mod tests {
         // Expected: ["1", " ", "+", " ", "1", " ", "="].
         let parts = gpt2_pretokenize("1 + 1 =");
         assert_eq!(parts, vec!["1", " ", "+", " ", "1", " ", "="]);
+    }
+
+    #[test]
+    fn smollm_splits_digits_individually() {
+        let parts = smollm_pretokenize("84 cats");
+        assert_eq!(parts, ["8", "4", " cats"]);
+        assert_eq!(parts.concat(), "84 cats");
+    }
+
+    #[test]
+    fn smollm_preserves_internal_space_for_the_following_word() {
+        assert_eq!(smollm_pretokenize("a  b"), ["a", " ", " b"]);
+        assert_eq!(smollm_pretokenize("a   b"), ["a", "  ", " b"]);
+        assert_eq!(smollm_pretokenize("a  "), ["a", "  "]);
+        assert_eq!(smollm_pretokenize("a\t\tb"), ["a", "\t", "\t", "b"]);
+        assert_eq!(smollm_pretokenize("a\n\nb"), ["a", "\n", "\n", "b"]);
+        assert_eq!(smollm_pretokenize("a \tb"), ["a", " ", "\t", "b"]);
+        assert_eq!(smollm_pretokenize("a \t\t b"), ["a", " \t\t", " b"]);
+        assert_eq!(smollm_pretokenize("a\n\t\n b"), ["a", "\n\t\n", " b"]);
     }
 }

@@ -1,18 +1,20 @@
-# Limitations — Project Willamette v0.10.0-mvp
+# Limitations — Project Willamette v0.11.0-mvp
 
-*Last revised 2026-08-11 (artifact-linker foundation).*
+*Last revised 2026-08-12 (classic Llama F16/Q4_0/Q8_0 vertical slice).*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
 
 ## 1. Scope
 
-Project Willamette is a **BitNet-specific runtime**, not a general
-GGUF / LLM inference framework. It targets exactly:
+Project Willamette is not a general GGUF / LLM inference framework. It targets
+three narrow, source-pinned model surfaces:
 
 | Model | Quant | Tokenizer |
 | ----- | ----- | --------- |
 | `microsoft/BitNet-b1.58-2B-4T` (GGUF distribution `microsoft/bitnet-b1.58-2B-4T-gguf`) | `I2_S` (raw ggml_type = 36) | `gpt2` byte-level BPE with `LLAMA_VOCAB_PRE_TYPE_DEFAULT` pre-tokeniser |
+| Classic Llama/Llama-2 (`shibatch/stories-converted` acceptance artifacts) | F16 transformer, embedding, and lm-head weights; F32 RMSNorm | `llama` SentencePiece BPE with byte fallback |
+| `SmolLM-135M-Instruct` acceptance artifacts | F16, Q4_0, or Q8_0 transformer linears; F16/Q4_0/Q8_0 embedding and tied lm-head; F32 RMSNorm | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_SMOLLM` |
 
 Anything outside this combination returns a typed error
 (`UnsupportedArchitecture`, `UnsupportedTensorType`,
@@ -20,7 +22,7 @@ Anything outside this combination returns a typed error
 
 ### Not supported
 
-* **Architectures outside the BitNet family.** Willamette accepts the
+* **Architectures outside the BitNet family and classic Llama subset.** Willamette accepts the
   BitNet family (`bitnet-b1.58`, `bitnet-25`, `bitnet`) through the
   `ModelArchitecture` registry (see `src/model/architecture/`).
   `bitnet-25` was end-to-end verified on antix1 against
@@ -30,20 +32,34 @@ Anything outside this combination returns a typed error
   The bare `bitnet` string (paper-era 24/26-layer variants) is
   accepted on the assumption that its metadata prefix matches the
   arch string — that branch will be confirmed the first time such a
-  GGUF is in hand. Llama / Mistral / Phi / Gemma remain rejected;
-  the design path for them is
+  GGUF is in hand. Architecture implementations now own their layer
+  tensor roles and forward variant. Classic `general.architecture = "llama"`
+  runs only with F16, Q4_0, or Q8_0 linears, standard unscaled full-head RoPE, RMSNorm,
+  SiLU/SwiGLU, and no biases. Llama 3 scaling/tokenizer variants, Mistral,
+  Phi, and Gemma remain rejected; the design path is
   [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md)
   § 5.4 (Phase III-B).
-* **Other BitLinear quantisations.** The GGUF reader labels implemented layouts
+* **Other BitLinear and standard quantisations.** The GGUF reader labels layouts
   such as F32, F16, Q4_0, Q4_K, Q8_0, and Q6_K, but rejects types whose byte
   layout is not implemented instead of guessing their tensor boundaries. The
   BitLinear matvec refuses to operate on anything except `BitNetI2S`. The tied
   embedding and lm-head additionally support standard Q6_K; this is not a
-  general Q6_K matrix-multiplication kernel.
-* **Other tokenizer models.** `tokenizer.ggml.model = "llama"` (i.e.
-  SentencePiece-Unigram) is rejected. The tokenizer factory in
-  `src/tokenizer/mod.rs` returns `UnsupportedTokenizer` for any model
-  type other than `"gpt2"`.
+  general Q6_K matrix-multiplication kernel. Q8_0 matvec, embedding gather, and
+  lm-head are scalar and accepted only through the implemented classic Llama
+  graph surface. Q4_0 has the same scalar consumers; Q4_K/Q5 families and
+  Q4_0/Q8_0 SIMD kernels remain unsupported.
+* **Other tokenizer models.** `gpt2` byte BPE supports the default and `smollm`
+  pre-tokenizers; classic `llama` SentencePiece BPE is also supported. Unigram,
+  WordPiece, and other architecture-specific BPE normalizers remain rejected.
+  SmolLM's published vocabulary intentionally omits a source-pinned set of
+  control and rare byte symbols, so unlike the BitNet/default GPT-2 vocabulary
+  it does not promise arbitrary Unicode byte-level roundtrips; ordinary English
+  instruction prompts are covered.
+* **Llama chat/TUI and BitNet tooling.** Llama F16/Q4_0/Q8_0 is enabled for `run`,
+  `tokenize`, `logits`, and `perplexity`. `chat`, `tui`, `bench`, and `analyze`
+  remain explicitly BitNet-only until their prompt/template and reporting
+  surfaces are generalized. SmolLM works through plain completion prompts such
+  as `Question: ... Answer:`; its metadata ChatML template is not rendered.
 * **Other pre-tokeniser hints.** If a future GGUF arrives with
   `tokenizer.ggml.pre = "llama-bpe"` (instead of the missing-key
   default our reference file has), the LLaMA 3 regex set in
@@ -70,6 +86,8 @@ the scaling curve, not at the exact numbers.
 | Apple Silicon with FEAT_I8MM / SME / SME2 | hardware present on M4; intrinsics not in stable Rust → unused. |
 | Multi-threading | `rayon` per-row BitLinear matvec parallelism (Stage 10-C). 1-thread and 4-thread transformer-forward runs on mbp2012 remain within noise because that path is memory-bandwidth bound. The tied F16 lm-head is different: parallel vocabulary rows measured 838 ms → 446 ms and improved complete steady-state throughput 0.86 → 1.29 tok/s on mbp2012. antix1 remains single-core. See `docs/BENCHMARKS.md` 2026-08-09. |
 | **Q6_K tied embedding** | Supported by scalar gather, the `embedding-q6-k` artifact-linker profile, and runtime SSE2 lm-head dot products on x86/i686. The linker can relocate a transformed tensor from any physical slot and recomputes alignment, but this remains the only production transform profile. The 0.745 GiB artifact plus SSE2 reaches 0.24 tok/s on antix1 and 2.31 tok/s on mbp2012. A 1,024-transition WikiText-2 prefix measured 14.273354 perplexity versus F16 14.266282 (+0.0496%); same-host scalar/SSE2 output matches on the reference prompts. |
+| **Llama Q8_0 scalar path** | Row-local 32-element/34-byte block validation, embedding gather, transformer matvec, and tied/separate lm-head projection are implemented. SmolLM-135M Q8_0 is 46.5% smaller than F16, measured 1.35x to 3.05x faster across the four validation hosts, and regressed perplexity by 0.363% on one 1,024-transition WikiText-2 prefix. No Q8_0 SIMD kernel or broader quality evaluation exists yet. |
+| **Llama Q4_0 scalar path** | Row-local 32-element/18-byte validation and scalar embedding/matvec/lm-head consumers are implemented. The pinned mixed Q4_0/Q8_0 SmolLM artifact is 66.1% smaller than F16 and uses 103.9 MiB RSS on antix1. It is slower than Q8_0 on all four hosts and regresses bounded perplexity by 19.27%, so it is a low-memory option rather than the recommended default. |
 | bitnet.cpp same-machine comparison on sub-AVX2 hosts | bitnet.cpp's x86 production CPU path (both the default `ggml-bitnet-mad` scalar fallback and the `BITNET_X86_TL2` LUT path) **effectively assumes AVX2**. On Ivy Bridge (no AVX2): the default build crashes with `SIGILL`, the `GGML_AVX2=OFF` build emits garbage (`!!!!!`), and the LUT build fails to compile. Willamette's hand-written SSE2 i8 kernel produces byte-identical Stage 5-E output on the same machine — see `docs/BENCHMARKS.md` 2026-05-30 § "bitnet.cpp head-to-head". The reference comparison in `docs/REFERENCE_COMPATIBILITY.md` therefore stays on AVX2-capable hosts. |
 | GPU (CUDA / Metal / Vulkan / ROCm) | not implemented (out of scope by thesis). |
 | Batched / multi-token-per-step decoding | the multi-token path exists for prompt prefill, but per-step decode is single-token. |
@@ -117,7 +135,7 @@ happen" guards:
 * `UnsupportedArchitecture("xxx")` — `general.architecture` is not
   claimed by any impl in the
   [`crate::model::architecture::registry`] (today: the BitNet
-  family — `bitnet-b1.58`, `bitnet-25`, `bitnet`).
+  family — `bitnet-b1.58`, `bitnet-25`, `bitnet` — and `llama`).
 * `UnsupportedTensorType(N)` — any tensor whose raw `u32` ggml_type is
   not one of the small set we recognise. If that number is genuinely a new
   BitNet type, upgrade
@@ -144,8 +162,8 @@ happen" guards:
 
 ## 6. What the project IS aimed at
 
-* A small (~3000 LoC), source-pinned, auditable Rust runtime for one
-  specific BitNet 1.58-bit GGUF file.
+* A small, source-pinned, auditable Rust runtime for BitNet I2_S and a narrow
+  classic Llama F16/Q4_0/Q8_0 subset.
 * A reproducible reference against which other implementations can
   diff their I2_S BitLinear semantics.
 * An honest baseline for further BitNet-on-CPU work (Stage 8 x86,

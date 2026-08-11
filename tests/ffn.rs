@@ -36,7 +36,7 @@ fn ffn_block_forward_produces_n_embd_finite_output() {
         embedding_gather_f16(g.token_embd, 15339, &mut x).unwrap();
 
         let fn_w = f32_tensor_to_vec(g.layers[0].ffn_norm).unwrap();
-        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm).unwrap();
+        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm.unwrap()).unwrap();
 
         let mut out = vec![0.0_f32; n_embd];
         ffn_block_forward(
@@ -73,7 +73,7 @@ fn ffn_block_forward_is_deterministic() {
         let mut x = vec![0.0_f32; n_embd];
         embedding_gather_f16(g.token_embd, 15339, &mut x).unwrap();
         let fn_w = f32_tensor_to_vec(g.layers[0].ffn_norm).unwrap();
-        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm).unwrap();
+        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm.unwrap()).unwrap();
         let mut a = vec![0.0_f32; n_embd];
         let mut b = vec![0.0_f32; n_embd];
         for out in [&mut a, &mut b] {
@@ -101,7 +101,7 @@ fn ffn_zero_input_yields_zero_output() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
         let fn_w = f32_tensor_to_vec(g.layers[0].ffn_norm).unwrap();
-        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm).unwrap();
+        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm.unwrap()).unwrap();
         let x = vec![0.0_f32; n_embd];
         let mut out = vec![1.0_f32; n_embd]; // sentinel
         ffn_block_forward(
@@ -127,7 +127,7 @@ fn ffn_different_tokens_produce_different_outputs() {
     with_real_graph(|g| {
         let n_embd = g.config.embedding_length as usize;
         let fn_w = f32_tensor_to_vec(g.layers[0].ffn_norm).unwrap();
-        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm).unwrap();
+        let fsn_w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm.unwrap()).unwrap();
         let mut xa = vec![0.0_f32; n_embd];
         let mut xb = vec![0.0_f32; n_embd];
         embedding_gather_f16(g.token_embd, 15339, &mut xa).unwrap();

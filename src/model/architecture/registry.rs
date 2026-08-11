@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use super::{BitNetArchitecture, ModelArchitecture};
+use super::{BitNetArchitecture, LlamaArchitecture, ModelArchitecture};
 
 /// All architectures the runtime can read GGUFs for. One entry per
 /// *family* (same forward graph). The slice is `'static` once
@@ -15,7 +15,8 @@ use super::{BitNetArchitecture, ModelArchitecture};
 fn registry() -> &'static [Box<dyn ModelArchitecture>] {
     static REGISTRY: OnceLock<Vec<Box<dyn ModelArchitecture>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let v: Vec<Box<dyn ModelArchitecture>> = vec![Box::new(BitNetArchitecture)];
+        let v: Vec<Box<dyn ModelArchitecture>> =
+            vec![Box::new(BitNetArchitecture), Box::new(LlamaArchitecture)];
         v
     })
 }

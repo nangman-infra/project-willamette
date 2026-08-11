@@ -73,24 +73,23 @@ fn missing_tokenizer_model_key_rejected() {
 }
 
 #[test]
-fn non_gpt2_tokenizer_model_rejected() {
-    // tokenizer.ggml.model = "llama" (SentencePiece — out of Stage 2 scope)
-    let buf = build_synthetic_gguf_strings(&[("tokenizer.ggml.model", "llama")]);
+fn unsupported_tokenizer_model_rejected() {
+    let buf = build_synthetic_gguf_strings(&[("tokenizer.ggml.model", "bert")]);
     let gguf = GgufFile::parse(&buf).expect("synthetic GGUF should parse");
     let result = Tokenizer::from_gguf_metadata(&gguf.metadata);
     match result {
         Err(WillametteError::UnsupportedTokenizer(msg)) => {
             assert!(
-                msg.contains("gpt2") || msg.contains("llama"),
+                msg.contains("bert"),
                 "error message should explain the rejection, got: {}",
                 msg
             );
         }
         Err(other) => panic!(
-            "expected UnsupportedTokenizer for non-gpt2, got different error: {}",
+            "expected UnsupportedTokenizer for unsupported model, got different error: {}",
             other
         ),
-        Ok(_) => panic!("expected UnsupportedTokenizer for non-gpt2, got Ok(_)"),
+        Ok(_) => panic!("expected UnsupportedTokenizer for unsupported model, got Ok(_)"),
     }
 }
 
@@ -114,6 +113,108 @@ fn gpt2_without_tokens_rejected() {
         ),
         Ok(_) => panic!("expected UnsupportedTokenizer for missing tokens, got Ok(_)"),
     }
+}
+
+#[test]
+fn smollm_allows_its_intentionally_incomplete_byte_vocab() {
+    let byte_unicode = gpt2_byte_unicode_vocab();
+    let continuation_token = byte_unicode[0x80].clone();
+    let tokens = byte_unicode
+        .into_iter()
+        .enumerate()
+        .filter(|(byte, _)| {
+            !matches!(
+                *byte,
+                0x04 | 0x06 | 0x13 | 0x14 | 0x16 | 0x1d | 0xc0 | 0xc1 | 0xf1 | 0xf2 | 0xf5..=0xff
+            )
+        })
+        .map(|(_, token)| GgufValue::Str(token))
+        .collect::<Vec<_>>();
+    let metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.pre".to_string(),
+            GgufValue::Str("smollm".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(tokens),
+        ),
+        (
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(Vec::new()),
+        ),
+    ]);
+    let tokenizer = Tokenizer::from_gguf_metadata(&metadata).expect("SmolLM tokenizer");
+    let encoded = tokenizer
+        .encode("84", EncodeOptions::none())
+        .expect("encode digits");
+    assert_eq!(
+        encoded,
+        [
+            tokenizer.token_id("8").unwrap(),
+            tokenizer.token_id("4").unwrap()
+        ]
+    );
+    let continuation_id = tokenizer.token_id(&continuation_token).unwrap();
+    assert_eq!(
+        tokenizer
+            .encode("\u{40000}", EncodeOptions::none())
+            .expect("skip missing F1 lead byte"),
+        [continuation_id; 3]
+    );
+    assert!(tokenizer
+        .encode("\u{0004}", EncodeOptions::none())
+        .expect("skip pinned missing control byte")
+        .is_empty());
+}
+
+#[test]
+fn gpt2_special_text_parts_preserve_bpe_boundaries() {
+    let mut tokens = gpt2_byte_unicode_vocab();
+    tokens.push("ab".to_string());
+    let metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(tokens.into_iter().map(GgufValue::Str).collect()),
+        ),
+        (
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(vec![GgufValue::Str("a b".to_string())]),
+        ),
+    ]);
+    let tokenizer = Tokenizer::from_gguf_metadata(&metadata).expect("GPT-2 tokenizer");
+    assert_eq!(
+        tokenizer.encode("ab", EncodeOptions::none()).unwrap(),
+        [256]
+    );
+    assert_eq!(
+        tokenizer
+            .encode_with_specials(&[PromptPart::Text("a"), PromptPart::Text("b")])
+            .unwrap(),
+        [b'a' as u32, b'b' as u32]
+    );
+}
+
+#[test]
+fn malformed_add_special_flags_are_rejected() {
+    let mut metadata = sentencepiece_metadata(None);
+    metadata.insert(
+        "tokenizer.ggml.add_bos_token".to_string(),
+        GgufValue::Str("true".to_string()),
+    );
+    assert!(matches!(
+        Tokenizer::from_gguf_metadata(&metadata),
+        Err(WillametteError::UnsupportedTokenizer(message))
+            if message.contains("add_bos_token") && message.contains("not a boolean")
+    ));
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -155,6 +256,60 @@ fn write_kv_string_array(buf: &mut Vec<u8>, key: &str, values: &[String]) {
     for v in values {
         write_gguf_string(buf, v);
     }
+}
+
+fn sentencepiece_metadata(add_space_prefix: Option<bool>) -> HashMap<String, GgufValue> {
+    let mut tokens = vec![
+        "<unk>".to_string(),
+        "<s>".to_string(),
+        "▁".to_string(),
+        "h".to_string(),
+        "i".to_string(),
+        "▁h".to_string(),
+        "▁hi".to_string(),
+    ];
+    let mut types = vec![2, 3, 1, 1, 1, 1, 4];
+    for byte in 0u8..=255 {
+        tokens.push(format!("<0x{byte:02X}>"));
+        types.push(6);
+    }
+    let mut metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("llama".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(tokens.into_iter().map(GgufValue::Str).collect()),
+        ),
+        (
+            "tokenizer.ggml.scores".to_string(),
+            GgufValue::Array(
+                (0..types.len())
+                    .map(|index| GgufValue::Float32(index as f32))
+                    .collect(),
+            ),
+        ),
+        (
+            "tokenizer.ggml.token_type".to_string(),
+            GgufValue::Array(types.into_iter().map(GgufValue::Uint32).collect()),
+        ),
+        (
+            "tokenizer.ggml.unknown_token_id".to_string(),
+            GgufValue::Uint32(0),
+        ),
+        (
+            "tokenizer.ggml.bos_token_id".to_string(),
+            GgufValue::Uint32(1),
+        ),
+    ]);
+    if let Some(value) = add_space_prefix {
+        metadata.insert(
+            "tokenizer.ggml.add_space_prefix".to_string(),
+            GgufValue::Bool(value),
+        );
+    }
+    metadata
 }
 
 /// Reproduce the GPT-2 byte → Unicode mapping used by
@@ -222,6 +377,90 @@ fn synthetic_tokenizer() -> Tokenizer {
     let buf = build_valid_synthetic_tokenizer_gguf();
     let gguf = GgufFile::parse(&buf).expect("synthetic GGUF should parse");
     Tokenizer::from_gguf_metadata(&gguf.metadata).expect("synthetic tokenizer should build")
+}
+
+#[test]
+fn sentencepiece_honors_space_prefix_and_merges_non_normal_pieces() {
+    let with_prefix =
+        Tokenizer::from_gguf_metadata(&sentencepiece_metadata(None)).expect("default prefix");
+    assert_eq!(
+        with_prefix
+            .encode("hi", EncodeOptions::none())
+            .expect("encode"),
+        [6]
+    );
+    assert_eq!(with_prefix.decode(&[6]).unwrap(), "hi");
+    assert_eq!(with_prefix.decode_lossy(&[6]).unwrap(), " hi");
+    let leading_space = with_prefix.encode(" hi", EncodeOptions::none()).unwrap();
+    assert_eq!(with_prefix.decode(&leading_space).unwrap(), " hi");
+    assert_eq!(with_prefix.decode(&[1, 6]).unwrap(), "hi");
+
+    let without_prefix = Tokenizer::from_gguf_metadata(&sentencepiece_metadata(Some(false)))
+        .expect("disabled prefix");
+    assert_eq!(
+        without_prefix
+            .encode("hi", EncodeOptions::none())
+            .expect("encode"),
+        [3, 4]
+    );
+}
+
+#[test]
+fn sentencepiece_empty_and_split_text_are_neutral() {
+    let tokenizer =
+        Tokenizer::from_gguf_metadata(&sentencepiece_metadata(None)).expect("tokenizer");
+    assert!(tokenizer
+        .encode("", EncodeOptions::none())
+        .expect("empty encode")
+        .is_empty());
+    assert_eq!(
+        tokenizer
+            .encode_with_specials(&[PromptPart::Text("h"), PromptPart::Text("i")])
+            .expect("split encode"),
+        [6]
+    );
+    assert_eq!(
+        tokenizer
+            .encode_with_specials(&[
+                PromptPart::Text("hi"),
+                PromptPart::Special(1),
+                PromptPart::Text("hi"),
+            ])
+            .expect("special boundary encode"),
+        [6, 1, 6]
+    );
+}
+
+#[test]
+fn sentencepiece_rejects_mistyped_byte_fallback() {
+    let mut metadata = sentencepiece_metadata(None);
+    let GgufValue::Array(types) = metadata
+        .get_mut("tokenizer.ggml.token_type")
+        .expect("types")
+    else {
+        unreachable!()
+    };
+    types[7] = GgufValue::Uint32(1);
+    assert!(matches!(
+        Tokenizer::from_gguf_metadata(&metadata),
+        Err(WillametteError::UnsupportedTokenizer(message))
+            if message.contains("expected 6")
+    ));
+}
+
+#[test]
+fn sentencepiece_rejects_non_finite_scores() {
+    let mut metadata = sentencepiece_metadata(None);
+    let GgufValue::Array(scores) = metadata.get_mut("tokenizer.ggml.scores").expect("scores")
+    else {
+        unreachable!()
+    };
+    scores[6] = GgufValue::Float32(f32::NAN);
+    assert!(matches!(
+        Tokenizer::from_gguf_metadata(&metadata),
+        Err(WillametteError::UnsupportedTokenizer(message))
+            if message.contains("not finite")
+    ));
 }
 
 #[test]

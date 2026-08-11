@@ -3,6 +3,12 @@
 High-level block diagram of how a `willamette run` invocation produces
 a token, plus the file structure each box maps onto.
 
+The detailed diagram below shows the original BitNet path. The architecture
+registry now selects either `BitNetSubNorm` or `VanillaLlama`: classic Llama
+uses nine layer roles without sub-norms, normal RoPE, SiLU/SwiGLU,
+F16/Q4_0/Q8_0 Linear, and a separate or tied F16/Q4_0/Q8_0 lm-head. Both paths
+share mmap loading, attention, KV caching, sampling, and generation control.
+
 ## Forward pass dataflow
 
 ```mermaid
@@ -80,7 +86,7 @@ flowchart TB
 | 1 | GGUF inspection | `src/gguf/{reader,tensor,types}.rs`, `src/memory/mmap.rs`, `src/main.rs::cmd_inspect` |
 | 2 | Tokenizer | `src/tokenizer/{byte_unicode,bpe,pretokenize,mod}.rs`, `src/main.rs::cmd_tokenize` |
 | 3 | I2_S layout | `src/gguf/tensor.rs` helpers, `docs/I2_S_LAYOUT.md` |
-| 4-A | Config + Graph | `src/model/{config,graph,mod}.rs` |
+| 4-A | Config + Graph | `src/model/{config,graph,architecture,mod}.rs` |
 | 4-B | f32 primitives | `src/model/primitives.rs` |
 | 4-C | BitLinear matvec | `src/model/bitlinear.rs` (scalar) |
 | 4-D1 | Attention path | `src/model/attention.rs` |
@@ -104,6 +110,7 @@ flowchart TB
 | 9 | Multi-turn chat + TUI | `src/chat/*`, `src/main.rs::{cmd_chat,cmd_tui}` |
 | 10-D | i8 KV cache + i8 activation kernels | `src/model/{kv_cache,bitlinear_neon,bitlinear_sse2}.rs` |
 | prep | GGUF artifact planning, relocation, and Q6_K profile | `src/bin/willamette-prep.rs`, `src/gguf/{linker,repack}.rs` |
+| Phase III-B | Classic Llama F16/Q4_0/Q8_0 config, graph, tokenizer, and forward path | `src/model/{architecture/llama,linear,q4_0,q8_0,block,forward,multi_forward,cached_forward}.rs`, `src/tokenizer/mod.rs` |
 
 ## Memory layout (per token, decode step)
 

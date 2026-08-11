@@ -193,7 +193,7 @@ fn rms_norm_works_across_norm_tensor_widths() {
     with_real_graph(|g| {
         // ffn_sub_norm has width n_ff = 6912, not n_embd = 2560.
         let n_ff = g.config.feed_forward_length as usize;
-        let w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm);
+        let w = f32_tensor_to_vec(g.layers[0].ffn_sub_norm.unwrap());
         assert_eq!(w.len(), n_ff);
         let x = vec![0.5_f32; n_ff];
         let mut out = vec![0.0_f32; n_ff];

@@ -24,11 +24,12 @@
 //! is verified by `tests/kv_cache_forward.rs`.
 
 use crate::error::WillametteError;
+use crate::model::architecture::ForwardVariant;
 use crate::model::attention::{apply_rope_multi_head, softmax_inplace};
-use crate::model::bitlinear::bitlinear_i2s_matvec_f32;
-use crate::model::ffn::{elementwise_mul, relu_square};
+use crate::model::ffn::{elementwise_mul, relu_square, silu};
 use crate::model::graph::{LayerWeights, ModelGraph};
 use crate::model::kv_cache::KVCache;
+use crate::model::linear::linear_matvec_f32;
 use crate::model::primitives::{
     attention_scale, embedding_gather, kv_head_for_q_head, rms_norm_f32, AttentionShape, RopeType,
 };
@@ -37,6 +38,7 @@ use crate::model::stage_timing::time_stage;
 /// Per-token constants pulled from `ModelConfig` — packaged so the
 /// inner per-layer helper doesn't take a dozen scalar arguments.
 struct LayerCtx {
+    variant: ForwardVariant,
     n_embd: usize,
     kv_dim: usize,
     n_ff: usize,
@@ -141,6 +143,7 @@ pub fn forward_with_cache(
     token_id: u32,
     position: u32,
 ) -> Result<Vec<f32>, WillametteError> {
+    ensure_supported_variant(graph.forward_variant)?;
     let mut workspace = ForwardWorkspace::new(graph);
     let mut output = Vec::new();
     forward_with_cache_into(
@@ -181,6 +184,7 @@ pub fn forward_with_cache_progress<F: FnMut(u32)>(
     position: u32,
     on_layer: F,
 ) -> Result<Vec<f32>, WillametteError> {
+    ensure_supported_variant(graph.forward_variant)?;
     let mut workspace = ForwardWorkspace::new(graph);
     let mut output = Vec::new();
     forward_with_cache_progress_into(
@@ -208,9 +212,14 @@ pub fn forward_with_cache_progress_into<F: FnMut(u32)>(
     output: &mut Vec<f32>,
     mut on_layer: F,
 ) -> Result<(), WillametteError> {
+    if let Err(error) = ensure_supported_variant(graph.forward_variant) {
+        output.clear();
+        return Err(error);
+    }
     let cfg = &graph.config;
     let ctx = LayerCtx {
         n_embd: cfg.embedding_length as usize,
+        variant: graph.forward_variant,
         kv_dim: cfg.kv_dim as usize,
         n_ff: cfg.feed_forward_length as usize,
         head_dim: cfg.head_dim as usize,
@@ -249,6 +258,12 @@ pub fn forward_with_cache_progress_into<F: FnMut(u32)>(
         output.clear();
     }
     result
+}
+
+fn ensure_supported_variant(variant: ForwardVariant) -> Result<(), WillametteError> {
+    match variant {
+        ForwardVariant::BitNetSubNorm | ForwardVariant::VanillaLlama => Ok(()),
+    }
 }
 
 fn validate_cache_inputs(
@@ -305,9 +320,9 @@ fn forward_one_layer(
     });
 
     time_stage!("matvec_qkv", {
-        bitlinear_i2s_matvec_f32(layer.attn_q, &workspace.x_norm, &mut workspace.q)?;
-        bitlinear_i2s_matvec_f32(layer.attn_k, &workspace.x_norm, &mut workspace.k)?;
-        bitlinear_i2s_matvec_f32(layer.attn_v, &workspace.x_norm, &mut workspace.v)?;
+        linear_matvec_f32(layer.attn_q, &workspace.x_norm, &mut workspace.q)?;
+        linear_matvec_f32(layer.attn_k, &workspace.x_norm, &mut workspace.k)?;
+        linear_matvec_f32(layer.attn_v, &workspace.x_norm, &mut workspace.v)?;
     });
 
     time_stage!("rope", {
@@ -318,7 +333,7 @@ fn forward_one_layer(
             ctx.n_rot,
             position,
             ctx.freq_base,
-            RopeType::Neox,
+            rope_type(ctx.variant),
         )?;
         apply_rope_multi_head(
             &mut workspace.k,
@@ -327,7 +342,7 @@ fn forward_one_layer(
             ctx.n_rot,
             position,
             ctx.freq_base,
-            RopeType::Neox,
+            rope_type(ctx.variant),
         )?;
     });
 
@@ -356,18 +371,28 @@ fn forward_one_layer(
         )
     });
 
-    time_stage!("attn_sub_norm", {
-        rms_norm_f32(
-            &workspace.attn_out,
-            &layer.attn_sub_norm_f32,
-            ctx.eps,
-            &mut workspace.sub_normed,
-        )?;
-    });
+    let attn_projection_input = match ctx.variant {
+        ForwardVariant::BitNetSubNorm => {
+            time_stage!("attn_sub_norm", {
+                rms_norm_f32(
+                    &workspace.attn_out,
+                    layer.attn_sub_norm_f32.as_deref().ok_or_else(|| {
+                        WillametteError::GgufParse(
+                            "BitNet layer is missing attn_sub_norm".to_string(),
+                        )
+                    })?,
+                    ctx.eps,
+                    &mut workspace.sub_normed,
+                )?;
+            });
+            &workspace.sub_normed
+        }
+        ForwardVariant::VanillaLlama => &workspace.attn_out,
+    };
     time_stage!("matvec_attn_output", {
-        bitlinear_i2s_matvec_f32(
+        linear_matvec_f32(
             layer.attn_output,
-            &workspace.sub_normed,
+            attn_projection_input,
             &mut workspace.wo_out,
         )?;
     });
@@ -432,23 +457,36 @@ fn apply_ffn_block(
         )?;
     });
     time_stage!("matvec_ffn_gate_up", {
-        bitlinear_i2s_matvec_f32(layer.ffn_gate, &workspace.x_norm_ffn, &mut workspace.gate)?;
-        bitlinear_i2s_matvec_f32(layer.ffn_up, &workspace.x_norm_ffn, &mut workspace.up)?;
+        linear_matvec_f32(layer.ffn_gate, &workspace.x_norm_ffn, &mut workspace.gate)?;
+        linear_matvec_f32(layer.ffn_up, &workspace.x_norm_ffn, &mut workspace.up)?;
     });
     time_stage!("ffn_relu2_emul", {
-        relu_square(&mut workspace.gate);
+        match ctx.variant {
+            ForwardVariant::BitNetSubNorm => relu_square(&mut workspace.gate),
+            ForwardVariant::VanillaLlama => silu(&mut workspace.gate),
+        }
         elementwise_mul(&workspace.gate, &workspace.up, &mut workspace.fused)?;
     });
-    time_stage!("ffn_sub_norm", {
-        rms_norm_f32(
-            &workspace.fused,
-            &layer.ffn_sub_norm_f32,
-            ctx.eps,
-            &mut workspace.fused_norm,
-        )?;
-    });
+    let down_input = match ctx.variant {
+        ForwardVariant::BitNetSubNorm => {
+            time_stage!("ffn_sub_norm", {
+                rms_norm_f32(
+                    &workspace.fused,
+                    layer.ffn_sub_norm_f32.as_deref().ok_or_else(|| {
+                        WillametteError::GgufParse(
+                            "BitNet layer is missing ffn_sub_norm".to_string(),
+                        )
+                    })?,
+                    ctx.eps,
+                    &mut workspace.fused_norm,
+                )?;
+            });
+            &workspace.fused_norm
+        }
+        ForwardVariant::VanillaLlama => &workspace.fused,
+    };
     time_stage!("matvec_ffn_down", {
-        bitlinear_i2s_matvec_f32(layer.ffn_down, &workspace.fused_norm, &mut workspace.down)?;
+        linear_matvec_f32(layer.ffn_down, down_input, &mut workspace.down)?;
     });
     time_stage!("residual_ffn", {
         for d in 0..ctx.n_embd {
@@ -456,6 +494,13 @@ fn apply_ffn_block(
         }
     });
     Ok(())
+}
+
+fn rope_type(variant: ForwardVariant) -> RopeType {
+    match variant {
+        ForwardVariant::BitNetSubNorm => RopeType::Neox,
+        ForwardVariant::VanillaLlama => RopeType::Norm,
+    }
 }
 
 fn check_finite_hidden(hidden: &[f32], layer_idx: u32) -> Result<(), WillametteError> {

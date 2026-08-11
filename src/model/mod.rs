@@ -1,8 +1,9 @@
-//! BitNet b1.58 model graph, forward/generation paths, KV cache, sampling, and
-//! runtime CPU-kernel dispatch.
+//! BitNet I2_S and classic Llama F16/Q4_0/Q8_0 model graphs, forward/generation paths,
+//! KV cache, sampling, and runtime CPU-kernel dispatch.
 //!
-//! See [`docs/BITNET_FORWARD_PLAN.md`](../../docs/BITNET_FORWARD_PLAN.md) for
-//! the source-pinned topology this module implements.
+//! See [`docs/BITNET_FORWARD_PLAN.md`](../../docs/BITNET_FORWARD_PLAN.md) and
+//! [`docs/PHASE_III_ARCHITECTURE_RFC.md`](../../docs/PHASE_III_ARCHITECTURE_RFC.md)
+//! for the source-pinned topologies this module implements.
 
 pub mod architecture;
 pub mod attention;
@@ -23,14 +24,17 @@ pub mod forward;
 pub mod generate;
 pub mod graph;
 pub mod kv_cache;
+pub mod linear;
 pub mod lm_head;
 pub mod multi_forward;
 pub mod primitives;
+pub mod q4_0;
 pub mod q6_k;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod q6_k_sse2;
+pub mod q8_0;
 pub mod sampler;
 pub mod stage_timing;
 
-pub use config::BitNetConfig;
+pub use config::{BitNetConfig, ModelConfig};
 pub use graph::{LayerWeights, ModelGraph};

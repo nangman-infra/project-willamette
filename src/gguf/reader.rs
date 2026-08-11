@@ -686,10 +686,23 @@ fn validate_array(
 /// For types whose block layout is not implemented, returns `None` so the
 /// caller can use raw inter-tensor offsets.
 fn compute_tensor_byte_len(shape: &[u64], ggml_type: GgmlType) -> Result<Option<u64>, String> {
-    if ggml_type == GgmlType::Q6K {
-        return TensorView::q6k_expected_byte_len(shape)
-            .map(Some)
-            .map_err(|error| error.to_string());
+    match ggml_type {
+        GgmlType::Q4_0 => {
+            return TensorView::q4_0_expected_byte_len(shape)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        GgmlType::Q6K => {
+            return TensorView::q6k_expected_byte_len(shape)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        GgmlType::Q8_0 => {
+            return TensorView::q8_0_expected_byte_len(shape)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        _ => {}
     }
     let n_elements = shape.iter().try_fold(1u64, |elements, dim| {
         elements.checked_mul(*dim).ok_or_else(|| {
@@ -715,11 +728,9 @@ fn compute_tensor_byte_len(shape: &[u64], ggml_type: GgmlType) -> Result<Option<
         GgmlType::I64 => Some((1, 8)),
 
         // ── Standard quantised types (block_size, bytes_per_block) ──
-        GgmlType::Q4_0 => Some((32, 18)),
         GgmlType::Q4_1 => Some((32, 20)),
         GgmlType::Q5_0 => Some((32, 22)),
         GgmlType::Q5_1 => Some((32, 24)),
-        GgmlType::Q8_0 => Some((32, 34)),
         GgmlType::Q8_1 => Some((32, 40)),
         GgmlType::Q2K => Some((256, 84)),
         GgmlType::Q3K => Some((256, 110)),
@@ -849,7 +860,21 @@ mod tests {
         let data = build_gguf(&[("bad", &[31], 2, 0)], &[]);
 
         let error = parse_error(&data);
-        assert!(error.contains("not divisible by block size 32"), "{error}");
+        assert!(error.contains("Q4_0 row length 31"), "{error}");
+    }
+
+    #[test]
+    fn rejects_q8_0_row_with_only_total_block_alignment() {
+        let data = build_gguf(&[("bad", &[16, 2], 8, 0)], &[0; 34]);
+        let error = parse_error(&data);
+        assert!(error.contains("Q8_0 row length 16"), "{error}");
+    }
+
+    #[test]
+    fn rejects_q4_0_row_with_only_total_block_alignment() {
+        let data = build_gguf(&[("bad", &[16, 2], 2, 0)], &[0; 18]);
+        let error = parse_error(&data);
+        assert!(error.contains("Q4_0 row length 16"), "{error}");
     }
 
     #[test]

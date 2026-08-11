@@ -1,6 +1,6 @@
 //! Project Willamette CLI.
 //!
-//! v0.10.0 exposes GGUF inspection and analysis, tokenization, inference,
+//! v0.11.0 exposes GGUF inspection and analysis, tokenization, inference,
 //! logits/bench tooling, interactive chat/TUI modes, and synthetic benchmark
 //! model generation.
 
@@ -12,6 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use project_willamette::chat::ChatEngine;
 use project_willamette::gguf::reader::{GgufFile, GgufValue, GGUF_MAGIC};
 use project_willamette::memory::mmap::ModelMmap;
+use project_willamette::model::architecture::ForwardVariant;
 use project_willamette::model::bitlinear::bitlinear_i2s_matvec_f32;
 use project_willamette::model::cached_forward::{forward_with_cache_into, ForwardWorkspace};
 use project_willamette::model::forward::forward_single_token_position_zero;
@@ -451,7 +452,11 @@ fn cmd_tokenize(path: &Path, text: &str, no_bos: bool, force_eos: bool) -> Resul
         .map_err(|e| anyhow::anyhow!("decode failed: {}", e))?;
 
     // Build the expected decoded string given the options used.
-    let expected = {
+    let expected = if tokenizer.model_type == "llama" {
+        // SentencePiece decode removes its synthetic dummy prefix. Control
+        // BOS/EOS pieces do not emit bytes.
+        text.to_string()
+    } else {
         let mut s = String::new();
         if opts.add_bos {
             if let Some(bos) = tokenizer.bos_id {
@@ -670,6 +675,7 @@ fn cmd_chat(args: &ChatArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+    ensure_bitnet_only(&graph, "chat")?;
     let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
 
     let mut engine = ChatEngine::try_new(
@@ -794,6 +800,7 @@ fn cmd_tui(args: &ChatArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+    ensure_bitnet_only(&graph, "tui")?;
 
     let mut engine = ChatEngine::try_new(
         &graph,
@@ -1004,6 +1011,15 @@ fn cmd_logits(path: &Path, prompt: &str, top_k_n: usize, no_bos: bool) -> Result
     Ok(())
 }
 
+fn ensure_bitnet_only(graph: &ModelGraph<'_>, command: &str) -> Result<()> {
+    if graph.forward_variant != ForwardVariant::BitNetSubNorm {
+        anyhow::bail!(
+            "{command} currently supports I2_S BitNet models only; use run, tokenize, logits, or perplexity for Llama F16/Q4_0/Q8_0"
+        );
+    }
+    Ok(())
+}
+
 fn cmd_perplexity(path: &Path, file_path: &Path, max_tokens: usize, no_bos: bool) -> Result<()> {
     use std::time::Instant;
 
@@ -1112,6 +1128,7 @@ fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
     let gguf = GgufFile::parse(bytes).map_err(|e| anyhow::anyhow!("GGUF parse error: {}", e))?;
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+    ensure_bitnet_only(&graph, "bench")?;
 
     let n_embd = graph.config.embedding_length as usize;
     // Both fields come from the dispatch module so the bench banner
@@ -1457,6 +1474,7 @@ fn cmd_analyze(path: &Path) -> Result<()> {
         GgufFile::parse(mmap.as_bytes()).map_err(|e| anyhow::anyhow!("GGUF parse error: {}", e))?;
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+    ensure_bitnet_only(&graph, "analyze")?;
 
     // Count the four 2-bit codes packed in every byte of each BitLinear
     // tensor. Code 0b00 → -1, 0b10 → +1, 0b01 / 0b11 → 0. (The trailing

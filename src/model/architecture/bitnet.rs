@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use super::ModelArchitecture;
+use super::{ForwardVariant, LayerTensorRole, ModelArchitecture};
 use crate::error::WillametteError;
 use crate::gguf::reader::GgufValue;
 use crate::model::config::BitNetConfig;
@@ -54,6 +54,30 @@ impl ModelArchitecture for BitNetArchitecture {
             meta,
         )
     }
+
+    fn layer_tensor_roles(&self) -> &'static [LayerTensorRole] {
+        use LayerTensorRole::{
+            AttnK, AttnNorm, AttnOutput, AttnQ, AttnSubNorm, AttnV, FfnDown, FfnGate, FfnNorm,
+            FfnSubNorm, FfnUp,
+        };
+        &[
+            AttnNorm,
+            AttnSubNorm,
+            AttnQ,
+            AttnK,
+            AttnV,
+            AttnOutput,
+            FfnNorm,
+            FfnSubNorm,
+            FfnGate,
+            FfnUp,
+            FfnDown,
+        ]
+    }
+
+    fn forward_variant(&self) -> ForwardVariant {
+        ForwardVariant::BitNetSubNorm
+    }
 }
 
 #[cfg(test)]
@@ -76,5 +100,18 @@ mod tests {
         for s in a.architecture_strings() {
             assert_eq!(a.metadata_prefix(s), *s);
         }
+    }
+
+    #[test]
+    fn declares_bitnet_graph_shape() {
+        let a = BitNetArchitecture;
+        assert_eq!(a.layer_tensor_roles().len(), 11);
+        assert!(a
+            .layer_tensor_roles()
+            .contains(&LayerTensorRole::AttnSubNorm));
+        assert!(a
+            .layer_tensor_roles()
+            .contains(&LayerTensorRole::FfnSubNorm));
+        assert_eq!(a.forward_variant(), ForwardVariant::BitNetSubNorm);
     }
 }

@@ -1,6 +1,6 @@
-# Reproducibility — Project Willamette v0.10.0
+# Reproducibility — Project Willamette v0.11.0
 
-*Last revised 2026-08-05.*
+*Last revised 2026-08-11.*
 
 This file pins every external value that the numbers in
 [`README.md`](README.md), [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md),
@@ -61,6 +61,61 @@ shasum -a 256 ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf
 
 If the value differs, your downloaded file does not match the layout
 pins in [`docs/I2_S_LAYOUT.md`](docs/I2_S_LAYOUT.md).
+
+### Classic Llama F16 acceptance artifacts
+
+Both files come from `shibatch/stories-converted` at repository revision
+`4724c9612ac3278f58aa2dbd4d79457e2672247d`.
+
+| File | Size | SHA256 | Purpose |
+| ---- | ---: | ------ | ------- |
+| `models/stories260K.F16.gguf` | 601,248 | `57a81ed1c8b032ba29319eae80c3e568dbb5a16ce665a09da1a0efe2e4eb69e3` | 5-layer GQA and 512-token byte fallback |
+| `models/stories15M.F16.gguf` | 49,550,112 | `35111216f325b8feb5b895095cfc7df1b6652368cb4893e9004a25825f517f54` | 6-layer MHA and standard 32K Llama vocabulary |
+
+```bash
+curl -fL https://huggingface.co/shibatch/stories-converted/resolve/4724c9612ac3278f58aa2dbd4d79457e2672247d/stories260K.F16.gguf \
+  -o models/stories260K.F16.gguf
+curl -fL https://huggingface.co/shibatch/stories-converted/resolve/4724c9612ac3278f58aa2dbd4d79457e2672247d/stories15M.F16.gguf \
+  -o models/stories15M.F16.gguf
+shasum -a 256 models/stories260K.F16.gguf models/stories15M.F16.gguf
+cargo test --test llama_f16 -- --ignored
+```
+
+The practical instruct acceptance artifact comes from
+`second-state/SmolLM-135M-Instruct-GGUF` revision
+`24b2243231d5a7b55cbd3f35a99ce2eda85c0310`:
+
+| File | Size | SHA256 | Purpose |
+| ---- | ---: | ------ | ------- |
+| `models/SmolLM-135M-Instruct-f16.gguf` | 270,885,792 | `1fc02c21fba7874b15955d21dc59182aeae382abea412419ffd2fbaa84861790` | 135M-parameter instruct, 30-layer GQA, `smollm` GPT-2 pre-tokenizer |
+| `models/SmolLM-135M-Instruct-Q4_0.gguf` | 91,726,752 | `a637fd6dcfd1b1333779ce2db780996cf4ed2a64aa0f9f6be0bb46689eb232a1` | Q4_0 transformer linears, Q8_0 tied embedding/lm-head, F32 RMSNorm |
+| `models/SmolLM-135M-Instruct-Q8_0.gguf` | 144,810,912 | `76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8795ef4d23c23c1f0` | Same graph with Q8_0 embedding, linears, and tied lm-head; F32 RMSNorm |
+
+```bash
+curl -fL https://huggingface.co/second-state/SmolLM-135M-Instruct-GGUF/resolve/24b2243231d5a7b55cbd3f35a99ce2eda85c0310/SmolLM-135M-Instruct-f16.gguf \
+  -o models/SmolLM-135M-Instruct-f16.gguf
+curl -fL https://huggingface.co/second-state/SmolLM-135M-Instruct-GGUF/resolve/24b2243231d5a7b55cbd3f35a99ce2eda85c0310/SmolLM-135M-Instruct-Q4_0.gguf \
+  -o models/SmolLM-135M-Instruct-Q4_0.gguf
+curl -fL https://huggingface.co/second-state/SmolLM-135M-Instruct-GGUF/resolve/24b2243231d5a7b55cbd3f35a99ce2eda85c0310/SmolLM-135M-Instruct-Q8_0.gguf \
+  -o models/SmolLM-135M-Instruct-Q8_0.gguf
+shasum -a 256 models/SmolLM-135M-Instruct-f16.gguf models/SmolLM-135M-Instruct-Q4_0.gguf models/SmolLM-135M-Instruct-Q8_0.gguf
+cargo test --test llama_f16 -- --ignored
+```
+
+The F16/Q4_0/Q8_0 quality comparison uses the first 1,024 contiguous transitions of
+the pinned WikiText-2 `wiki.test.raw` listed below in the Q6_K section. SmolLM's
+metadata default adds no BOS and the command adds no implicit EOS.
+
+| Quant | Mean NLL | Perplexity | Relative to F16 |
+| ----- | -------: | ---------: | --------------: |
+| F16 | `2.598285839` | `13.440678791` | baseline |
+| Q4_0 | `2.774542475` | `16.031290594` | `+19.274%` |
+| Q8_0 | `2.601908261` | `13.489454888` | `+0.3629%` |
+
+```bash
+willamette perplexity --model models/SmolLM-135M-Instruct-Q4_0.gguf \
+  --file wikitext-2-raw/wiki.test.raw --max-tokens 1024
+```
 
 ### Derived Q6_K embedding artifact
 
@@ -129,6 +184,7 @@ short version:
 | ---- | ------ | ------ |
 | `microsoft/BitNet` | `main` | `01eb415772c342d9f20dc42772f1583ae1e5b102` |
 | `Eddie-Wang1120/llama.cpp` (submodule `3rdparty/llama.cpp`) | _detached_ | `1f86f058de0c3f4098dedae2ae8653c335c868a1` |
+| `ggml-org/llama.cpp` | `master` | `704485942ab54bbbbf1f241b3550ffba35f5f37e` |
 
 `GGML_TYPE_I2_S = 36` is defined at
 `3rdparty/llama.cpp/ggml/include/ggml.h:393` of the pinned submodule

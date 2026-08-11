@@ -20,7 +20,8 @@ emulators (QEMU / 86Box).
 
 Starting point: [microsoft/BitNet-b1.58-2B-4T](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T)
 in its `ggml-model-i2_s.gguf` form (1.58-bit ternary weights) — the
-one model fully working end-to-end today. Destination: a runtime
+first model proven end-to-end. A classic Llama/Llama-2 F16 vertical slice is
+also working against pinned TinyStories GGUFs. Destination: a runtime
 that, given any preprocessed mid-sized GGUF, runs it on the same
 humble-hardware envelope. **BitNet is how the runtime got proven;
 it is not the only model we will ever support.**
@@ -49,7 +50,7 @@ Engineering rules every change is held to (full list in
 │   ── windowing / sparse tables     │         │                                          │
 │   ── target-ISA aware blocking     │         │                                          │
 └────────────────────────────────────┘         └──────────────────────────────────────────┘
- NARROW Q6_K PATH WORKING TODAY                         WORKING TODAY (v0.10.0-mvp)
+ NARROW Q6_K PATH WORKING TODAY                         WORKING TODAY (v0.11.0-mvp)
 ```
 
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
@@ -61,7 +62,7 @@ to Q6_K, and preserves every transformer I2_S slot. Additional transform
 profiles, architecture conversion, and target-aware blocking remain roadmap
 work.
 
-## Status: v0.10.0-mvp
+## Status: v0.11.0-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -70,6 +71,10 @@ What works **today**, on the path toward the thesis:
 | Working reference model | `microsoft/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf` (1.1 GiB ternary) |
 | Model SHA256 | `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162` |
 | BitNet-family fine-tunes accepted | ✅ `bitnet-b1.58`, `bitnet-25`, `bitnet` GGUF strings load through `model::architecture::registry`. End-to-end greedy decode verified on antix1 against [`jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF`](https://huggingface.co/jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF) (French) and [`Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf`](https://huggingface.co/Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf) (Solana coding). See [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md). |
+| Classic Llama F16 | ✅ unscaled full-head RoPE, GQA/MHA, F16 linears, SiLU/SwiGLU, separate or tied F16 lm-head, and `llama` SentencePiece BPE. Pinned 260K and 15M TinyStories prompt IDs and greedy outputs match llama.cpp exactly; the 260K golden also passes on antix1 i686/Pentium-M. |
+| SmolLM-135M-Instruct F16 | ✅ `smollm` GPT-2 pre-tokenizer, 30-layer GQA graph, tied lm-head, and plain completion prompts. Pinned tokenizer IDs and `2 + 2 → 4` greedy output match llama.cpp; antix1 reaches about 0.765 steady-state tok/s at 274.7 MiB peak RSS. |
+| SmolLM-135M-Instruct Q8_0 | ✅ scalar Q8_0 embedding, transformer linears, and tied lm-head. The pinned arithmetic golden matches llama.cpp, and F16/Q8_0 produce identical 10-token sky completions on Apple M4, HP ProBook 430 G6, mbp2012, and antix1. On antix1 the 138.1 MiB artifact reaches 1.03 tok/s at 154.5 MiB peak RSS. Its first 1,024 WikiText-2 transitions regress perplexity by 0.363% versus F16. |
+| SmolLM-135M-Instruct Q4_0 | ⚠️ supported low-memory scalar path, but not recommended as the default. The pinned mixed artifact uses Q4_0 transformer linears and a Q8_0 tied embedding/lm-head. It is 87.5 MiB and reaches 0.873 tok/s at 103.9 MiB peak RSS on antix1, but is slower than Q8_0 on all four hosts and regresses 1,024-transition perplexity by 19.27% versus F16. |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
 | Apple Silicon NEON kernel | ✅ implemented + validated (Apple M4 dev host) |
@@ -83,8 +88,9 @@ What works **today**, on the path toward the thesis:
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | `willamette-prep` artifact linker / Q6_K tied embedding | ✅ explicit plan + full GGUF relocation + dry-run; standalone prep binary and compatible runtime subcommand produce the same 0.745 GiB artifact; scalar gather + runtime SSE2 lm-head on x86 |
+| Architecture graph seam | ✅ registered families declare layer tensor roles and a forward variant; BitNet and classic Llama F16/Q4_0/Q8_0 are implemented |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **247** default tests passing + **95** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
+| Tests | **285** default tests passing + **100** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
 | Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
 
@@ -92,8 +98,8 @@ What does **not** work yet but is on the roadmap toward the thesis:
 
 | Property | Value |
 | -------- | ----- |
-| Model coverage beyond the BitNet family (Llama / Mistral / Phi / Gemma) | ❌ BitNet family (`bitnet-b1.58` / `bitnet-25` / `bitnet`) accepted today; non-BitNet architectures pending Phase III-B — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
-| Standard GGUF quant types (Q4_0, Q4_K, Q5_K, Q8_0, …) | ❌ BitLinear remains `I2_S`-only; tied embedding additionally supports Q6_K |
+| Model coverage beyond the implemented classic Llama F16/Q4_0/Q8_0 subset (Llama 3 / Mistral / Phi / Gemma) | ❌ scaled/partial RoPE, other linear formats, architecture-specific biases, and additional tokenizer families remain unsupported — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
+| Standard GGUF quant types beyond the narrow Llama Q4_0/Q8_0 slice (Q4_K, Q5_K, …) | ❌ BitLinear remains `I2_S`-only; tied embedding additionally supports Q6_K |
 | Additional `willamette-prep` transform profiles beyond the tied Q6_K embedding | ❌ architecture conversion, activation analysis, sparse tables, and target-ISA blocking not started; generic GGUF relocation mechanics are implemented |
 | AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
 | LUT (TL1/TL2) kernel | ❌ design RFC drafted 2026-05-30 ([`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md)); plan-then-act, ≥ 1.3× measurement gate before any code lands |
@@ -114,7 +120,7 @@ humble hardware:
 No toolchain, no compile time. Pick the tarball matching your host:
 
 ```bash
-TAG=v0.10.0-mvp
+TAG=v0.11.0-mvp
 TARGET=i686-unknown-linux-musl   # also: x86_64-unknown-linux-musl,
                                  #       aarch64-unknown-linux-musl,
                                  #       armv7-unknown-linux-musleabihf,
@@ -265,10 +271,9 @@ willamette --version
 * `analyze` — Counts -1 / 0 / +1 across every BitLinear (I2_S) tensor.
   Reports the zero fraction (the upper bound on what sparsity-aware
   skipping could save). Real 2B: 28.9 / 42.2 / 28.9 %.
-* `tokenize` — Stage 2. Runs the GGUF-bundled GPT-2 byte-level BPE
-  tokenizer (with the `LLAMA_VOCAB_PRE_TYPE_DEFAULT` 3-regex
-  pre-tokenization). Refuses to run on tokenizer models we don't
-  support.
+* `tokenize` — Stage 2. Runs GGUF-bundled GPT-2 byte BPE with the default or
+  SmolLM pre-tokenizer, or classic Llama SentencePiece BPE. Refuses to run on
+  tokenizer models and pre-tokenizers we do not support.
 * `logits` — Stage 4-D5. Runs the full 30-layer forward and prints the
   top-K next-token logits. Useful for comparing against bitnet.cpp.
 * `run` — Stage 5. Real BitLinear forward + greedy or sampled

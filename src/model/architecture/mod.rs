@@ -5,33 +5,72 @@
 //! deliberately minimal: it's the smallest abstraction that names the
 //! seam, not a kitchen sink.
 //!
-//! Today this carries the BitNet family
-//! (`bitnet-b1.58` + `bitnet-25` + `bitnet`) under a single
-//! [`ModelArchitecture`] impl. Adding Llama 2 / Phi / Gemma later means
-//! adding one impl in [`bitnet::BitNetArchitecture`]'s sibling files —
-//! see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](../../../docs/PHASE_III_ARCHITECTURE_RFC.md).
+//! Today this carries the BitNet family (`bitnet-b1.58` + `bitnet-25` +
+//! `bitnet`) and the narrow classic Llama family. Adding Phi / Gemma later
+//! means adding sibling implementations; see
+//! [`docs/PHASE_III_ARCHITECTURE_RFC.md`](../../../docs/PHASE_III_ARCHITECTURE_RFC.md).
 //!
-//! Notable scope decisions for Phase III step 2 (this commit):
+//! Notable scope decisions:
 //!
-//! * `BitNetConfig` is the only config type. We don't introduce a
-//!   `ModelConfig` enum yet — that's needed when a *non-BitNet* arch
-//!   lands (RFC step 5 / Phase III-B). Trait method returns
-//!   `BitNetConfig` directly. When the second config type appears
-//!   it becomes an associated type or an enum then.
-//! * `LayerTensorRole` and `ForwardVariant` are NOT defined here. RFC
-//!   steps 3 and 4 introduce them. Building them now without a second
-//!   forward graph to validate against would be the empty-cathedral
-//!   shape that [[feedback-principled-design]] warns about ("structural
-//!   form has one real impl + one reserved entry point, not zero").
+//! * [`ModelConfig`] stores the shared BitNet and classic-Llama hyperparameters.
+//! * [`LayerTensorRole`] and [`ForwardVariant`] name the graph seams from
+//!   RFC steps 3 and 4. Both current variants execute; future variants must
+//!   fail with `NotImplemented` before running unsupported kernels.
 
 pub mod bitnet;
+pub mod llama;
 pub mod registry;
 
 use std::collections::HashMap;
 
 use crate::error::WillametteError;
 use crate::gguf::reader::GgufValue;
-use crate::model::config::BitNetConfig;
+use crate::model::config::ModelConfig;
+
+/// Per-layer GGUF tensors used by the currently planned transformer graphs.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum LayerTensorRole {
+    AttnNorm,
+    AttnSubNorm,
+    AttnQ,
+    AttnK,
+    AttnV,
+    AttnOutput,
+    FfnNorm,
+    FfnSubNorm,
+    FfnGate,
+    FfnUp,
+    FfnDown,
+}
+
+impl LayerTensorRole {
+    /// GGUF tensor-name component in `blk.{layer}.{suffix}.weight`.
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Self::AttnNorm => "attn_norm",
+            Self::AttnSubNorm => "attn_sub_norm",
+            Self::AttnQ => "attn_q",
+            Self::AttnK => "attn_k",
+            Self::AttnV => "attn_v",
+            Self::AttnOutput => "attn_output",
+            Self::FfnNorm => "ffn_norm",
+            Self::FfnSubNorm => "ffn_sub_norm",
+            Self::FfnGate => "ffn_gate",
+            Self::FfnUp => "ffn_up",
+            Self::FfnDown => "ffn_down",
+        }
+    }
+}
+
+/// Transformer-block topology selected by an architecture family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ForwardVariant {
+    BitNetSubNorm,
+    /// Classic pre-norm Llama topology without BitNet sub-norms.
+    VanillaLlama,
+}
 
 /// One impl per architecture *family*. A family is "models whose
 /// forward graph is identical, even if their `general.architecture`
@@ -52,18 +91,25 @@ pub trait ModelArchitecture: Send + Sync + 'static {
     /// trait passes the chosen alias in and lets the impl decide.
     fn metadata_prefix<'a>(&self, arch_string: &'a str) -> &'a str;
 
-    /// Read this arch's `BitNetConfig` (today's only config type)
-    /// from a parsed GGUF metadata map, given the chosen
+    /// Read this architecture's shared model config from a parsed GGUF metadata
+    /// map, given the chosen
     /// architecture string. The impl is responsible for using the
     /// right key prefix.
     fn config_from_meta(
         &self,
         arch_string: &str,
         meta: &HashMap<String, GgufValue>,
-    ) -> Result<BitNetConfig, WillametteError>;
+    ) -> Result<ModelConfig, WillametteError>;
+
+    /// Tensor roles present in every layer of this architecture family.
+    fn layer_tensor_roles(&self) -> &'static [LayerTensorRole];
+
+    /// Transformer-block topology used by this architecture family.
+    fn forward_variant(&self) -> ForwardVariant;
 }
 
 pub use bitnet::BitNetArchitecture;
+pub use llama::LlamaArchitecture;
 pub use registry::resolve;
 
 #[cfg(test)]
@@ -92,7 +138,6 @@ mod tests {
     /// anything and crash later inside the forward graph).
     #[test]
     fn unknown_architecture_returns_none() {
-        assert!(resolve("llama").is_none());
         assert!(resolve("phi3").is_none());
         assert!(resolve("").is_none());
     }

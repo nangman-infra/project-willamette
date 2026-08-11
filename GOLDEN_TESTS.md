@@ -1,6 +1,6 @@
-# Golden Tests — Project Willamette v0.7.1-mvp
+# Golden Tests — Project Willamette v0.11.0-mvp
 
-*Last revised 2026-05-27.*
+*Last revised 2026-08-11.*
 
 Reference outputs that future code changes must preserve. If anything
 in this file regresses, the change is wrong by construction — either
@@ -81,6 +81,45 @@ Even without running the full forward you can verify (Stage 4-D5):
   ever becomes `17` (`"2"`) directly, either the pre-tokeniser
   regressed (back to merging `" ="` into one token) or the forward
   itself diverged.
+
+## Classic Llama F16
+
+Pinned llama.cpp `704485942ab54bbbbf1f241b3550ffba35f5f37e` and Willamette
+produce identical prompt and greedy token IDs:
+
+* `stories260K.F16.gguf`, `"One day"`: prompt `[1, 385, 328]`,
+  generation `[432, 261, 376, 298, 315]`, text `", a little gir"`.
+* `stories15M.F16.gguf`, `"One day, Timmy went to"`: prompt
+  `[1, 3118, 2462, 29892, 7870, 1357, 3512, 304]`, generation
+  `[278, 14089, 411, 670, 16823, 29889, 940, 4446, 263, 4802]`, text
+  `" the park with his mom. He saw a big"`.
+
+These gates cover SentencePiece BPE, separate `output.weight`, F16 Linear,
+normal RoPE, GQA/MHA, SiLU/SwiGLU, and cached autoregressive generation.
+Run them with `cargo test --test llama_f16 -- --ignored` after downloading and
+verifying the artifacts in [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md).
+The 260K tokenizer and five-token generation golden also passed on the antix1
+i686/Pentium-M host on 2026-08-11 using the musl-static release build.
+
+### SmolLM-135M-Instruct F16, Q4_0, and Q8_0
+
+Pinned llama.cpp and Willamette produce identical plain-completion inputs and
+greedy output:
+
+* `"Question: What is 84 * 3 / 2?"` tokenizes to
+  `[17872, 42, 1812, 314, 216, 40, 36, 1672, 216, 35, 2272, 216, 34, 47]`.
+* `"Question: What is 2 + 2? Answer:"` tokenizes to
+  `[17872, 42, 1812, 314, 216, 34, 1232, 216, 34, 47, 19842, 42]`.
+* Greedy generation is `[216, 36]`, text `" 4"`, followed by EOS for all three
+  artifacts. The Q4_0 file keeps its tied embedding/lm-head at Q8_0 and uses
+  Q4_0 for all transformer linears.
+
+The same result passed on antix1 i686/Pentium-M. Additional same-host quality
+smokes returned `"The capital of France is Paris."` and a coherent explanation
+of why the sky is blue. F16, Q4_0, and Q8_0 also produced the identical sky-prompt IDs
+`[378, 6376, 314, 4461, 975, 282, 260, 24484, 282, 1420]` on Apple M4,
+HP ProBook 430 G6, mbp2012, and antix1. These are behavior examples, not broad
+quality-equivalence claims for a 135M-parameter model.
 
 ## Backend equivalence (Apple Silicon NEON)
 

@@ -10,7 +10,7 @@
 //!   logits[v] = Σᵢ token_embd[v, i] * final_hidden[i]
 //! ```
 //!
-//! `token_embd.weight` is F16 or Q6_K with shape
+//! `token_embd.weight` is F16, Q4_0, Q6_K, or Q8_0 with shape
 //! `[embedding_length, vocab_size]`. Row `v` holds the embedding for vocab id
 //! `v` contiguously in GGML's row layout.
 //!
@@ -25,16 +25,19 @@ use crate::model::q6_k;
 use rayon::prelude::*;
 
 /// Compute the full vocab-size logit vector by dotting `final_hidden`
-/// against each row of an F16 or Q6_K `token_embd` table.
+/// against each row of an F16, Q4_0, Q6_K, or Q8_0 `token_embd` table.
 pub fn compute_logits(
     final_hidden: &[f32],
     token_embd: &TensorView<'_>,
     embedding_length: u32,
     vocab_size: u32,
 ) -> Result<Vec<f32>, WillametteError> {
-    if !matches!(token_embd.ggml_type, GgmlType::F16 | GgmlType::Q6K) {
+    if !matches!(
+        token_embd.ggml_type,
+        GgmlType::F16 | GgmlType::Q4_0 | GgmlType::Q6K | GgmlType::Q8_0
+    ) {
         return Err(WillametteError::GgufParse(format!(
-            "compute_logits: token_embd is {} (raw {}), expected F16 or Q6_K",
+            "compute_logits: token_embd is {} (raw {}), expected F16, Q4_0, Q6_K, or Q8_0",
             token_embd.ggml_type.name(),
             token_embd.ggml_type.to_raw()
         )));
@@ -55,7 +58,13 @@ pub fn compute_logits(
     }
     let row_bytes = match token_embd.ggml_type {
         GgmlType::F16 => n_embd.checked_mul(2),
+        GgmlType::Q4_0 => TensorView::q4_0_expected_byte_len(&[embedding_length as u64])
+            .ok()
+            .and_then(|bytes| usize::try_from(bytes).ok()),
         GgmlType::Q6K => TensorView::q6k_expected_byte_len(&[embedding_length as u64])
+            .ok()
+            .and_then(|bytes| usize::try_from(bytes).ok()),
+        GgmlType::Q8_0 => TensorView::q8_0_expected_byte_len(&[embedding_length as u64])
             .ok()
             .and_then(|bytes| usize::try_from(bytes).ok()),
         _ => unreachable!("dtype checked above"),
@@ -85,7 +94,9 @@ pub fn compute_logits(
                     }
                     Ok(sum)
                 }
+                GgmlType::Q4_0 => crate::model::q4_0::dot_row(row, final_hidden),
                 GgmlType::Q6K => q6_k::dot_row(row, final_hidden),
+                GgmlType::Q8_0 => crate::model::q8_0::dot_row(row, final_hidden),
                 _ => unreachable!("dtype checked above"),
             }
         })
@@ -178,6 +189,29 @@ pub fn top_k(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use half::f16;
+
+    #[test]
+    fn q4_0_logits_dot_each_vocab_row() {
+        let mut data = Vec::new();
+        for nibble in [10u8, 4u8] {
+            data.extend_from_slice(&f16::from_f32(0.5).to_bits().to_le_bytes());
+            data.extend(std::iter::repeat_n(nibble | (nibble << 4), 16));
+        }
+        let tensor = TensorView {
+            name: "output.weight".to_string(),
+            shape: vec![32, 2],
+            ggml_type: GgmlType::Q4_0,
+            offset: 0,
+            byte_len: data.len() as u64,
+            data: &data,
+            scale_data: None,
+        };
+        assert_eq!(
+            compute_logits(&[1.0; 32], &tensor, 32, 2).unwrap(),
+            [32.0, -64.0]
+        );
+    }
 
     #[test]
     fn argmax_returns_index_of_largest() {

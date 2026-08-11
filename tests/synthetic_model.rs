@@ -37,6 +37,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 
 use project_willamette::gguf::reader::{GgufFile, GGUF_MAGIC};
 use project_willamette::gguf::types::GgmlType;
+use project_willamette::model::architecture::ForwardVariant;
 use project_willamette::model::cached_forward::{
     forward_with_cache, forward_with_cache_into, forward_with_cache_progress, ForwardWorkspace,
 };
@@ -324,6 +325,7 @@ fn synthetic_gguf_parses_to_complete_model_graph() {
 
     let graph = ModelGraph::from_gguf(&gguf).expect("ModelGraph must build");
     assert_eq!(graph.config.architecture, "bitnet-b1.58");
+    assert_eq!(graph.forward_variant, ForwardVariant::BitNetSubNorm);
     assert_eq!(graph.config.block_count, N_LAYERS);
     assert_eq!(graph.config.embedding_length, N_EMBD);
     assert_eq!(graph.config.head_dim, HEAD_DIM);
@@ -347,13 +349,29 @@ fn synthetic_model_pre_decodes_norm_caches() {
 
     for layer in &graph.layers {
         assert_eq!(layer.attn_norm_f32.len(), N_EMBD as usize);
-        assert_eq!(layer.attn_sub_norm_f32.len(), N_EMBD as usize);
+        assert_eq!(
+            layer.attn_sub_norm_f32.as_ref().unwrap().len(),
+            N_EMBD as usize
+        );
         assert_eq!(layer.ffn_norm_f32.len(), N_EMBD as usize);
-        assert_eq!(layer.ffn_sub_norm_f32.len(), N_FF as usize);
+        assert_eq!(
+            layer.ffn_sub_norm_f32.as_ref().unwrap().len(),
+            N_FF as usize
+        );
         assert!(layer.attn_norm_f32.iter().all(|&v| v == 1.0));
-        assert!(layer.attn_sub_norm_f32.iter().all(|&v| v == 1.0));
+        assert!(layer
+            .attn_sub_norm_f32
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|&v| v == 1.0));
         assert!(layer.ffn_norm_f32.iter().all(|&v| v == 1.0));
-        assert!(layer.ffn_sub_norm_f32.iter().all(|&v| v == 1.0));
+        assert!(layer
+            .ffn_sub_norm_f32
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|&v| v == 1.0));
     }
 }
 

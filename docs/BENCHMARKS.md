@@ -1,9 +1,10 @@
 # Benchmarks
 
-Reproducible CPU-only inference numbers, captured against the official
+Reproducible CPU-only inference numbers. Most sections use the official
 `microsoft/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf` model
 (SHA-256 `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162`,
-1.106 GiB on disk, 332 tensors, 30 transformer blocks).
+1.106 GiB on disk, 332 tensors, 30 transformer blocks); sections for other
+pinned acceptance artifacts identify them explicitly.
 
 These numbers exist to make speed-up claims **falsifiable**. Every
 section names the host, the willamette tag, the dispatch backend, and
@@ -62,6 +63,161 @@ bitnet.cpp's production CPU path implicitly requires** (see the
 2026-05-30 head-to-head section below). Many Mid-2012-class laptops,
 low-end x86 thin clients, and legacy desktops sit in this sub-AVX2
 band; this is the first time we have direct numbers on one.
+
+## 2026-08-11 — Classic Llama 15M F16 on antix1
+
+The pinned `stories15M.F16.gguf` artifact (49,550,112 bytes, SHA256
+`35111216f325b8feb5b895095cfc7df1b6652368cb4893e9004a25825f517f54`)
+was run with the freshly cross-built i686 musl-static binary. The prompt was
+`"One day, Timmy went to"` (8 tokens), greedy decoding was used, and the first
+10 generated IDs/text matched the pinned llama.cpp golden exactly.
+
+```bash
+/usr/bin/busybox time -v ./project-willamette run \
+  --model stories15M.F16.gguf \
+  --prompt "One day, Timmy went to" \
+  --max-new-tokens 10
+```
+
+Warm-page 1-token and 10-token runs were repeated three times. The 50-token
+run checks that the short-run result persists as the cache grows.
+
+| Generated tokens | Wall time samples | `/proc` max RSS | End-to-end generated tok/s |
+| ---: | --- | ---: | ---: |
+| 1 | 0.58, 0.59, 0.63 s | not sampled | first prediction includes 8-token prefill |
+| 10 | 1.99, 2.02, 1.99 s | not sampled | 5.03 |
+| 50 | 8.25 s | 40,220 kB (39.3 MiB) | 6.06 |
+
+Subtracting the median one-token run from the median ten-token run isolates
+nine additional decode steps: `9 / (1.99 - 0.59) = 6.43 tok/s`. The 50-token
+cross-check gives `49 / (8.25 - 0.59) = 6.40 tok/s`. Reported steady-state
+decode throughput is therefore **about 6.4 tok/s**. The 50-token run used 95%
+CPU, incurred zero major page faults and zero process swap, and generated all
+50 tokens without EOS or an error. RSS was sampled from `/proc/$pid/status`.
+BusyBox 1.35 `time -v` on this i686 host reports `ru_maxrss` at exactly about
+4x `/proc` VmHWM and must not be used for memory claims. RSS includes
+mmap-resident model pages,
+runtime/workspace allocations, and the reserved KV cache; allocator/page
+effects make the difference between rows unsuitable as a per-token KV-memory
+estimate.
+
+## 2026-08-12 — SmolLM-135M-Instruct F16 versus Q8_0 and Q4_0
+
+The Q8_0 artifact uses the same pinned SmolLM repository revision as F16. Its
+embedding, transformer linears, and tied lm-head are Q8_0; RMSNorm tensors stay
+F32. File size falls from 270,885,792 bytes (258.3 MiB) to 144,810,912 bytes
+(138.1 MiB), a 46.5% reduction.
+
+The Q4_0 artifact is mixed: all transformer linears are Q4_0, while the tied
+embedding/lm-head remains Q8_0 and RMSNorm remains F32. It is 91,726,752 bytes
+(87.5 MiB), 66.1% smaller than F16 and 36.7% smaller than Q8_0.
+
+Each Linux timing is the median of three warm-page runs with the sky prompt.
+The Apple M4 runs used the same three-run procedure, but its 10 ms timer
+resolution makes those short values approximate. Throughput subtracts the
+median one-token wall time from the median ten-token wall time and divides the
+nine additional decode steps by that difference. Linux RSS is the median GNU
+time result on the HP ProBook and mbp2012, and direct `/proc/$pid/status`
+polling on antix1; macOS uses `/usr/bin/time -l`.
+
+| Host | Threads | Quant | 1 token | 10 tokens | Steady tok/s | Peak RSS |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| Apple M4 | default | F16 | 0.24 s | 0.50 s | 34.6 | 286.9 MiB |
+| Apple M4 | default | Q4_0 | 0.20 s | 0.38 s | 50.0 | 116.3 MiB |
+| Apple M4 | default | Q8_0 | 0.19 s | 0.36 s | 52.9 | 166.9 MiB |
+| HP ProBook 430 G6, i7-8565U | 8 | F16 | 1.14 s | 2.36 s | 7.38 | 286.5 MiB |
+| HP ProBook 430 G6, i7-8565U | 8 | Q4_0 | 0.61 s | 1.19 s | 15.5 | 116.3 MiB |
+| HP ProBook 430 G6, i7-8565U | 8 | Q8_0 | 0.42 s | 0.82 s | 22.5 | 166.6 MiB |
+| mbp2012, x86_64 | 4 | F16 | 1.52 s | 3.19 s | 5.39 | 285.5 MiB |
+| mbp2012, x86_64 | 4 | Q4_0 | 0.99 s | 1.98 s | 9.09 | 114.8 MiB |
+| mbp2012, x86_64 | 4 | Q8_0 | 0.71 s | 1.45 s | 12.2 | 165.7 MiB |
+| antix1, i686 Pentium-M | 1 | F16 | 10.54 s | 22.34 s | 0.763 | 274.7 MiB |
+| antix1, i686 Pentium-M | 1 | Q4_0 | 9.67 s | 19.98 s | 0.873 | 103.9 MiB |
+| antix1, i686 Pentium-M | 1 | Q8_0 | 7.99 s | 16.74 s | 1.03 | 154.5 MiB |
+
+Q8_0 speedup is about 1.53x on Apple M4, 3.05x on the HP ProBook, 2.26x on
+mbp2012, and 1.35x on antix1. Peak RSS falls by about 120 MiB on every host;
+the HP ProBook and antix1 checks through `/proc` recorded zero process swap for
+both formats. All four hosts produced identical F16/Q8_0 greedy IDs for the
+ten-token sky completion. The arithmetic prompt also matches pinned llama.cpp
+(`" 4"` followed by EOS).
+
+Q4_0 is 1.14x to 2.10x faster than F16, but only 0.69x to 0.95x as fast as
+Q8_0. Scalar nibble extraction costs more than the memory-bandwidth reduction
+saves on these hosts. It reduces another 50.3 to 50.9 MiB of peak RSS relative
+to Q8_0. The sky and arithmetic greedy IDs still match F16/Q8_0 on all four
+hosts, and HP ProBook and antix1 `/proc` checks recorded zero process swap.
+
+The corpus gate uses the first 1,024 contiguous next-token transitions of the
+same pinned WikiText-2 `wiki.test.raw` used for the Q6_K gate. SmolLM's metadata
+default adds no BOS, and no implicit EOS is appended:
+
+| Quant | Mean NLL | Perplexity | Relative to F16 | Apple M4 throughput |
+| --- | ---: | ---: | ---: | ---: |
+| F16 | 2.598285839 | 13.440678791 | baseline | 28.886 tok/s |
+| Q4_0 | 2.774542475 | 16.031290594 | **+19.274%** | 35.955 tok/s |
+| Q8_0 | 2.601908261 | 13.489454888 | **+0.3629%** | 37.370 tok/s |
+
+Q8_0 is below the existing 1% artifact acceptance threshold and passes this
+bounded quality gate. Q4_0 exceeds it by a wide margin and therefore remains an
+explicit low-memory option rather than the recommended default. One corpus
+prefix and two greedy prompts are still not a broad human-quality evaluation.
+
+## 2026-08-11 — SmolLM-135M-Instruct F16 on antix1
+
+This is the first practical instruction-tuned Llama-family model accepted by
+the runtime. The Apache-2.0 GGUF is 270,885,792 bytes (258.3 MiB), has 135M
+parameters, 30 layers, 576 hidden width, 9 query heads / 3 KV heads, a tied F16
+lm-head, and a 49,152-token `smollm` GPT-2 vocabulary. SHA256 is
+`1fc02c21fba7874b15955d21dc59182aeae382abea412419ffd2fbaa84861790`.
+
+Pinned llama.cpp and Willamette agree on both tokenizer IDs and the plain
+completion `Question: What is 2 + 2? Answer:` → `" 4"` + EOS. The same binary
+on antix1 also generated `"The capital of France is Paris."`.
+
+This is an exploratory pre-commit measurement of the 2026-08-11 worktree,
+cross-built with Rust 1.94 via `cargo zigbuild --release --target
+i686-unknown-linux-musl`. F16 Linear uses Rayon row parallelism with
+`RAYON_NUM_THREADS=1`; no BitLinear SIMD backend participates. Timing commands
+were:
+
+```bash
+RAYON_NUM_THREADS=1 /usr/bin/busybox time -f \
+  'elapsed=%e user=%U sys=%S cpu=%P major=%F swaps=%W' \
+  ./project-willamette run --model SmolLM-135M-Instruct-f16.gguf \
+  --prompt 'Question: Why is the sky blue? Answer:' --max-new-tokens 1
+
+# Repeat with --max-new-tokens 10 for the decode-step difference.
+```
+
+Each timing below is one warm-page observation; repeatability across three runs
+has not yet been established, so the normal ±10% benchmark claim should not be
+applied until this row is repeated after commit.
+
+| Run | Wall time | Result |
+| --- | ---: | --- |
+| 10-token sky prompt, max 1 generated | 10.56 s | includes 10-token prefill and first prediction |
+| Same prompt, max 10 generated | 22.33 s | 10 complete generated tokens |
+| Arithmetic prompt | 15.18 s | 12-token prefill, 2 generated tokens, then EOS |
+| France prompt | 20.72 s | 11-token prefill, 7 generated tokens, then EOS |
+
+The nine additional decode steps cost `22.33 - 10.56 = 11.77 s`, yielding
+**0.765 steady-state tok/s**. End-to-end throughput for the ten-token run is
+0.448 generated tok/s because prompt prefill is intentionally included.
+
+`/proc/$pid/status` was sampled every 100 ms during a ten-token run:
+
+| Metric | Peak |
+| --- | ---: |
+| VmRSS / VmHWM | 281,324 kB (274.7 MiB) |
+| RssAnon | 14,184 kB (13.9 MiB) |
+| RssFile | 267,140 kB (260.9 MiB) |
+| VmSwap | 0 kB |
+
+The run used 95% CPU on the single core and incurred zero major page faults.
+This model therefore remains comfortably resident on the 996 MiB host without
+process swap. Its metadata ChatML template is not rendered by `run`; these
+measurements use the explicit plain-completion form `Question: ... Answer:`.
 
 ## 2026-08-09 — True token cost: tied lm-head dominates
 

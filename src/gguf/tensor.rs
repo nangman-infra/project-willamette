@@ -104,6 +104,72 @@ impl<'a> TensorView<'a> {
     pub const Q6K_ELEMENTS_PER_BLOCK: u64 = 256;
     pub const Q6K_BYTES_PER_BLOCK: u64 = 210;
 
+    /// Standard GGML Q4_0 stores 32 four-bit values and one f16 scale in each
+    /// 18-byte block.
+    pub const Q4_0_ELEMENTS_PER_BLOCK: u64 = 32;
+    pub const Q4_0_BYTES_PER_BLOCK: u64 = 18;
+
+    /// Return the Q4_0 byte length using GGML's row-local block layout.
+    pub fn q4_0_expected_byte_len(shape: &[u64]) -> Result<u64, WillametteError> {
+        let (&row_elements, outer) = shape.split_first().ok_or_else(|| {
+            WillametteError::GgufParse("Q4_0 tensor has no dimensions".to_string())
+        })?;
+        if row_elements == 0 {
+            return Ok(0);
+        }
+        if !row_elements.is_multiple_of(Self::Q4_0_ELEMENTS_PER_BLOCK) {
+            return Err(WillametteError::GgufParse(format!(
+                "Q4_0 row length {} is not a multiple of QK4_0={}",
+                row_elements,
+                Self::Q4_0_ELEMENTS_PER_BLOCK,
+            )));
+        }
+        let rows = outer.iter().try_fold(1u64, |count, dim| {
+            count
+                .checked_mul(*dim)
+                .ok_or_else(|| WillametteError::GgufParse("Q4_0 row count overflow".to_string()))
+        })?;
+        let row_bytes = (row_elements / Self::Q4_0_ELEMENTS_PER_BLOCK)
+            .checked_mul(Self::Q4_0_BYTES_PER_BLOCK)
+            .ok_or_else(|| WillametteError::GgufParse("Q4_0 row size overflow".to_string()))?;
+        row_bytes
+            .checked_mul(rows)
+            .ok_or_else(|| WillametteError::GgufParse("Q4_0 tensor size overflow".to_string()))
+    }
+
+    /// Standard GGML Q8_0 stores 32 signed values and one f16 scale in each
+    /// 34-byte block.
+    pub const Q8_0_ELEMENTS_PER_BLOCK: u64 = 32;
+    pub const Q8_0_BYTES_PER_BLOCK: u64 = 34;
+
+    /// Return the Q8_0 byte length using GGML's row-local block layout.
+    pub fn q8_0_expected_byte_len(shape: &[u64]) -> Result<u64, WillametteError> {
+        let (&row_elements, outer) = shape.split_first().ok_or_else(|| {
+            WillametteError::GgufParse("Q8_0 tensor has no dimensions".to_string())
+        })?;
+        if row_elements == 0 {
+            return Ok(0);
+        }
+        if !row_elements.is_multiple_of(Self::Q8_0_ELEMENTS_PER_BLOCK) {
+            return Err(WillametteError::GgufParse(format!(
+                "Q8_0 row length {} is not a multiple of QK8_0={}",
+                row_elements,
+                Self::Q8_0_ELEMENTS_PER_BLOCK,
+            )));
+        }
+        let rows = outer.iter().try_fold(1u64, |count, dim| {
+            count
+                .checked_mul(*dim)
+                .ok_or_else(|| WillametteError::GgufParse("Q8_0 row count overflow".to_string()))
+        })?;
+        let row_bytes = (row_elements / Self::Q8_0_ELEMENTS_PER_BLOCK)
+            .checked_mul(Self::Q8_0_BYTES_PER_BLOCK)
+            .ok_or_else(|| WillametteError::GgufParse("Q8_0 row size overflow".to_string()))?;
+        row_bytes
+            .checked_mul(rows)
+            .ok_or_else(|| WillametteError::GgufParse("Q8_0 tensor size overflow".to_string()))
+    }
+
     /// Return the Q6_K byte length using GGML's row-local block layout.
     pub fn q6k_expected_byte_len(shape: &[u64]) -> Result<u64, WillametteError> {
         let (&row_elements, outer) = shape.split_first().ok_or_else(|| {
@@ -261,6 +327,26 @@ impl<'a> TensorView<'a> {
                 }
                 Ok(())
             }
+            GgmlType::Q4_0 => {
+                let expected = Self::q4_0_expected_byte_len(&self.shape)?;
+                if self.byte_len != expected {
+                    return Err(WillametteError::GgufParse(format!(
+                        "tensor {:?} (Q4_0): byte_len {} != expected {}",
+                        self.name, self.byte_len, expected
+                    )));
+                }
+                Ok(())
+            }
+            GgmlType::Q8_0 => {
+                let expected = Self::q8_0_expected_byte_len(&self.shape)?;
+                if self.byte_len != expected {
+                    return Err(WillametteError::GgufParse(format!(
+                        "tensor {:?} (Q8_0): byte_len {} != expected {}",
+                        self.name, self.byte_len, expected
+                    )));
+                }
+                Ok(())
+            }
             // Other types: not yet investigated against upstream source.
             _ => Ok(()),
         }
@@ -294,6 +380,24 @@ mod tests {
             269_337_600
         );
         assert!(TensorView::q6k_expected_byte_len(&[128, 2]).is_err());
+    }
+
+    #[test]
+    fn q8_0_layout_is_row_local() {
+        assert_eq!(TensorView::Q8_0_ELEMENTS_PER_BLOCK, 32);
+        assert_eq!(TensorView::Q8_0_BYTES_PER_BLOCK, 34);
+        assert_eq!(TensorView::q8_0_expected_byte_len(&[32, 2]).unwrap(), 68);
+        assert_eq!(TensorView::q8_0_expected_byte_len(&[64, 3]).unwrap(), 204);
+        assert!(TensorView::q8_0_expected_byte_len(&[16, 2]).is_err());
+    }
+
+    #[test]
+    fn q4_0_layout_is_row_local() {
+        assert_eq!(TensorView::Q4_0_ELEMENTS_PER_BLOCK, 32);
+        assert_eq!(TensorView::Q4_0_BYTES_PER_BLOCK, 18);
+        assert_eq!(TensorView::q4_0_expected_byte_len(&[32, 2]).unwrap(), 36);
+        assert_eq!(TensorView::q4_0_expected_byte_len(&[64, 3]).unwrap(), 108);
+        assert!(TensorView::q4_0_expected_byte_len(&[16, 2]).is_err());
     }
 
     #[test]

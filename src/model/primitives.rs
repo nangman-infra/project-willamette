@@ -116,7 +116,7 @@ pub fn embedding_gather_f16(
     embedding_gather(token_embd, token_id, out)
 }
 
-/// Gather one F16 or Q6_K embedding row into an f32 buffer.
+/// Gather one F16, Q4_0, Q6_K, or Q8_0 embedding row into an f32 buffer.
 pub fn embedding_gather(
     token_embd: &TensorView<'_>,
     token_id: u32,
@@ -147,14 +147,24 @@ pub fn embedding_gather(
 
     let row_bytes = match token_embd.ggml_type {
         GgmlType::F16 => n_embd.checked_mul(2),
+        GgmlType::Q4_0 if n_embd.is_multiple_of(TensorView::Q4_0_ELEMENTS_PER_BLOCK as usize) => {
+            (n_embd / TensorView::Q4_0_ELEMENTS_PER_BLOCK as usize)
+                .checked_mul(TensorView::Q4_0_BYTES_PER_BLOCK as usize)
+        }
+        GgmlType::Q4_0 => None,
         GgmlType::Q6K if n_embd.is_multiple_of(TensorView::Q6K_ELEMENTS_PER_BLOCK as usize) => {
             (n_embd / TensorView::Q6K_ELEMENTS_PER_BLOCK as usize)
                 .checked_mul(TensorView::Q6K_BYTES_PER_BLOCK as usize)
         }
         GgmlType::Q6K => None,
+        GgmlType::Q8_0 if n_embd.is_multiple_of(TensorView::Q8_0_ELEMENTS_PER_BLOCK as usize) => {
+            (n_embd / TensorView::Q8_0_ELEMENTS_PER_BLOCK as usize)
+                .checked_mul(TensorView::Q8_0_BYTES_PER_BLOCK as usize)
+        }
+        GgmlType::Q8_0 => None,
         other => {
             return Err(WillametteError::GgufParse(format!(
-                "embedding_gather: tensor {:?} is {}, expected F16 or Q6_K",
+                "embedding_gather: tensor {:?} is {}, expected F16, Q4_0, Q6_K, or Q8_0",
                 token_embd.name,
                 other.name()
             )));
@@ -186,7 +196,9 @@ pub fn embedding_gather(
             }
             Ok(())
         }
+        GgmlType::Q4_0 => crate::model::q4_0::dequantize_row(row, out),
         GgmlType::Q6K => crate::model::q6_k::dequantize_row(row, out),
+        GgmlType::Q8_0 => crate::model::q8_0::dequantize_row(row, out),
         _ => unreachable!("dtype checked above"),
     }
 }
@@ -415,6 +427,28 @@ impl AttentionShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use half::f16;
+
+    #[test]
+    fn q4_0_embedding_gather_selects_the_requested_row() {
+        let mut data = Vec::new();
+        for nibble in [8u8, 10u8] {
+            data.extend_from_slice(&f16::from_f32(0.5).to_bits().to_le_bytes());
+            data.extend(std::iter::repeat_n(nibble | (nibble << 4), 16));
+        }
+        let tensor = TensorView {
+            name: "token_embd.weight".to_string(),
+            shape: vec![32, 2],
+            ggml_type: GgmlType::Q4_0,
+            offset: 0,
+            byte_len: data.len() as u64,
+            data: &data,
+            scale_data: None,
+        };
+        let mut output = [0.0; 32];
+        embedding_gather(&tensor, 1, &mut output).unwrap();
+        assert_eq!(output, [1.0; 32]);
+    }
 
     #[test]
     fn f16_known_values() {

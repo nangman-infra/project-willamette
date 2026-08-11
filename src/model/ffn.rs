@@ -41,6 +41,13 @@ pub fn relu_square(x: &mut [f32]) {
     }
 }
 
+/// In-place SiLU activation used by classic Llama's SwiGLU FFN.
+pub fn silu(x: &mut [f32]) {
+    for value in x {
+        *value /= 1.0 + (-*value).exp();
+    }
+}
+
 /// Element-wise multiply `out[i] = a[i] * b[i]`. Length-checked.
 pub fn elementwise_mul(a: &[f32], b: &[f32], out: &mut [f32]) -> Result<(), WillametteError> {
     if a.len() != b.len() || a.len() != out.len() {
@@ -145,6 +152,15 @@ mod tests {
         relu_square(&mut x);
         assert_eq!(x[0], 0.0);
         assert!(x[1].is_infinite() && x[1].is_sign_positive());
+    }
+
+    #[test]
+    fn silu_matches_known_values() {
+        let mut values = [-1.0_f32, 0.0, 1.0];
+        silu(&mut values);
+        assert!((values[0] + 0.268_941_43).abs() < 1e-6);
+        assert_eq!(values[1], 0.0);
+        assert!((values[2] - 0.731_058_6).abs() < 1e-6);
     }
 
     #[test]
