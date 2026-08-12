@@ -553,9 +553,7 @@ fn cmd_run(
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
 
     let (prompt_ids, chatml_stop_id) = encode_run_prompt(&tokenizer, prompt, no_bos, chatml)?;
-    if prompt_ids.is_empty() {
-        anyhow::bail!("prompt encoded to zero tokens — cannot run forward");
-    }
+    validate_run_prompt(&prompt_ids)?;
 
     let effective_stop_ids = effective_run_stop_ids(stop_ids, tokenizer.eos_id, chatml_stop_id);
 
@@ -710,6 +708,13 @@ fn encode_run_prompt(
         .encode(prompt, opts)
         .map_err(|e| anyhow::anyhow!("encode failed: {}", e))?;
     Ok((ids, None))
+}
+
+fn validate_run_prompt(prompt_ids: &[u32]) -> Result<()> {
+    if prompt_ids.is_empty() {
+        anyhow::bail!("prompt encoded to zero tokens — cannot run forward");
+    }
+    Ok(())
 }
 
 fn effective_run_stop_ids(
