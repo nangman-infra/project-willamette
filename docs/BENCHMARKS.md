@@ -163,6 +163,69 @@ bounded quality gate. Q4_0 exceeds it by a wide margin and therefore remains an
 explicit low-memory option rather than the recommended default. One corpus
 prefix and two greedy prompts are still not a broad human-quality evaluation.
 
+## 2026-08-12 — SmolLM2-360M versus SmolLM-135M long-form comparison
+
+This comparison measures complete prompt-prefill plus generation rather than
+the short steady-state decode procedure above. Both official Q8_0 artifacts
+received the same 70-token ChatML system/user prompt and generated exactly 120
+tokens. The system turn was `You are a helpful AI assistant named SmolLM,
+trained by Hugging Face`; the user requested one accurate paragraph explaining
+the blue daytime sky and red sunsets using Rayleigh scattering, wavelength,
+and the longer atmospheric path. Sampling used temperature 0.7, top-k 40,
+top-p 0.9, repetition penalty 1.1, and seed 20260812.
+
+| Host | Threads | Model | Wall time | End-to-end tok/s | Peak RSS | Process swap |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| Apple M4 | default | SmolLM-135M Q8_0 | 3.57 s | 33.96 | 169.4 MiB | 0 |
+| Apple M4 | default | SmolLM2-360M Q8_0 | 7.24 s | 16.77 | 401.8 MiB | 0 |
+| mbp2012 | 4 | SmolLM-135M Q8_0 | 16.46 s | 7.31 | 172.9 MiB | 0 |
+| mbp2012 | 4 | SmolLM2-360M Q8_0 | 40.99 s | 2.93 | 404.1 MiB | 0 |
+| antix1 | 1 | SmolLM-135M Q8_0 | 173.84 s | 0.690 | 157.1 MiB | 0 |
+| antix1 | 1 | SmolLM2-360M Q8_0 | 471.89 s | 0.254 | 385.7 MiB | 0 |
+
+The 360M model is 2.03x, 2.49x, and 2.72x slower than 135M on M4,
+mbp2012, and antix1 respectively. Peak RSS is 2.34-2.46x higher. antix1's
+direct `/proc/$pid/status` polling is authoritative: BusyBox `time` again
+reported approximately four times the real RSS. Both models completed there
+within 996 MiB physical RAM without process swap.
+
+The quality difference is material on this prompt. The 135M output ignored the
+requested paragraph form and made incorrect claims such as shorter wavelengths
+travelling more slowly with less energy, or refraction at an atmospheric
+boundary causing the blue sky. It also failed to reach the requested sunset
+explanation and conclusion within 120 tokens. The 360M output stayed in one
+paragraph and correctly connected Rayleigh scattering, preferential scattering
+of shorter blue wavelengths, and the longer sunrise/sunset atmospheric path
+with the surviving longer red wavelengths. Its fixed token budget cut off
+before the requested concise conclusion, so this is a clear relative
+improvement rather than perfect instruction completion.
+
+The complete 360M 120-token ID sequence was identical on all three hosts. The
+sampled 135M sequence diverged between M4 and Linux despite the fixed seed,
+which is allowed for sampled generation when small floating-point differences
+cross a probability boundary; mbp2012 and antix1 agreed with each other.
+
+Device recommendation follows the measured quality/latency tradeoff. Use 360M
+on M4 and mbp2012. Use 135M for interactive antix1 work; 360M remains viable
+there for quality-first unattended jobs because memory is not the limiter. The
+HP ProBook 430 G6 was offline during this run, so no 360M result or inferred
+recommendation is claimed for it.
+
+Representative command (with `RAYON_NUM_THREADS=4` on mbp2012 and `1` on
+antix1):
+
+```bash
+willamette run --model SmolLM2-360M-Instruct-Q8_0.gguf \
+  --prompt "Write one accurate paragraph explaining why the sky looks blue during the day and red near sunset. Mention Rayleigh scattering, wavelength, and the longer path through the atmosphere. Finish with a concise conclusion." \
+  --chatml \
+  --system "You are a helpful AI assistant named SmolLM, trained by Hugging Face" \
+  --max-new-tokens 120 --temperature 0.7 --top-k 40 --top-p 0.9 \
+  --repetition-penalty 1.1 --seed 20260812
+```
+
+Each table row is one warm-page observation, not a three-run median. The usual
+plus-or-minus 10% repeatability claim therefore does not apply to this section.
+
 ## 2026-08-11 — SmolLM-135M-Instruct F16 on antix1
 
 This is the first practical instruction-tuned Llama-family model accepted by

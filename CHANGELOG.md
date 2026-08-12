@@ -28,6 +28,16 @@ public API guarantee. It will be dropped when that guarantee is established.
   explicit ChatML system turn. The official SmolLM2-360M-Instruct Q8_0 artifact
   is pinned with llama.cpp-identical prompt and greedy generation IDs.
 
+### Measured
+
+* A fixed-seed, 70-token prompt plus 120-token generation comparison measured
+  SmolLM2-360M Q8_0 at 16.77 / 2.93 / 0.254 end-to-end tok/s on Apple M4,
+  mbp2012, and antix1, with 401.8 / 404.1 / 385.7 MiB peak RSS and zero process
+  swap. All three hosts produced identical 360M token IDs. The larger model
+  gave a materially more accurate and instruction-aligned Rayleigh-scattering
+  answer than SmolLM-135M Q8_0; device recommendations and the full comparison
+  are recorded in `docs/BENCHMARKS.md`. HP ProBook validation remains pending.
+
 ## [v0.12.0-mvp] — 2026-08-12
 
 Single-turn ChatML and inference-reporting release.
