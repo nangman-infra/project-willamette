@@ -22,6 +22,10 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+## [v0.12.0-mvp] — 2026-08-12
+
+Single-turn ChatML and inference-reporting release.
+
 ### Added
 
 * `run --chatml` encodes a single user turn with vocabulary-resolved

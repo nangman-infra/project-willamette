@@ -1,6 +1,6 @@
 //! Project Willamette CLI.
 //!
-//! v0.11.0 exposes GGUF inspection and analysis, tokenization, inference,
+//! v0.12.0 exposes GGUF inspection and analysis, tokenization, inference,
 //! logits/bench tooling, interactive chat/TUI modes, and synthetic benchmark
 //! model generation.
 
@@ -552,31 +552,12 @@ fn cmd_run(
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
 
-    let (prompt_ids, chatml_stop_id) = if chatml {
-        let (ids, stop_id) = tokenizer
-            .encode_chatml_user_turn(prompt)
-            .map_err(|e| anyhow::anyhow!("ChatML encode failed: {}", e))?;
-        (ids, Some(stop_id))
-    } else {
-        let mut opts = tokenizer.default_encode_options();
-        if no_bos {
-            opts.add_bos = false;
-        }
-        let ids = tokenizer
-            .encode(prompt, opts)
-            .map_err(|e| anyhow::anyhow!("encode failed: {}", e))?;
-        (ids, None)
-    };
+    let (prompt_ids, chatml_stop_id) = encode_run_prompt(&tokenizer, prompt, no_bos, chatml)?;
     if prompt_ids.is_empty() {
         anyhow::bail!("prompt encoded to zero tokens — cannot run forward");
     }
 
-    let mut effective_stop_ids = stop_ids.to_vec();
-    if let Some(stop_id) = chatml_stop_id {
-        if tokenizer.eos_id != Some(stop_id) && !effective_stop_ids.contains(&stop_id) {
-            effective_stop_ids.push(stop_id);
-        }
-    }
+    let effective_stop_ids = effective_run_stop_ids(stop_ids, tokenizer.eos_id, chatml_stop_id);
 
     let sp = SamplingParams {
         temperature,
@@ -706,6 +687,43 @@ fn cmd_run(
         }
     );
     Ok(())
+}
+
+fn encode_run_prompt(
+    tokenizer: &Tokenizer,
+    prompt: &str,
+    no_bos: bool,
+    chatml: bool,
+) -> Result<(Vec<u32>, Option<u32>)> {
+    if chatml {
+        let (ids, stop_id) = tokenizer
+            .encode_chatml_user_turn(prompt)
+            .map_err(|e| anyhow::anyhow!("ChatML encode failed: {}", e))?;
+        return Ok((ids, Some(stop_id)));
+    }
+
+    let mut opts = tokenizer.default_encode_options();
+    if no_bos {
+        opts.add_bos = false;
+    }
+    let ids = tokenizer
+        .encode(prompt, opts)
+        .map_err(|e| anyhow::anyhow!("encode failed: {}", e))?;
+    Ok((ids, None))
+}
+
+fn effective_run_stop_ids(
+    stop_ids: &[u32],
+    eos_id: Option<u32>,
+    chatml_stop_id: Option<u32>,
+) -> Vec<u32> {
+    let mut effective = stop_ids.to_vec();
+    if let Some(stop_id) = chatml_stop_id {
+        if eos_id != Some(stop_id) && !effective.contains(&stop_id) {
+            effective.push(stop_id);
+        }
+    }
+    effective
 }
 
 fn cmd_chat(args: &ChatArgs) -> Result<()> {
@@ -1650,5 +1668,12 @@ mod tests {
             "--no-bos",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn chatml_stop_is_added_only_when_eos_does_not_cover_it() {
+        assert_eq!(effective_run_stop_ids(&[7], Some(2), Some(2)), [7]);
+        assert_eq!(effective_run_stop_ids(&[7], Some(2), Some(9)), [7, 9]);
+        assert_eq!(effective_run_stop_ids(&[7, 9], Some(2), Some(9)), [7, 9]);
     }
 }

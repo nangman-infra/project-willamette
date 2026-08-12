@@ -1,4 +1,4 @@
-# Limitations — Project Willamette v0.11.0-mvp
+# Limitations — Project Willamette v0.12.0-mvp
 
 *Last revised 2026-08-12 (classic Llama F16/Q4_0/Q8_0 vertical slice).*
 

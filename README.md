@@ -50,7 +50,7 @@ Engineering rules every change is held to (full list in
 │   ── windowing / sparse tables     │         │                                          │
 │   ── target-ISA aware blocking     │         │                                          │
 └────────────────────────────────────┘         └──────────────────────────────────────────┘
- NARROW Q6_K PATH WORKING TODAY                         WORKING TODAY (v0.11.0-mvp)
+ NARROW Q6_K PATH WORKING TODAY                         WORKING TODAY (v0.12.0-mvp)
 ```
 
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
@@ -62,7 +62,7 @@ to Q6_K, and preserves every transformer I2_S slot. Additional transform
 profiles, architecture conversion, and target-aware blocking remain roadmap
 work.
 
-## Status: v0.11.0-mvp
+## Status: v0.12.0-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -72,7 +72,7 @@ What works **today**, on the path toward the thesis:
 | Model SHA256 | `4221b252fdd5fd25e15847adfeb5ee88886506ba50b8a34548374492884c2162` |
 | BitNet-family fine-tunes accepted | ✅ `bitnet-b1.58`, `bitnet-25`, `bitnet` GGUF strings load through `model::architecture::registry`. End-to-end greedy decode verified on antix1 against [`jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF`](https://huggingface.co/jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF) (French) and [`Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf`](https://huggingface.co/Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf) (Solana coding). See [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md). |
 | Classic Llama F16 | ✅ unscaled full-head RoPE, GQA/MHA, F16 linears, SiLU/SwiGLU, separate or tied F16 lm-head, and `llama` SentencePiece BPE. Pinned 260K and 15M TinyStories prompt IDs and greedy outputs match llama.cpp exactly; the 260K golden also passes on antix1 i686/Pentium-M. |
-| SmolLM-135M-Instruct F16 | ✅ `smollm` GPT-2 pre-tokenizer, 30-layer GQA graph, tied lm-head, and plain completion prompts. Pinned tokenizer IDs and `2 + 2 → 4` greedy output match llama.cpp; antix1 reaches about 0.765 steady-state tok/s at 274.7 MiB peak RSS. |
+| SmolLM-135M-Instruct F16 | ✅ `smollm` GPT-2 pre-tokenizer, 30-layer GQA graph, tied lm-head, plain completion prompts, and single-turn `run --chatml`. Pinned tokenizer IDs and `2 + 2 → 4` greedy output match llama.cpp; antix1 reaches about 0.765 steady-state tok/s at 274.7 MiB peak RSS. |
 | SmolLM-135M-Instruct Q8_0 | ✅ scalar Q8_0 embedding, transformer linears, and tied lm-head. The pinned arithmetic golden matches llama.cpp, and F16/Q8_0 produce identical 10-token sky completions on Apple M4, HP ProBook 430 G6, mbp2012, and antix1. On antix1 the 138.1 MiB artifact reaches 1.03 tok/s at 154.5 MiB peak RSS. Its first 1,024 WikiText-2 transitions regress perplexity by 0.363% versus F16. |
 | SmolLM-135M-Instruct Q4_0 | ⚠️ supported low-memory scalar path, but not recommended as the default. The pinned mixed artifact uses Q4_0 transformer linears and a Q8_0 tied embedding/lm-head. It is 87.5 MiB and reaches 0.873 tok/s at 103.9 MiB peak RSS on antix1, but is slower than Q8_0 on all four hosts and regresses 1,024-transition perplexity by 19.27% versus F16. |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
@@ -120,7 +120,7 @@ humble hardware:
 No toolchain, no compile time. Pick the tarball matching your host:
 
 ```bash
-TAG=v0.11.0-mvp
+TAG=v0.12.0-mvp
 TARGET=i686-unknown-linux-musl   # also: x86_64-unknown-linux-musl,
                                  #       aarch64-unknown-linux-musl,
                                  #       armv7-unknown-linux-musleabihf,

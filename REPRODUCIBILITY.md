@@ -1,6 +1,6 @@
-# Reproducibility — Project Willamette v0.11.0
+# Reproducibility — Project Willamette v0.12.0
 
-*Last revised 2026-08-11.*
+*Last revised 2026-08-12.*
 
 This file pins every external value that the numbers in
 [`README.md`](README.md), [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md),
