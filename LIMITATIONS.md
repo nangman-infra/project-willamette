@@ -58,8 +58,9 @@ Anything outside this combination returns a typed error
 * **Llama chat/TUI and BitNet tooling.** Llama F16/Q4_0/Q8_0 is enabled for `run`,
   `tokenize`, `logits`, and `perplexity`. `chat`, `tui`, `bench`, and `analyze`
   remain explicitly BitNet-only until their prompt/template and reporting
-  surfaces are generalized. SmolLM works through plain completion prompts such
-  as `Question: ... Answer:`; its metadata ChatML template is not rendered.
+  surfaces are generalized. `run --chatml` supports one standard ChatML user
+  turn by inserting `<|im_start|>` and `<|im_end|>` as special token ids; generic
+  Jinja templates and multi-turn Llama chat remain unsupported.
 * **Other pre-tokeniser hints.** If a future GGUF arrives with
   `tokenizer.ggml.pre = "llama-bpe"` (instead of the missing-key
   default our reference file has), the LLaMA 3 regex set in

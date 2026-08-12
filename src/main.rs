@@ -155,8 +155,11 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         max_new_tokens: usize,
         /// Suppress BOS even if `tokenizer.ggml.add_bos_token` is set.
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "chatml")]
         no_bos: bool,
+        /// Wrap the prompt as one ChatML user turn and stop at <|im_end|>.
+        #[arg(long, default_value_t = false)]
+        chatml: bool,
         /// Sampling temperature. 0 = greedy / argmax.
         #[arg(long, default_value_t = 0.0)]
         temperature: f32,
@@ -303,6 +306,7 @@ fn main() -> Result<()> {
             prompt,
             max_new_tokens,
             no_bos,
+            chatml,
             temperature,
             top_k,
             top_p,
@@ -314,6 +318,7 @@ fn main() -> Result<()> {
             &prompt,
             max_new_tokens,
             no_bos,
+            chatml,
             temperature,
             top_k,
             top_p,
@@ -526,6 +531,7 @@ fn cmd_run(
     prompt: &str,
     max_new_tokens: usize,
     no_bos: bool,
+    chatml: bool,
     temperature: f32,
     top_k: Option<usize>,
     top_p: Option<f32>,
@@ -546,16 +552,30 @@ fn cmd_run(
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
 
-    let mut opts = tokenizer.default_encode_options();
-    if no_bos {
-        opts.add_bos = false;
-    }
-
-    let prompt_ids = tokenizer
-        .encode(prompt, opts)
-        .map_err(|e| anyhow::anyhow!("encode failed: {}", e))?;
+    let (prompt_ids, chatml_stop_id) = if chatml {
+        let (ids, stop_id) = tokenizer
+            .encode_chatml_user_turn(prompt)
+            .map_err(|e| anyhow::anyhow!("ChatML encode failed: {}", e))?;
+        (ids, Some(stop_id))
+    } else {
+        let mut opts = tokenizer.default_encode_options();
+        if no_bos {
+            opts.add_bos = false;
+        }
+        let ids = tokenizer
+            .encode(prompt, opts)
+            .map_err(|e| anyhow::anyhow!("encode failed: {}", e))?;
+        (ids, None)
+    };
     if prompt_ids.is_empty() {
         anyhow::bail!("prompt encoded to zero tokens — cannot run forward");
+    }
+
+    let mut effective_stop_ids = stop_ids.to_vec();
+    if let Some(stop_id) = chatml_stop_id {
+        if tokenizer.eos_id != Some(stop_id) && !effective_stop_ids.contains(&stop_id) {
+            effective_stop_ids.push(stop_id);
+        }
     }
 
     let sp = SamplingParams {
@@ -580,12 +600,16 @@ fn cmd_run(
     println!("Vocab size:   {}", graph.config.vocab_size);
     println!();
     println!("Prompt:           {:?}", prompt);
+    println!(
+        "Prompt format:    {}",
+        if chatml { "ChatML" } else { "plain" }
+    );
     println!("Prompt tokens:    {} ({:?})", prompt_ids.len(), prompt_ids);
     println!("Decode policy:    Stage 5-C — single-token forward + per-layer KV cache (causal)");
     println!("Decode mode:      {}", mode);
     println!(
         "Max new tokens:   {}  EOS id: {:?}  PAD id: {:?}  extra stop: {:?}",
-        max_new_tokens, tokenizer.eos_id, tokenizer.pad_id, stop_ids
+        max_new_tokens, tokenizer.eos_id, tokenizer.pad_id, effective_stop_ids
     );
     println!();
     use std::io::Write;
@@ -620,12 +644,13 @@ fn cmd_run(
     // waits for the next token.
     let mut pending: Vec<u8> = Vec::new();
     let mut printed_up_to: usize = 0;
+    let generation_start = std::time::Instant::now();
     let generated = generate_with_cache_and_sampler(
         &graph,
         &prompt_ids,
         max_new_tokens,
         tokenizer.eos_id,
-        stop_ids,
+        &effective_stop_ids,
         max_seq_len,
         &mut sampler,
         |_step, _next_pos, tok_id| {
@@ -649,6 +674,7 @@ fn cmd_run(
         },
     )
     .map_err(|e| anyhow::anyhow!("generation failed: {}", e))?;
+    let generation_secs = generation_start.elapsed().as_secs_f64();
     // Flush any leftover incomplete suffix as U+FFFD so the user sees
     // it was there (rather than silently dropping it).
     if printed_up_to < pending.len() {
@@ -664,8 +690,21 @@ fn cmd_run(
         .decode_lossy(&generated)
         .map_err(|e| anyhow::anyhow!("decode failed: {}", e))?;
     println!("Generated text:   {:?}", generated_text);
-    let full_text = format!("{}{}", prompt, generated_text);
+    let full_text = if chatml {
+        format!("{}\n{}", prompt, generated_text)
+    } else {
+        format!("{}{}", prompt, generated_text)
+    };
     println!("Full text:        {:?}", full_text);
+    println!("Inference time:   {:.3} s", generation_secs);
+    println!(
+        "Throughput:       {:.3} generated tokens/s (prefill included)",
+        if generation_secs > 0.0 {
+            generated.len() as f64 / generation_secs
+        } else {
+            0.0
+        }
+    );
     Ok(())
 }
 
@@ -1567,4 +1606,49 @@ fn cmd_synth_gguf(output: &Path, preset: project_willamette::synth::Preset) -> R
          by construction (see src/synth.rs)."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_chatml_flag_is_opt_in() {
+        let plain = Cli::try_parse_from([
+            "willamette",
+            "run",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+        ])
+        .unwrap();
+        let templated = Cli::try_parse_from([
+            "willamette",
+            "run",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--chatml",
+        ])
+        .unwrap();
+
+        assert!(matches!(plain.command, Command::Run { chatml: false, .. }));
+        assert!(matches!(
+            templated.command,
+            Command::Run { chatml: true, .. }
+        ));
+        assert!(Cli::try_parse_from([
+            "willamette",
+            "run",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--chatml",
+            "--no-bos",
+        ])
+        .is_err());
+    }
 }

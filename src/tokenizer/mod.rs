@@ -247,6 +247,36 @@ impl Tokenizer {
         Ok(ids)
     }
 
+    /// Encode one ChatML user turn followed by an assistant generation prompt.
+    ///
+    /// The marker ids are resolved from the vocabulary rather than hard-coded,
+    /// and are inserted verbatim so byte-level BPE cannot split them.
+    pub fn encode_chatml_user_turn(
+        &self,
+        prompt: &str,
+    ) -> Result<(Vec<u32>, u32), WillametteError> {
+        let start_id = self.token_id("<|im_start|>").ok_or_else(|| {
+            WillametteError::UnsupportedTokenizer(
+                "ChatML requested but <|im_start|> is missing from the vocabulary".to_string(),
+            )
+        })?;
+        let end_id = self.token_id("<|im_end|>").ok_or_else(|| {
+            WillametteError::UnsupportedTokenizer(
+                "ChatML requested but <|im_end|> is missing from the vocabulary".to_string(),
+            )
+        })?;
+        let ids = self.encode_with_specials(&[
+            PromptPart::Special(start_id),
+            PromptPart::Text("user\n"),
+            PromptPart::Text(prompt),
+            PromptPart::Special(end_id),
+            PromptPart::Text("\n"),
+            PromptPart::Special(start_id),
+            PromptPart::Text("assistant\n"),
+        ])?;
+        Ok((ids, end_id))
+    }
+
     fn push_checked_special(&self, id: u32, ids: &mut Vec<u32>) -> Result<(), WillametteError> {
         if (id as usize) >= self.vocab_size() {
             return Err(WillametteError::UnsupportedTokenizer(format!(

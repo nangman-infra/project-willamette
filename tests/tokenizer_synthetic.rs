@@ -204,6 +204,64 @@ fn gpt2_special_text_parts_preserve_bpe_boundaries() {
 }
 
 #[test]
+fn chatml_turn_inserts_marker_ids_verbatim() {
+    let mut tokens = gpt2_byte_unicode_vocab();
+    tokens.push("<|im_start|>".to_string());
+    tokens.push("<|im_end|>".to_string());
+    let metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(tokens.into_iter().map(GgufValue::Str).collect()),
+        ),
+        (
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(Vec::new()),
+        ),
+    ]);
+    let tokenizer = Tokenizer::from_gguf_metadata(&metadata).expect("GPT-2 tokenizer");
+    let start_id = tokenizer.token_id("<|im_start|>").unwrap();
+    let end_id = tokenizer.token_id("<|im_end|>").unwrap();
+    let (ids, stop_id) = tokenizer.encode_chatml_user_turn("Hi").unwrap();
+
+    assert_eq!(stop_id, end_id);
+    assert_eq!(ids.first(), Some(&start_id));
+    assert_eq!(ids.iter().filter(|&&id| id == start_id).count(), 2);
+    assert_eq!(ids.iter().filter(|&&id| id == end_id).count(), 1);
+    assert_eq!(ids.iter().position(|&id| id == end_id), Some(8));
+    assert_eq!(ids.len(), 21);
+}
+
+#[test]
+fn chatml_turn_requires_both_markers() {
+    let metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(
+                gpt2_byte_unicode_vocab()
+                    .into_iter()
+                    .map(GgufValue::Str)
+                    .collect(),
+            ),
+        ),
+        (
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(Vec::new()),
+        ),
+    ]);
+    let tokenizer = Tokenizer::from_gguf_metadata(&metadata).expect("GPT-2 tokenizer");
+    let error = tokenizer.encode_chatml_user_turn("Hi").unwrap_err();
+    assert!(error.to_string().contains("<|im_start|>"));
+}
+
+#[test]
 fn malformed_add_special_flags_are_rejected() {
     let mut metadata = sentencepiece_metadata(None);
     metadata.insert(

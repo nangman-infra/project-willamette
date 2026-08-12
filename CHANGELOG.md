@@ -22,6 +22,14 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+### Added
+
+* `run --chatml` encodes a single user turn with vocabulary-resolved
+  `<|im_start|>`/`<|im_end|>` special token ids and stops at the ChatML end
+  marker. Plain completion prompting remains the default.
+* `run` now reports end-to-end inference wall time and generated-token
+  throughput, including prompt prefill, after every successful inference.
+
 ## [v0.11.0-mvp] — 2026-08-12
 
 Classic Llama and SmolLM compatibility release. This release adds the narrow

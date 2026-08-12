@@ -225,6 +225,20 @@ Generated text:   " Paris. Paris"
 Full text:        "The capital of France is Paris. Paris"
 ```
 
+For a model whose GGUF vocabulary uses standard ChatML markers, encode one
+user turn with special token ids rather than passing the marker strings through
+BPE:
+
+```bash
+willamette run --model SmolLM-135M-Instruct-Q8_0.gguf \
+  --prompt "Explain why the sky looks blue." --chatml \
+  --max-new-tokens 120 --temperature 0.7 --top-k 40 --top-p 0.9
+```
+
+`run` reports end-to-end inference wall time and generated tokens per second,
+including prompt prefill. `--chatml` is intentionally single-turn; generic GGUF
+Jinja templates remain unsupported.
+
 ## CLI subcommands
 
 ```text
@@ -239,7 +253,7 @@ willamette logits     --model PATH --prompt TEXT [--top-k N] [--no-bos]
 willamette perplexity --model PATH --file UTF8_PATH [--max-tokens N] [--no-bos]
 willamette run        --model PATH --prompt TEXT
                       [--max-new-tokens N]
-                      [--no-bos]
+                      [--no-bos] [--chatml]
                       [--temperature F] [--top-k K] [--top-p P]
                       [--repetition-penalty R] [--seed S]
                       [--stop-id ID]...
