@@ -160,6 +160,9 @@ enum Command {
         /// Wrap the prompt as one ChatML user turn and stop at <|im_end|>.
         #[arg(long, default_value_t = false)]
         chatml: bool,
+        /// Optional ChatML system message prepended before the user turn.
+        #[arg(long, requires = "chatml")]
+        system: Option<String>,
         /// Sampling temperature. 0 = greedy / argmax.
         #[arg(long, default_value_t = 0.0)]
         temperature: f32,
@@ -307,6 +310,7 @@ fn main() -> Result<()> {
             max_new_tokens,
             no_bos,
             chatml,
+            system,
             temperature,
             top_k,
             top_p,
@@ -319,6 +323,7 @@ fn main() -> Result<()> {
             max_new_tokens,
             no_bos,
             chatml,
+            system.as_deref(),
             temperature,
             top_k,
             top_p,
@@ -532,6 +537,7 @@ fn cmd_run(
     max_new_tokens: usize,
     no_bos: bool,
     chatml: bool,
+    system: Option<&str>,
     temperature: f32,
     top_k: Option<usize>,
     top_p: Option<f32>,
@@ -552,7 +558,8 @@ fn cmd_run(
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
 
-    let (prompt_ids, chatml_stop_id) = encode_run_prompt(&tokenizer, prompt, no_bos, chatml)?;
+    let (prompt_ids, chatml_stop_id) =
+        encode_run_prompt(&tokenizer, prompt, no_bos, chatml, system)?;
     validate_run_prompt(&prompt_ids)?;
 
     let effective_stop_ids = effective_run_stop_ids(stop_ids, tokenizer.eos_id, chatml_stop_id);
@@ -692,10 +699,11 @@ fn encode_run_prompt(
     prompt: &str,
     no_bos: bool,
     chatml: bool,
+    system: Option<&str>,
 ) -> Result<(Vec<u32>, Option<u32>)> {
     if chatml {
         let (ids, stop_id) = tokenizer
-            .encode_chatml_user_turn(prompt)
+            .encode_chatml_turn(system, prompt)
             .map_err(|e| anyhow::anyhow!("ChatML encode failed: {}", e))?;
         return Ok((ids, Some(stop_id)));
     }
@@ -1671,6 +1679,17 @@ mod tests {
             "hello",
             "--chatml",
             "--no-bos",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "willamette",
+            "run",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--system",
+            "be concise",
         ])
         .is_err());
     }

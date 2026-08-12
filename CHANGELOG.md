@@ -22,6 +22,12 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+### Added
+
+* `run --chatml --system TEXT` and `Tokenizer::encode_chatml_turn` support an
+  explicit ChatML system turn. The official SmolLM2-360M-Instruct Q8_0 artifact
+  is pinned with llama.cpp-identical prompt and greedy generation IDs.
+
 ## [v0.12.0-mvp] — 2026-08-12
 
 Single-turn ChatML and inference-reporting release.

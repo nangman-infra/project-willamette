@@ -24,6 +24,9 @@ const SMOLLM_Q4_PATH: &str = "./models/SmolLM-135M-Instruct-Q4_0.gguf";
 const SMOLLM_Q4_SHA256: &str = "a637fd6dcfd1b1333779ce2db780996cf4ed2a64aa0f9f6be0bb46689eb232a1";
 const SMOLLM_Q8_PATH: &str = "./models/SmolLM-135M-Instruct-Q8_0.gguf";
 const SMOLLM_Q8_SHA256: &str = "76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8795ef4d23c23c1f0";
+const SMOLLM2_360M_Q8_PATH: &str = "./models/SmolLM2-360M-Instruct-Q8_0.gguf";
+const SMOLLM2_360M_Q8_SHA256: &str =
+    "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201";
 
 #[test]
 #[ignore = "requires the pinned 601248-byte stories260K.F16.gguf; see REPRODUCIBILITY.md"]
@@ -223,6 +226,53 @@ fn pinned_smollm_q8_0_matches_llama_cpp_golden() {
     .expect("generate");
     assert_eq!(generated, [216, 36]);
     assert_eq!(tokenizer.decode_lossy(&generated).unwrap(), " 4");
+}
+
+#[test]
+#[ignore = "requires the pinned 386404992-byte SmolLM2-360M-Instruct-Q8_0.gguf; see REPRODUCIBILITY.md"]
+fn pinned_smollm2_360m_q8_0_matches_llama_cpp_golden() {
+    let mmap = ModelMmap::open(SMOLLM2_360M_Q8_PATH).expect("open model");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(mmap.as_bytes())),
+        SMOLLM2_360M_Q8_SHA256
+    );
+    let gguf = GgufFile::parse(mmap.as_bytes()).expect("parse model");
+    let graph = ModelGraph::from_gguf(&gguf).expect("build graph");
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata).expect("load tokenizer");
+    assert_eq!(graph.config.block_count, 32);
+    assert_eq!(graph.config.embedding_length, 960);
+    assert_eq!(graph.config.context_length, 8192);
+
+    let system = "You are a helpful AI assistant named SmolLM, trained by Hugging Face";
+    let prompt_text = "What is the capital of France? Answer in one sentence.";
+    let (prompt, stop_id) = tokenizer
+        .encode_chatml_turn(Some(system), prompt_text)
+        .expect("tokenize ChatML prompt");
+    assert_eq!(
+        prompt,
+        [
+            1, 9690, 198, 2683, 359, 253, 5356, 5646, 11173, 3365, 3511, 308, 34519, 28, 7018, 411,
+            407, 19712, 8182, 2, 198, 1, 4093, 198, 1780, 314, 260, 3575, 282, 4649, 47, 19842,
+            281, 582, 6330, 30, 2, 198, 1, 520, 9531, 198,
+        ]
+    );
+    let mut sampler = Sampler::new(SamplingParams::greedy());
+    let generated = generate_with_cache_and_sampler(
+        &graph,
+        &prompt,
+        30,
+        tokenizer.eos_id,
+        &[stop_id],
+        graph.config.context_length as usize,
+        &mut sampler,
+        |_, _, _| {},
+    )
+    .expect("generate");
+    assert_eq!(generated, [504, 3575, 282, 4649, 314, 7042, 30]);
+    assert_eq!(
+        tokenizer.decode_lossy(&generated).unwrap(),
+        "The capital of France is Paris."
+    );
 }
 
 #[test]

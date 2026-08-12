@@ -255,6 +255,16 @@ impl Tokenizer {
         &self,
         prompt: &str,
     ) -> Result<(Vec<u32>, u32), WillametteError> {
+        self.encode_chatml_turn(None, prompt)
+    }
+
+    /// Encode an optional ChatML system turn, one user turn, and the assistant
+    /// generation prompt.
+    pub fn encode_chatml_turn(
+        &self,
+        system: Option<&str>,
+        prompt: &str,
+    ) -> Result<(Vec<u32>, u32), WillametteError> {
         let start_id = self.token_id("<|im_start|>").ok_or_else(|| {
             WillametteError::UnsupportedTokenizer(
                 "ChatML requested but <|im_start|> is missing from the vocabulary".to_string(),
@@ -265,7 +275,17 @@ impl Tokenizer {
                 "ChatML requested but <|im_end|> is missing from the vocabulary".to_string(),
             )
         })?;
-        let ids = self.encode_with_specials(&[
+        let mut parts = Vec::with_capacity(if system.is_some() { 12 } else { 7 });
+        if let Some(system) = system {
+            parts.extend_from_slice(&[
+                PromptPart::Special(start_id),
+                PromptPart::Text("system\n"),
+                PromptPart::Text(system),
+                PromptPart::Special(end_id),
+                PromptPart::Text("\n"),
+            ]);
+        }
+        parts.extend_from_slice(&[
             PromptPart::Special(start_id),
             PromptPart::Text("user\n"),
             PromptPart::Text(prompt),
@@ -273,7 +293,8 @@ impl Tokenizer {
             PromptPart::Text("\n"),
             PromptPart::Special(start_id),
             PromptPart::Text("assistant\n"),
-        ])?;
+        ]);
+        let ids = self.encode_with_specials(&parts)?;
         Ok((ids, end_id))
     }
 

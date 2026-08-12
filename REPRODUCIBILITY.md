@@ -102,6 +102,21 @@ shasum -a 256 models/SmolLM-135M-Instruct-f16.gguf models/SmolLM-135M-Instruct-Q
 cargo test --test llama_f16 -- --ignored
 ```
 
+The larger instruct acceptance artifact comes from
+`HuggingFaceTB/SmolLM2-360M-Instruct-GGUF` revision
+`593b5a2e04c8f3e4ee880263f93e0bd2901ad47f`:
+
+| File | Size | SHA256 | Purpose |
+| ---- | ---: | ------ | ------- |
+| `models/SmolLM2-360M-Instruct-Q8_0.gguf` | 386,404,992 | `48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201` | 360M-parameter instruct, 32-layer GQA, 8,192-token context, Q8_0 linears and tied lm-head |
+
+```bash
+curl -fL https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/593b5a2e04c8f3e4ee880263f93e0bd2901ad47f/smollm2-360m-instruct-q8_0.gguf \
+  -o models/SmolLM2-360M-Instruct-Q8_0.gguf
+shasum -a 256 models/SmolLM2-360M-Instruct-Q8_0.gguf
+cargo test --test llama_f16 pinned_smollm2_360m_q8_0_matches_llama_cpp_golden -- --ignored --exact
+```
+
 The F16/Q4_0/Q8_0 quality comparison uses the first 1,024 contiguous transitions of
 the pinned WikiText-2 `wiki.test.raw` listed below in the Q6_K section. SmolLM's
 metadata default adds no BOS and the command adds no implicit EOS.

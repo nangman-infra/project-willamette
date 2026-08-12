@@ -262,6 +262,36 @@ fn chatml_turn_requires_both_markers() {
 }
 
 #[test]
+fn chatml_turn_can_prepend_a_system_message() {
+    let mut tokens = gpt2_byte_unicode_vocab();
+    tokens.push("<|im_start|>".to_string());
+    tokens.push("<|im_end|>".to_string());
+    let metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(tokens.into_iter().map(GgufValue::Str).collect()),
+        ),
+        (
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(Vec::new()),
+        ),
+    ]);
+    let tokenizer = Tokenizer::from_gguf_metadata(&metadata).expect("GPT-2 tokenizer");
+    let start_id = tokenizer.token_id("<|im_start|>").unwrap();
+    let end_id = tokenizer.token_id("<|im_end|>").unwrap();
+    let (ids, stop_id) = tokenizer.encode_chatml_turn(Some("S"), "U").unwrap();
+
+    assert_eq!(stop_id, end_id);
+    assert_eq!(ids.iter().filter(|&&id| id == start_id).count(), 3);
+    assert_eq!(ids.iter().filter(|&&id| id == end_id).count(), 2);
+    assert_eq!(ids.first(), Some(&start_id));
+}
+
+#[test]
 fn malformed_add_special_flags_are_rejected() {
     let mut metadata = sentencepiece_metadata(None);
     metadata.insert(

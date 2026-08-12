@@ -75,6 +75,7 @@ What works **today**, on the path toward the thesis:
 | SmolLM-135M-Instruct F16 | ✅ `smollm` GPT-2 pre-tokenizer, 30-layer GQA graph, tied lm-head, plain completion prompts, and single-turn `run --chatml`. Pinned tokenizer IDs and `2 + 2 → 4` greedy output match llama.cpp; antix1 reaches about 0.765 steady-state tok/s at 274.7 MiB peak RSS. |
 | SmolLM-135M-Instruct Q8_0 | ✅ scalar Q8_0 embedding, transformer linears, and tied lm-head. The pinned arithmetic golden matches llama.cpp, and F16/Q8_0 produce identical 10-token sky completions on Apple M4, HP ProBook 430 G6, mbp2012, and antix1. On antix1 the 138.1 MiB artifact reaches 1.03 tok/s at 154.5 MiB peak RSS. Its first 1,024 WikiText-2 transitions regress perplexity by 0.363% versus F16. |
 | SmolLM-135M-Instruct Q4_0 | ⚠️ supported low-memory scalar path, but not recommended as the default. The pinned mixed artifact uses Q4_0 transformer linears and a Q8_0 tied embedding/lm-head. It is 87.5 MiB and reaches 0.873 tok/s at 103.9 MiB peak RSS on antix1, but is slower than Q8_0 on all four hosts and regresses 1,024-transition perplexity by 19.27% versus F16. |
+| SmolLM2-360M-Instruct Q8_0 | ✅ official 386,404,992-byte artifact loads unchanged. Explicit ChatML system/user prompt IDs and the greedy `The capital of France is Paris.` output match llama.cpp exactly; a 120-token sampled M4 run reached 16.45 generated tok/s including prefill. Linux low-memory validation remains pending. |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
 | Apple Silicon NEON kernel | ✅ implemented + validated (Apple M4 dev host) |
@@ -253,7 +254,7 @@ willamette logits     --model PATH --prompt TEXT [--top-k N] [--no-bos]
 willamette perplexity --model PATH --file UTF8_PATH [--max-tokens N] [--no-bos]
 willamette run        --model PATH --prompt TEXT
                       [--max-new-tokens N]
-                      [--no-bos] [--chatml]
+                      [--no-bos] [--chatml] [--system TEXT]
                       [--temperature F] [--top-k K] [--top-p P]
                       [--repetition-penalty R] [--seed S]
                       [--stop-id ID]...
