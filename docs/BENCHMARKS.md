@@ -178,16 +178,18 @@ top-p 0.9, repetition penalty 1.1, and seed 20260812.
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
 | Apple M4 | default | SmolLM-135M Q8_0 | 3.57 s | 33.96 | 169.4 MiB | 0 |
 | Apple M4 | default | SmolLM2-360M Q8_0 | 7.24 s | 16.77 | 401.8 MiB | 0 |
+| HP ProBook 430 G6 | 8 | SmolLM-135M Q8_0 | 9.17 s | 13.13 | 198.1 MiB | 0 |
+| HP ProBook 430 G6 | 8 | SmolLM2-360M Q8_0 | 21.02 s | 5.72 | 426.8 MiB | 0 |
 | mbp2012 | 4 | SmolLM-135M Q8_0 | 16.46 s | 7.31 | 172.9 MiB | 0 |
 | mbp2012 | 4 | SmolLM2-360M Q8_0 | 40.99 s | 2.93 | 404.1 MiB | 0 |
 | antix1 | 1 | SmolLM-135M Q8_0 | 173.84 s | 0.690 | 157.1 MiB | 0 |
 | antix1 | 1 | SmolLM2-360M Q8_0 | 471.89 s | 0.254 | 385.7 MiB | 0 |
 
-The 360M model is 2.03x, 2.49x, and 2.72x slower than 135M on M4,
-mbp2012, and antix1 respectively. Peak RSS is 2.34-2.46x higher. antix1's
-direct `/proc/$pid/status` polling is authoritative: BusyBox `time` again
-reported approximately four times the real RSS. Both models completed there
-within 996 MiB physical RAM without process swap.
+The 360M model is 2.03x, 2.29x, 2.49x, and 2.72x slower than 135M on M4,
+HP ProBook, mbp2012, and antix1 respectively. Peak RSS is 2.15-2.46x higher.
+antix1's direct `/proc/$pid/status` polling is authoritative: BusyBox `time`
+again reported approximately four times the real RSS. Both models completed
+there within 996 MiB physical RAM without process swap.
 
 The quality difference is material on this prompt. The 135M output ignored the
 requested paragraph form and made incorrect claims such as shorter wavelengths
@@ -200,19 +202,19 @@ with the surviving longer red wavelengths. Its fixed token budget cut off
 before the requested concise conclusion, so this is a clear relative
 improvement rather than perfect instruction completion.
 
-The complete 360M 120-token ID sequence was identical on all three hosts. The
+The complete 360M 120-token ID sequence was identical on all four hosts. The
 sampled 135M sequence diverged between M4 and Linux despite the fixed seed,
 which is allowed for sampled generation when small floating-point differences
-cross a probability boundary; mbp2012 and antix1 agreed with each other.
+cross a probability boundary; HP ProBook, mbp2012, and antix1 agreed with each
+other.
 
 Device recommendation follows the measured quality/latency tradeoff. Use 360M
-on M4 and mbp2012. Use 135M for interactive antix1 work; 360M remains viable
-there for quality-first unattended jobs because memory is not the limiter. The
-HP ProBook 430 G6 was offline during this run, so no 360M result or inferred
-recommendation is claimed for it.
+on M4, HP ProBook, and mbp2012. Use 135M for interactive antix1 work; 360M
+remains viable there for quality-first unattended jobs because memory is not
+the limiter.
 
-Representative command (with `RAYON_NUM_THREADS=4` on mbp2012 and `1` on
-antix1):
+Representative command (with `RAYON_NUM_THREADS=8` on HP ProBook, `4` on
+mbp2012, and `1` on antix1):
 
 ```bash
 willamette run --model SmolLM2-360M-Instruct-Q8_0.gguf \
