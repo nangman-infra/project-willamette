@@ -33,6 +33,11 @@ pub mod q6_k;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod q6_k_sse2;
 pub mod q8_0;
+#[cfg(all(
+    not(willamette_q8_scalar),
+    any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")
+))]
+mod q8_0_simd;
 pub mod sampler;
 pub mod stage_timing;
 

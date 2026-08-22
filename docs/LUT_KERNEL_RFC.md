@@ -1,8 +1,8 @@
 # LUT BitLinear Kernel — Design RFC
 
-*Status: draft, 2026-05-30. Triggered by the mbp2012 measurement
-cycle, which closed every other deferred § 2 LIMITATIONS track and
-left LUT as the only standing entry.*
+*Status: partially implemented. The scalar LUT and SSE2-only runtime
+dispatch shipped in v0.10.0-mvp; the SSSE3 `pshufb` follow-up remains
+deferred and measurement-gated.*
 
 This document is the design + acceptance contract for adding a
 table-lookup BitLinear matvec kernel to Willamette. It exists to
@@ -46,8 +46,7 @@ and the RFC closes without merging the kernel.
 * A new BitLinear matvec implementation: `src/model/bitlinear_lut.rs`
 * Runtime dispatch entry from `src/model/bitlinear.rs` and a
   `Kernel::Lut*` variant in `src/model/dispatch.rs`.
-* Two LUT variants (decided at build time, not runtime, since the
-  table layout differs):
+* Two planned LUT variants:
   * **Scalar LUT** — pure Rust, no SIMD. Portable; runs on
     Pentium-M antix1 (SSE2 only) without `pshufb`. First target.
   * **SSSE3 LUT** — `pshufb` accelerated. Runs on mbp2012 and
@@ -143,11 +142,10 @@ pub enum Kernel {
 }
 ```
 
-Build-time `--cfg willamette_lut` gates the new variants in. The
-fall-through behaviour is unchanged: if neither LUT variant
-applies, the dispatcher returns `X86Sse2` (or `Scalar`, or
-`AArch64Neon` on aarch64). Hosts without LUT are *strictly
-unaffected*.
+The scalar LUT is compiled on x86/x86_64 and selected at runtime for
+SSE2 hosts without SSSE3. SSSE3+ hosts retain SSE2 i8. The SSSE3 LUT
+remains unimplemented; `willamette_lut` is historical prototype cfg
+terminology rather than the production dispatch switch.
 
 ## 5. Migration steps
 
@@ -178,13 +176,11 @@ host:
 | mbp2012 (SSE2 i8 default 1.05 ms) | 9.41× | **0.40×** (SSE2 i8 wins by 2.5×) |
 | **antix1 (SSE2 i8 default 37.08 ms)** | **8.54×** | **5.29×** (LUT wins decisively) |
 
-**The antix1 number is what makes RFC step 3 actually worth
-shipping.** Pentium-M's narrow SIMD pipeline + 16 KiB L1d makes
-the SSE2 i8 kernel slow enough that the scalar LUT's one-byte-per-
-table-read inner loop wins by 5.29× on the dominant decode-step
-component. mbp2012 still loses with LUT because its Ivy Bridge
-SIMD already does in one instruction what the LUT collapses into
-one table read.
+The sampled antix1 `attn_q` result justified testing dispatch, but it
+did not establish a whole-forward or complete-token speedup. The
+single-shape comparison was later found insufficiently representative;
+mbp2012 still loses with LUT because its Ivy Bridge SIMD handles the
+dense path efficiently.
 
 **Step-4 gate recalibration (kept from the original step-1 doc
 write-up, still correct)**: any SSSE3 `pshufb` LUT has to beat
@@ -207,11 +203,10 @@ while keeping the win.
 
 ### Step 3 — Dispatch integration
 
-Add `Kernel::X86Sse2LutScalar` and the dispatch branch. Default
-stays `X86Sse2 (i8)`. New CLI flag or `--cfg` opts a user into
-the LUT path. Bench banner reports which kernel ran. Same
-fidelity contract as v0.9.0 KV cache: cosine ≥ 0.999 on
-post-`output_norm` + byte-identical Stage 5-E greedy.
+**Outcome:** `Kernel::X86Sse2ScalarLut` shipped in v0.10.0-mvp.
+SSE2-without-SSSE3 selects scalar LUT; SSSE3+ selects SSE2 i8. No CLI
+opt-in is required. The bench banner reports the selected kernel, and
+Stage 5-E greedy parity is preserved.
 
 ### Step 4 — SSSE3 `pshufb` LUT *(only on hosts that detect SSSE3)*
 
@@ -235,32 +230,26 @@ only as a historical marker — it was calibrated against an
 imagined scalar baseline, not against the production kernel
 that already exists.
 
-### Step 5 — Doc + release *(deferred — gain did not materialise end-to-end)*
+### Step 5 — Documentation and release *(completed without a speed claim)*
 
-The end-to-end measurement on antix1 with the dispatch
-integrated (`docs/BENCHMARKS.md` 2026-05-30 § "Step-3
-end-to-end measurement") shows the predicted matvec-level 5×
-**did not turn into a decode-step gain**: matvec is ~10 % of
-the decode-step budget, and a 5× cut there is < 1 percentage
-point end-to-end — inside the ±10 % noise floor.
+The historical cached-forward measurement on antix1 showed no
+measurable gain. Its original explanation that BitLinear was only
+~10% of the step was later disproved: stage timing found all seven
+BitLinear matvecs consume about 99% of cached-forward time. That
+instrumented scope excludes lm-head and argmax. The prototype's cold,
+single-`attn_q` 5.29× comparison was not representative of all matrix
+shapes or steady complete-token execution.
 
-Per [[feedback-no-fake]] no `v0.10.0-mvp` release tag goes out
-on a "5× faster on Pentium-M" claim. The dispatch integration
-stays on main as a correctness / consistency change (pure-Rust
+Per [[feedback-no-fake]], v0.10.0-mvp did not claim a 5×
+Pentium-M speedup. The dispatch integration shipped as a correctness
+and consistency change (the pure-Rust
 LUT path is easier to maintain than the SSE2 i8 intrinsics
 path; both produce byte-identical Stage 5-E greedy output;
-parity tests cover the LUT path on every x86 build). A future
-release that bundles other meaningful changes will absorb this
-dispatch change in its CHANGELOG body — *not* as a performance
-claim.
+parity tests cover the LUT path on every x86 build).
 
-The next track per the measurement is **bandwidth, not
-compute**: KV cache i4 group quantisation and per-layer
-scratch reduction are first-order moves, since the matvec is
-already a small slice of the decode-step budget. Step 4 of
-this RFC (SSSE3 `pshufb` LUT) drops out for the same reason —
-even if it succeeded, the win would be in the ~10 %-of-decode
-component on hosts where SSE2 i8 already wins.
+SSSE3 `pshufb` remains deferred. It must beat SSE2 i8 on
+representative FFN shapes and improve complete-token throughput before
+landing; the historical single-`attn_q` result is not sufficient.
 
 The RFC itself stays in `docs/` as the durable record of why
 this kernel exists, what it promised, and where the
@@ -307,15 +296,9 @@ measurement disagreed with the projection.
   TL2 layout happens to be a useful reference, fine; if it
   conflicts with our shape, we ignore it.
 
-## 9. Decision pending the user
+## 9. Disposition
 
-This RFC is *plan-then-act*. It does not merge any code. The
-implementation begins only after the user reviews this document
-and approves step 1 (the scalar LUT prototype + measurement).
-The expected outcomes are either:
-
-* **Cleared gate** → steps 2–5 unfold over a follow-up cycle.
-* **Failed gate** → BENCHMARKS gets a "LUT — measured negative"
-  section the way KV i4 just did, and the next track up the
-  roadmap (Phase III-B Llama, Phase IV preprocessor, or smaller
-  KV-q4-group-quant cycle) becomes the next pick.
+The scalar prototype and SSE2-only dispatch shipped in v0.10.0-mvp.
+The SSSE3 step remains deferred under the representative-shape and
+complete-token gates above. This document is retained as the design
+and corrected outcome record.

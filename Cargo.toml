@@ -30,6 +30,8 @@ ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"       # Stage 9-E: terminal raw mode + event polling
 sysinfo = "0.32"         # v0.3.0: cross-platform CPU/memory polling for the dashboard pane
 unicode-width = "0.2"    # v0.3.0: cell-width measurement for cursor placement (CJK / emoji)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 sha2 = "0.10"            # pinned external-artifact checksum regression
@@ -45,6 +47,7 @@ strip = true
 # Declared cfgs that are intentionally optional (not Cargo features).
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(willamette_i8_activations)",
+    "cfg(willamette_q8_scalar)",
     "cfg(willamette_sse2_f32)",
     "cfg(willamette_lut)",
     "cfg(willamette_stage_timing)",

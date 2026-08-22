@@ -1,0 +1,6 @@
+# host|remote willamette binary|remote model|Rayon threads|decode steps
+# Use aliases from ~/.ssh/config. Never put usernames, IP credentials, or
+# passwords in this file. Copy it to ignored benchmark-hosts.local.
+antix1|/home/user/bin/willamette|/home/user/models/ggml-model-i2_s.gguf|1|10
+mbp2012|/home/user/bin/willamette|/home/user/models/ggml-model-i2_s.gguf|4|10
+hp-probook|/home/user/bin/willamette|/home/user/models/ggml-model-i2_s.gguf|8|10

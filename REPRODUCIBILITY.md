@@ -1,4 +1,4 @@
-# Reproducibility — Project Willamette v0.12.0
+# Reproducibility — main after Project Willamette v0.12.0-mvp
 
 *Last revised 2026-08-12.*
 
@@ -20,16 +20,17 @@ reproduce a result, check this file first.
 `cargo --version` and `rustc --version` should both return `1.94.0` or
 newer; older versions may compile but were not exercised in CI.
 
-## 2. Host
+## 2. Hosts
 
-* **Reference host**: Apple Silicon Mac, `aarch64-apple-darwin`,
+* **Reference compatibility host**: Apple Silicon Mac, `aarch64-apple-darwin`,
   Darwin kernel `25.5.0` or newer.
 * `uname -m` → `arm64`
 * `rustc -vV | grep host` → `host: aarch64-apple-darwin`
 
-All numbers in this repo were generated on this host class. Other
-hosts can run the project — Stage 6-A scalar fallback is portable —
-but the NEON timings and the 7.5× speed-up will not transfer.
+Measurements are host-specific. Apple NEON and reference-compatibility
+values use the M4 host; humble-hardware and x86 values use the host named
+in each benchmark table (`antix1`, `mbp2012`, or HP ProBook 430 G6).
+Do not transfer timings between hosts.
 
 ## 3. Model file
 
@@ -131,6 +132,29 @@ metadata default adds no BOS and the command adds no implicit EOS.
 willamette perplexity --model models/SmolLM-135M-Instruct-Q4_0.gguf \
   --file wikitext-2-raw/wiki.test.raw --max-tokens 1024
 ```
+
+### Cross-runtime benchmark reference
+
+The 2026-08-12 SmolLM Q8_0 comparison in `docs/BENCHMARKS.md` pins official
+llama.cpp release `b10369`, commit `6e62ba538`:
+
+| Artifact | SHA256 |
+| -------- | ------ |
+| macOS arm64 release archive | `de2ac2c0a7cc245bce2411393658ff19c9c00d9d1fe37c5dfe94668c0d7bc01f` |
+| Ubuntu x64 release archive | `675a266f6cc8a8c7b85dc431a2472e372d0ff3741b7f4eb153dc786dff3964d1` |
+| GitHub source archive fetched 2026-08-12 | `ef81cdfea0be0d18fd6b55aa3b65790f91d75b9c31d56403e2de1c8adbf23d0e` |
+
+There is no official i686 archive for this release. The antix1 source build
+uses CMake `3.25.1`, GCC/G++ `12.2.0`, and these CPU options:
+
+```text
+GGML_NATIVE=OFF GGML_SSE42=OFF GGML_AVX=OFF GGML_AVX2=OFF
+GGML_AVX512=OFF GGML_FMA=OFF GGML_F16C=OFF GGML_BMI2=OFF
+```
+
+Omitting `GGML_BMI2=OFF` produced an i686 binary that trapped with `Illegal
+instruction` on antix1. The source archive lacks `.git` metadata, so its build
+banner reports `b0-unknown`; the archive hash above is the provenance pin.
 
 ### Derived Q6_K embedding artifact
 
@@ -302,7 +326,7 @@ Expected `compat_report.md` (full content tracked in
     --decode-steps 3
 ```
 
-Expected on Apple Silicon M-series (NEON dispatch active):
+Historical Apple Silicon M-series output (NEON dispatch active):
 
 ```text
 Host arch:        aarch64 (Apple Silicon / ARM64)
@@ -312,6 +336,10 @@ BitLinear matvec (attn_q, 2560×2560 ternary): ~1.9 ms / ~3500 M elem/s
 Single-token forward (30 layers, no cache):   ~670 ms / ~1.5 tok/s
 Decode-step forward (with KV cache, avg 3):    ~660 ms / ~1.5 tok/s
 ```
+
+The no-cache and cached-forward lines above exclude lm-head projection and
+token selection. Current `bench` also prints lm-head, argmax, and the complete
+steady-state token total; use that final total for generated-token throughput.
 
 Variance: ±10 % run-to-run is normal (no warm-up beyond a single
 matvec). Numbers will be 5–7× slower on the same hardware if you

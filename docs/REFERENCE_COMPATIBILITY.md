@@ -186,8 +186,10 @@ existing tests still pass.
   Pentium-M 2 GHz against the scalar reference; greedy decode is
   byte-identical to the f32 SSE2 / scalar paths on the canonical
   prompt. Full numbers in [`BENCHMARKS.md`](BENCHMARKS.md).
-* **Stage 6-B+ (AVX2 / AVX-512 / LUT)** remain deferred — they need
-  modern x86 / SSSE3+ hosts to validate against the scalar reference.
+* **BitLinear AVX2 / AVX-512** remain deferred. The scalar BitLinear LUT shipped
+  for SSE2-only hosts in v0.10.0-mvp. Classic Llama Q8_0 is a separate kernel
+  family: its NEON, AVX2, and SSE2 row dots are validated against scalar on M4,
+  HP ProBook, mbp2012, and antix1 respectively.
 
 ## 8. Stage 5-E checklist
 

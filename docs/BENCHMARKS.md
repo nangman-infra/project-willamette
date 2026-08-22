@@ -6,11 +6,12 @@ Reproducible CPU-only inference numbers. Most sections use the official
 1.106 GiB on disk, 332 tensors, 30 transformer blocks); sections for other
 pinned acceptance artifacts identify them explicitly.
 
-These numbers exist to make speed-up claims **falsifiable**. Every
-section names the host, the willamette tag, the dispatch backend, and
-the command that produced the timing. Re-running the same command on
-the same host with the same tag must reproduce the reported figure to
-within ±10 % (warm-cache decode-step variance).
+These numbers exist to make speed-up claims **falsifiable**. Each section
+records the provenance available for that measurement. The ±10% expectation
+applies only where the section explicitly claims repeated warm-cache runs;
+one-run and exploratory sections state their own caveats. "Cached forward"
+excludes lm-head projection and token selection; "complete token" includes
+both.
 
 ## Hosts
 
@@ -63,6 +64,16 @@ bitnet.cpp's production CPU path implicitly requires** (see the
 2026-05-30 head-to-head section below). Many Mid-2012-class laptops,
 low-end x86 thin clients, and legacy desktops sit in this sub-AVX2
 band; this is the first time we have direct numbers on one.
+
+### HP ProBook 430 G6 — modern x86 validation host
+
+| | |
+| --- | --- |
+| CPU | Intel Core i7-8565U |
+| Cores | 4 physical / 8 logical |
+| RAM | 15 GiB visible during the 2026-08-12 run |
+| OS | Ubuntu 24.04-family Linux, kernel `7.0.0-28-generic` during the 2026-08-12 run |
+| Benchmark threads | 8 |
 
 ## 2026-08-11 — Classic Llama 15M F16 on antix1
 
@@ -227,6 +238,117 @@ willamette run --model SmolLM2-360M-Instruct-Q8_0.gguf \
 
 Each table row is one warm-page observation, not a three-run median. The usual
 plus-or-minus 10% repeatability claim therefore does not apply to this section.
+
+## 2026-08-12 — SmolLM Q8_0 cross-runtime comparison
+
+This exploratory comparison runs pinned llama.cpp release `b10369` (commit
+`6e62ba538`) and Willamette on the same host and model file. Both commands use
+CPU-only execution, greedy decoding, the system and user text from the
+long-form comparison above, and a forced 120-token budget. The thread counts
+are 4 on M4 and mbp2012, 8 on HP ProBook, and 1 on antix1.
+
+The throughput columns are deliberately separate. llama.cpp's `Generation`
+rate excludes prompt processing, while Willamette's reported rate includes its
+70-token prefill. Wall time and peak RSS cover the complete process and are the
+closest directly comparable observations, but even those include different
+CLI startup and prompt-rendering implementations.
+
+| Host | Model | llama.cpp generation | Willamette end-to-end | llama.cpp wall / RSS | Willamette wall / RSS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Apple M4 | SmolLM-135M Q8_0 | 291.7 tok/s | 25.62 tok/s | 1.19 s / 368.1 MiB | 5.27 s / 168.1 MiB |
+| Apple M4 | SmolLM2-360M Q8_0 | 67.6 tok/s | 14.71 tok/s | 2.56 s / 978.0 MiB | 8.26 s / 401.2 MiB |
+| HP ProBook 430 G6 | SmolLM2-360M Q8_0 | 60.3 tok/s | 5.92 tok/s | 2.69 s / 581.9 MiB | 20.31 s / 426.5 MiB |
+| mbp2012 | SmolLM-135M Q8_0 | 90.3 tok/s | 7.65 tok/s | 2.12 s / 203.3 MiB | 15.73 s / 172.5 MiB |
+| mbp2012 | SmolLM2-360M Q8_0 | 39.9 tok/s | 2.98 tok/s | 4.39 s / 582.1 MiB | 40.30 s / 403.2 MiB |
+| antix1 | SmolLM-135M Q8_0 | 2.8 tok/s | 0.663 tok/s | 63 s / 206.2 MiB | 181 s / 156.6 MiB |
+| antix1 | SmolLM2-360M Q8_0 | 1.1 tok/s | 0.242 tok/s | 167 s / 499.5 MiB | 497 s / 388.8 MiB |
+
+The benchmark client could not reach HP over SSH before its 135M cross-runtime
+row was collected; no value is inferred from another host. macOS and x86_64
+Linux use the official llama.cpp archives. The release publishes no i686
+archive, so antix1 uses the same pinned
+source built with GCC 12.2 and all post-SSE2 x86 options disabled. In
+particular, `GGML_BMI2=OFF` is required: llama.cpp otherwise enables BMI2 by
+default and the resulting binary traps with `Illegal instruction` on this
+Pentium M.
+
+Willamette generated the same 120 token IDs on all measured hosts for each
+model. llama.cpp was also deterministic within its runtime, but its
+conversation-mode template does not produce the same prompt token boundary as
+Willamette's explicit ChatML encoder. The generated IDs therefore do not match
+across runtimes. These rows measure product-path speed and memory, not numerical
+or output parity. Raw-ChatML parity must be measured separately with identical
+input IDs.
+
+These are one-run warm-page observations. They establish the current gap and
+memory tradeoff, but are not a repeated-run performance claim.
+
+## 2026-08-12 — Q8_0 complete-token profile and SIMD kernel
+
+The schema-v1 JSON benchmark was generalized from BitNet-only dispatch to the
+classic Llama graph so it can profile the pinned SmolLM-135M Q8_0 artifact.
+Each baseline below is a stage-instrumented release build using the scalar
+Q8_0 row dot product. The optimized build changes only that row dot: NEON on
+aarch64, AVX2 when detected on x86/x86_64, SSE2 otherwise, and scalar on other
+targets. Thread counts are 4 on M4 and mbp2012, 8 on HP ProBook, and 1 on
+antix1.
+
+| Host | Q8_0 kernel | Steps | Cached forward | lm-head | Argmax | Complete token | Speed-up |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Apple M4 | scalar | 30 | 20.61 ms | 4.28 ms | 0.026 ms | 24.92 ms | baseline |
+| Apple M4 | NEON | 30 | 7.15 ms | 1.02 ms | 0.025 ms | 8.19 ms | **3.04x** |
+| HP ProBook 430 G6 | scalar | 10 | 42.65 ms | 9.36 ms | 0.065 ms | 52.08 ms | baseline |
+| HP ProBook 430 G6 | AVX2 | 10 | 18.99 ms | 3.02 ms | 0.067 ms | 22.08 ms | **2.36x** |
+| mbp2012 | scalar | 10 | 66.13 ms | 16.73 ms | 0.058 ms | 82.91 ms | baseline |
+| mbp2012 | SSE2 | 10 | 32.20 ms | 7.22 ms | 0.059 ms | 39.47 ms | **2.10x** |
+| antix1 | scalar | 5 | 764.44 ms | 202.89 ms | 0.179 ms | 967.51 ms | baseline |
+| antix1 | SSE2 | 5 | 305.90 ms | 93.14 ms | 0.182 ms | 399.22 ms | **2.42x** |
+
+Before optimization, cached forward consumed 79.0-82.7% of complete-token
+time and the tied Q8_0 lm-head another 17.2-21.0%; argmax was negligible.
+Within M4 cached forward, the four timed Q8_0 matvec groups accounted for about
+97% of the summed stage time. FFN gate/up was the largest group, followed by
+FFN down. A row-dot kernel therefore improves both dominant top-level stages
+without changing graph or cache behavior.
+
+The pinned SmolLM-135M Q8_0 llama.cpp golden test passes with the NEON kernel.
+Unit coverage also compares dispatched SIMD against the scalar implementation
+across multiple Q8_0 blocks and retains non-finite-scale rejection. The short
+benchmark checksum did not change, but that is not treated as proof of parity
+for arbitrary prompts.
+
+These are single warm-page profiles intended to select and validate the
+optimization target, not repeated-run medians. Instrumentation was enabled
+with `RUSTFLAGS="--cfg willamette_stage_timing"`; scalar controls additionally
+used `--cfg willamette_q8_scalar`.
+
+### Post-SIMD product-path rerun on three Linux laptops
+
+After the stage profile, the current non-instrumented release binary generated
+120 greedy tokens from the same 70-token ChatML sky prompt on all three remote
+laptops. This is the product `run` path, including prefill.
+
+| Host | Kernel | Model | Inference | End-to-end | Peak RSS |
+| --- | --- | --- | ---: | ---: | ---: |
+| HP ProBook 430 G6 | Q8_0 AVX2 | SmolLM-135M Q8_0 | 4.183 s | 28.686 tok/s | 206.5 MiB |
+| HP ProBook 430 G6 | Q8_0 AVX2 | SmolLM2-360M Q8_0 | 7.772 s | 15.441 tok/s | 437.9 MiB |
+| mbp2012 | Q8_0 SSE2 | SmolLM-135M Q8_0 | 11.225 s | 10.690 tok/s | 170.2 MiB |
+| mbp2012 | Q8_0 SSE2 | SmolLM2-360M Q8_0 | 17.038 s | 7.043 tok/s | 405.1 MiB |
+| antix1 | Q8_0 SSE2 | SmolLM-135M Q8_0 | 64.108 s | 1.872 tok/s | 156.7 MiB |
+| antix1 | Q8_0 SSE2 | SmolLM2-360M Q8_0 | 171.913 s | 0.698 tok/s | 389.0 MiB |
+
+The 135M 120-token ID sequence matched on all three hosts. For 360M, mbp2012
+and antix1 matched, while HP AVX2 diverged near the end; the scalar control also
+took a different greedy path from the SIMD builds. This is consistent with
+small row-dot reduction-order differences crossing later argmax boundaries.
+The pinned 360M `The capital of France is Paris.` golden still matched exactly
+on HP AVX2. Q8_0 SIMD therefore has bounded row-level numerical equivalence and
+prompt-specific golden parity, not universal byte identity across kernels.
+
+These remain one-run observations. mbp2012 was under variable background load;
+its first 360M run measured 2.749 tok/s and an immediate repeat measured 7.043
+tok/s. The repeated value is reported above, but a future median sweep should
+replace both single observations.
 
 ## 2026-08-11 — SmolLM-135M-Instruct F16 on antix1
 
@@ -697,7 +819,7 @@ mbp2012 just told us those hosts already win with SSE2 i8.
   on antix1. End-to-end verification belongs in step 3, against
   the byte-identical Stage 5-E greedy gate.
 
-### Step-3 end-to-end measurement (2026-05-30, same antix1)
+### Step-3 historical cached-forward measurement (2026-05-30, same antix1)
 
 `9f95f4d` lands the dispatch integration so SSE2-only hosts
 default to scalar LUT. Re-running the bench on antix1 with the
@@ -714,30 +836,25 @@ new dispatch (and `--decode-steps 5` instead of the prior
 | Decode-step (5-avg) | **2491 ms / 0.40 tok/s** | 0.41 tok/s |
 | Stage 5-E reference greedy | `[12366, 13, 12366, 374, 264]` byte-identical | same |
 
-**End-to-end speed-up = 1.0× (within noise).** The matvec drops
+**Cached-forward speed-up in this historical measurement = 1.0×
+(within noise).** At that time, `bench --decode-steps` excluded the
+tied lm-head and argmax. The sampled matvec drops
 by the predicted factor, but the predicted `0.41 → ~1.0 tok/s`
 end-to-end gain does *not* materialise.
 
 ### What this means
 
-The matvec-vs-decode-step asymmetry is the load-bearing fact.
-A single decode-step on antix1 is ~2.5 s; the BitLinear matvec
-inside it accounts for roughly 240 ms (30 layers × 7 ms), i.e.
-**~10 % of the decode time**. The other 90 % is split across
-RMSNorm + RoPE + softmax + KV scan + lm_head + the FFN matvecs
-that *also* run BitLinear but feed off different cache windows.
-A 5× cut on a 10 %-of-budget line item is a 4 percentage-point
-end-to-end improvement at best — well inside the ±10 % run-to-
-run noise floor.
+The original interpretation of this result was wrong. It extrapolated
+one warmed `attn_q` sample and omitted the other six BitLinear matrix
+shapes in each layer. Later stage instrumentation measured all seven
+BitLinear matvecs at about 99.4% of antix1 cached-forward time. That
+scope still excludes lm-head and argmax, so it must not be read as a
+share of complete generated-token time.
 
-The earlier extrapolation in this section was wrong in
-exactly that way: matvec ratio × 1 was treated as decode
-ratio. Measured, the projection should have been ~1.05×, not
-~2-3×. The single-sample matvec timings in the original
-write-up (which compared a 37 ms SSE2 i8 number against a
-7 ms scalar LUT number) were also overstated — the 37 ms data
-point looks like cold-cache / SpeedStep idle, not steady
-state.
+The single-sample comparison of a 37 ms SSE2-i8 `attn_q` against a
+7 ms scalar LUT sample was also unrepresentative, likely including
+cold-cache or SpeedStep effects. It did not predict representative
+FFN shapes or complete-token performance.
 
 ### Honest disposition
 
@@ -1172,7 +1289,8 @@ not the raw tok/s figure.
 
 First Stage 6-B measurement. Same host (antix1, Pentium-M 2.0 GHz),
 same model file, same bench command. Built locally via
-`cargo build --release` (7m 13s on 2 GB RAM, no OOM); the published
+`cargo build --release` (7m 13s on 1 GiB physical RAM plus 1 GiB swap,
+no OOM); the published
 `v0.5.0-mvp` cross-compiled artifact matches this binary.
 
 ```

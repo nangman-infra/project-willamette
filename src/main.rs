@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
 
 use project_willamette::chat::ChatEngine;
 use project_willamette::gguf::reader::{GgufFile, GgufValue, GGUF_MAGIC};
@@ -18,6 +19,7 @@ use project_willamette::model::cached_forward::{forward_with_cache_into, Forward
 use project_willamette::model::forward::forward_single_token_position_zero;
 use project_willamette::model::generate::generate_with_cache_and_sampler;
 use project_willamette::model::kv_cache::KVCache;
+use project_willamette::model::linear::linear_matvec_f32;
 use project_willamette::model::lm_head::{argmax, compute_logits_from_graph, cross_entropy, top_k};
 use project_willamette::model::multi_forward::multi_token_forward;
 use project_willamette::model::primitives::embedding_gather;
@@ -248,6 +250,9 @@ enum Command {
         /// (the prefill is also timed separately).
         #[arg(long, default_value_t = 3)]
         decode_steps: usize,
+        /// Output format. JSON emits one versioned object on stdout.
+        #[arg(long, value_enum, default_value_t = BenchFormat::Human)]
+        format: BenchFormat,
     },
     /// Build a synthetic BitNet b1.58 GGUF file for throughput
     /// benchmarking on humble hardware. No tokenizer; random ternary
@@ -270,6 +275,21 @@ enum SynthPreset {
     Tiny,
     Small,
     Medium,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BenchFormat {
+    Human,
+    Json,
+}
+
+impl std::fmt::Display for BenchFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Human => "human",
+            Self::Json => "json",
+        })
+    }
 }
 
 impl std::fmt::Display for SynthPreset {
@@ -334,7 +354,8 @@ fn main() -> Result<()> {
         Command::Bench {
             model,
             decode_steps,
-        } => cmd_bench(&model, decode_steps),
+            format,
+        } => cmd_bench(&model, decode_steps, format),
         Command::Logits {
             model,
             prompt,
@@ -1195,7 +1216,207 @@ fn cmd_perplexity(path: &Path, file_path: &Path, max_tokens: usize, no_bos: bool
     Ok(())
 }
 
-fn cmd_bench(path: &Path, decode_steps: usize) -> Result<()> {
+#[derive(Serialize)]
+struct BenchResult<'a> {
+    schema_version: u32,
+    runtime: BenchRuntime,
+    model: BenchModel<'a>,
+    config: BenchConfig,
+    metrics: BenchMetrics,
+    stages: Vec<BenchStage>,
+}
+
+#[derive(Serialize)]
+struct BenchRuntime {
+    name: &'static str,
+    version: &'static str,
+    target_arch: &'static str,
+    kernel: String,
+}
+
+#[derive(Serialize)]
+struct BenchModel<'a> {
+    path: String,
+    bytes: u64,
+    architecture: &'a str,
+    blocks: u32,
+    vocab: u32,
+}
+
+#[derive(Serialize)]
+struct BenchConfig {
+    decode_steps: usize,
+    rayon_threads: usize,
+    stage_timing: bool,
+}
+
+#[derive(Serialize)]
+struct BenchMetrics {
+    matvec_ms: f64,
+    matvec_melements_per_second: f64,
+    forward_no_cache_ms: f64,
+    cached_forward_ms: f64,
+    lm_head_ms: f64,
+    argmax_ms: f64,
+    complete_token_ms: f64,
+    complete_tokens_per_second: f64,
+    token_checksum: u32,
+}
+
+#[derive(Serialize)]
+struct BenchStage {
+    name: &'static str,
+    total_ms: f64,
+    calls: u64,
+}
+
+fn cmd_bench(path: &Path, decode_steps: usize, format: BenchFormat) -> Result<()> {
+    anyhow::ensure!(decode_steps > 0, "--decode-steps must be greater than zero");
+    match format {
+        BenchFormat::Human => cmd_bench_human(path, decode_steps),
+        BenchFormat::Json => cmd_bench_json(path, decode_steps),
+    }
+}
+
+fn cmd_bench_json(path: &Path, decode_steps: usize) -> Result<()> {
+    use std::time::Instant;
+
+    let mmap =
+        ModelMmap::open(path).with_context(|| format!("opening model file: {}", path.display()))?;
+    let bytes = mmap.as_bytes();
+    let gguf = GgufFile::parse(bytes).map_err(|e| anyhow::anyhow!("GGUF parse error: {}", e))?;
+    let graph = ModelGraph::from_gguf(&gguf)
+        .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
+    let n_embd = graph.config.embedding_length as usize;
+    let bench_token = if graph.config.vocab_size > 15339 {
+        15339
+    } else {
+        0
+    };
+    let mut x = vec![0.0_f32; n_embd];
+    embedding_gather(graph.token_embd, bench_token, &mut x)
+        .map_err(|e| anyhow::anyhow!("embed: {}", e))?;
+    let attn_q = graph.layers[0].attn_q;
+    let mv_in = attn_q.shape[0] as usize;
+    let mv_out = attn_q.shape[1] as usize;
+    let mut q = vec![0.0_f32; mv_out];
+    linear_matvec_f32(attn_q, &x, &mut q).map_err(|e| anyhow::anyhow!("warm-up matvec: {}", e))?;
+    let started = Instant::now();
+    linear_matvec_f32(attn_q, &x, &mut q).map_err(|e| anyhow::anyhow!("matvec: {}", e))?;
+    let matvec_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    let started = Instant::now();
+    forward_single_token_position_zero(&graph, bench_token)
+        .map_err(|e| anyhow::anyhow!("forward: {}", e))?;
+    let forward_no_cache_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    let kv_dim = graph.config.kv_dim as usize;
+    let mut cache = KVCache::new(graph.layers.len(), kv_dim, decode_steps + 8);
+    let mut workspace = ForwardWorkspace::new(&graph);
+    let mut cached_hidden = Vec::new();
+    forward_with_cache_into(
+        &graph,
+        &mut cache,
+        &mut workspace,
+        bench_token,
+        0,
+        &mut cached_hidden,
+    )
+    .map_err(|e| anyhow::anyhow!("prefill: {}", e))?;
+    project_willamette::model::stage_timing::reset();
+
+    let mut cached_forward_seconds = 0.0;
+    let mut lm_head_seconds = 0.0;
+    let mut argmax_seconds = 0.0;
+    let mut token_checksum = 0;
+    for step in 0..decode_steps {
+        let started = Instant::now();
+        forward_with_cache_into(
+            &graph,
+            &mut cache,
+            &mut workspace,
+            bench_token,
+            (step + 1) as u32,
+            &mut cached_hidden,
+        )
+        .map_err(|e| anyhow::anyhow!("decode step: {}", e))?;
+        cached_forward_seconds += started.elapsed().as_secs_f64();
+
+        let started = Instant::now();
+        let logits = compute_logits_from_graph(&cached_hidden, &graph)
+            .map_err(|e| anyhow::anyhow!("lm head: {}", e))?;
+        lm_head_seconds += started.elapsed().as_secs_f64();
+
+        let started = Instant::now();
+        token_checksum ^= argmax(&logits).unwrap_or(0);
+        argmax_seconds += started.elapsed().as_secs_f64();
+    }
+
+    let divisor = decode_steps as f64;
+    let cached_forward_ms = cached_forward_seconds * 1000.0 / divisor;
+    let lm_head_ms = lm_head_seconds * 1000.0 / divisor;
+    let argmax_ms = argmax_seconds * 1000.0 / divisor;
+    let complete_token_ms = cached_forward_ms + lm_head_ms + argmax_ms;
+    let stages = project_willamette::model::stage_timing::snapshot()
+        .into_iter()
+        .map(|sample| BenchStage {
+            name: sample.name,
+            total_ms: sample.total.as_secs_f64() * 1000.0,
+            calls: sample.calls,
+        })
+        .collect::<Vec<_>>();
+    let result = BenchResult {
+        schema_version: 1,
+        runtime: BenchRuntime {
+            name: "willamette",
+            version: env!("CARGO_PKG_VERSION"),
+            target_arch: std::env::consts::ARCH,
+            kernel: if graph.forward_variant == ForwardVariant::BitNetSubNorm {
+                project_willamette::model::dispatch::active_kernel()
+                    .label()
+                    .to_string()
+            } else {
+                match attn_q.ggml_type {
+                    project_willamette::gguf::types::GgmlType::Q8_0 => {
+                        project_willamette::model::q8_0::active_kernel_label().to_string()
+                    }
+                    _ => attn_q.ggml_type.name(),
+                }
+            },
+        },
+        model: BenchModel {
+            path: path.display().to_string(),
+            bytes: bytes.len() as u64,
+            architecture: &graph.config.architecture,
+            blocks: graph.config.block_count,
+            vocab: graph.config.vocab_size,
+        },
+        config: BenchConfig {
+            decode_steps,
+            rayon_threads: rayon::current_num_threads(),
+            stage_timing: cfg!(willamette_stage_timing),
+        },
+        metrics: BenchMetrics {
+            matvec_ms,
+            matvec_melements_per_second: (mv_in as f64 * mv_out as f64)
+                / (matvec_ms / 1000.0)
+                / 1.0e6,
+            forward_no_cache_ms,
+            cached_forward_ms,
+            lm_head_ms,
+            argmax_ms,
+            complete_token_ms,
+            complete_tokens_per_second: 1000.0 / complete_token_ms,
+            token_checksum,
+        },
+        stages,
+    };
+    serde_json::to_writer(std::io::stdout().lock(), &result)?;
+    println!();
+    Ok(())
+}
+
+fn cmd_bench_human(path: &Path, decode_steps: usize) -> Result<()> {
     use std::time::Instant;
 
     let mmap =

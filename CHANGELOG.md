@@ -27,6 +27,12 @@ public API guarantee. It will be dropped when that guarantee is established.
 * `run --chatml --system TEXT` and `Tokenizer::encode_chatml_turn` support an
   explicit ChatML system turn. The official SmolLM2-360M-Instruct Q8_0 artifact
   is pinned with llama.cpp-identical prompt and greedy generation IDs.
+* Classic Llama Q8_0 row dots now dispatch to NEON, AVX2, or SSE2 at runtime,
+  with the validated scalar implementation retained as the fallback and
+  profiling control.
+* `bench --format json` now accepts the implemented classic Llama graph and
+  reports the actual Q8_0 SIMD backend; the detailed human report remains
+  BitNet-specific.
 
 ### Measured
 
@@ -37,6 +43,16 @@ public API guarantee. It will be dropped when that guarantee is established.
   IDs. The larger model gave a materially more accurate and instruction-aligned
   Rayleigh-scattering answer than SmolLM-135M Q8_0; device recommendations and
   the full comparison are recorded in `docs/BENCHMARKS.md`.
+* Same-host SmolLM-135M Q8_0 complete-token profiles improved by 3.04x on Apple
+  M4 NEON, 2.36x on HP ProBook AVX2, 2.10x on mbp2012 SSE2, and 2.42x on
+  antix1 SSE2 versus scalar-control builds. Cached forward and the tied
+  lm-head jointly account for effectively all complete-token time; both use
+  the optimized row dot.
+* Post-SIMD greedy 120-token product runs measured 135M / 360M at 28.69 / 15.44
+  tok/s on HP ProBook, 10.69 / 7.04 tok/s on mbp2012, and 1.87 / 0.698 tok/s
+  on antix1. The 135M IDs matched across all three hosts. The longer 360M
+  sequence diverged near the end between AVX2 and SSE2, while the pinned Paris
+  golden still matched exactly on HP AVX2.
 
 ## [v0.12.0-mvp] — 2026-08-12
 
@@ -231,16 +247,15 @@ includes the post-v0.9.0 LUT dispatch and profiling work.
 
 ## [v0.9.0-mvp] — 2026-05-29
 
-## [v0.9.0-mvp] — 2026-05-29
-
 Minor release. **KV cache moves from f32 to per-token absmax i8**,
 shrinking the dominant piece of dynamic memory by ~3.97×. The
 prior f32 cache cost 150 KB per token on BitNet 2B; the new i8 cache
 costs 37.7 KB. At full 4096-token context the resident KV cache
 drops from ~614 MB to ~154 MB — about 460 MB freed on every host,
-which translates on antix1 (Pentium-M, 2 GB) to a practical chat-
-history ceiling lift from ~3 K to ~13 K tokens (past the model's
-own 4096-position embedding limit). Design + measurements:
+which gave an early antix1 allocation upper-bound estimate of ~13 K
+tokens versus ~3 K before. antix1 has 1 GiB physical RAM plus 1 GiB
+swap; 13 K was not an observed practical history length, and the
+model's own context remains 4096 positions. Design + measurements:
 [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md).
 
 ### Added
@@ -299,8 +314,8 @@ and enforced.
 
 ### Tests
 
-* Suite total: **301** (was 299) — `+8` in
-  `model::kv_cache::tests`:
+* Added or updated eight cases in `model::kv_cache::tests`; exact suite
+  totals vary by target architecture:
   * `new_cache_has_zero_position` (updated for new `read_into` API)
   * `append_then_dequantise_round_trips_within_absmax_tol`
   * `zero_vector_round_trips_exactly`

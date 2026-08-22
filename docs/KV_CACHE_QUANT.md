@@ -11,21 +11,21 @@ contrast, grows linearly with the number of tokens already processed
 in this conversation. On humble hardware that growth is the dominant
 limit on how long a chat can run.
 
-On antix1 (Pentium-M, 2 GB RAM) the working budget looks like this:
+On antix1 (Pentium-M, 1 GiB physical RAM plus 1 GiB swap), the early
+allocation-budget estimate looked like this:
 
 | Item | Size |
 | --- | --- |
 | Model mmap (`ggml-model-i2_s.gguf`) | 1.13 GB (zero-copy, shared with OS page cache) |
 | OS + everything else | ≈ 0.3-0.4 GB |
-| Available for KV cache | **≈ 0.5 GB** |
+| Hypothetical allocation headroom | **≈ 0.5 GB** |
 
 Pre-v0.9 the f32 K and V tensors cost 150 KB per token (see math
 below), so the available budget capped chat history at roughly
 **3.3 K tokens** before allocation pressure started causing trouble.
-After v0.9 the per-token cost is 37.7 KB, raising the same ceiling
-to **≈ 13 K tokens** — well past the model's 4096-token positional
-embedding limit, i.e. the runtime is no longer the bottleneck on
-this host.
+After v0.9 the per-token cost is 37.7 KB, making **≈ 13 K tokens** an
+allocation upper-bound extrapolation rather than an observed practical
+history length. The model's 4096-token positional limit is lower.
 
 ## What changed
 
@@ -192,11 +192,10 @@ shows the formula massively overstates the runtime memory pressure:
 
 Why the antix1 number is so low: `KVCache::new(n_layers, kv_dim,
 max_seq_len)` calls `Vec::with_capacity` for the **full** i8 buffer up
-front. On Linux i686 the glibc allocator pre-commits those pages
-eagerly (versus x86_64's lazier policy seen on mbp2012's 32.7 KB/token
-shape). Once the capacity is reserved, subsequent `append` calls
-write into already-committed pages — VmHWM doesn't move, only VmData
-ticks up with small auxiliary allocations.
+front. The observed VmHWM behavior is consistent with capacity reservation
+and Linux page-commit/accounting effects, but this run does not isolate an
+allocator-specific cause. Once capacity is reserved, subsequent appends can
+touch already-accounted pages while VmData still changes.
 
 The practical consequence: **the user-visible chat-length ceiling on
 antix1 is the `max_seq_len` argument passed at startup, not a runtime
@@ -205,8 +204,9 @@ memory cliff**. `cargo run --release …` sets
 `src/main.rs::cmd_run`), so a 100-token run only reserves ~5 MB of
 cache. `cargo run --release -- chat --max-seq-len 4096` reserves the
 model's full 4 096-token allocation up front, which by the formula is
-4 096 × 37.7 KB = 154 MB — antix1 holds that easily inside its 800-MB
-available budget after the 1.1 GB mmap.
+4 096 × 37.7 KB = 154 MB. The allocation completed on the 996 MiB
+physical host without process swap in the observed run; mmap-backed model
+pages need not all be resident simultaneously.
 
 The "~13 K-token ceiling" stays *technically* true as a hypothetical
 upper bound (max bytes the allocation *could* commit), but a chat user
@@ -242,9 +242,10 @@ near `model_mmap + 1-2 MB`, not `model_mmap + 800 × 37.7 KB`.
   An i8 K-and-Q dot (similar to the i8 BitLinear path) would save
   the dequantisation cost; whether that is worth the code added is
   a measurement question on a host where decode time is dominated
-  by KV scan, not BitLinear matvec — which is not where antix1 sits
-  today (96.35 % BitLinear per `perf` on the v0.5 era). Revisit if
-  that ratio shifts.
+   by KV scan, not BitLinear matvec. Historical v0.5 profiling attributed
+   96.35% of cached-forward time to BitLinear; later stage instrumentation
+   measured about 99% on antix1 and mbp2012. Neither percentage includes
+   lm-head projection. Revisit if that ratio shifts.
 * **More aggressive schemes (Q4_0, Q4_K-style group quant).** Would
   cut another ~2 × off the cache. The trade-off is more code (group
   size, two-pass scale/zero-point) and a wider fidelity gap that

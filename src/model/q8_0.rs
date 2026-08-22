@@ -1,4 +1,4 @@
-//! Scalar GGML Q8_0 row decoding shared by embeddings, Linear, and lm-head.
+//! GGML Q8_0 row decoding with SIMD dot dispatch and scalar fallback.
 
 use crate::error::WillametteError;
 use crate::gguf::tensor::TensorView;
@@ -49,6 +49,27 @@ pub fn dequantize_row(data: &[u8], output: &mut [f32]) -> Result<(), WillametteE
 
 pub fn dot_row(data: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     validate_lengths(data, input.len())?;
+
+    #[cfg(not(willamette_q8_scalar))]
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("neon") {
+        return unsafe { super::q8_0_simd::dot_row_neon(data, input) };
+    }
+    #[cfg(not(willamette_q8_scalar))]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return unsafe { super::q8_0_simd::dot_row_avx2(data, input) };
+    }
+    #[cfg(not(willamette_q8_scalar))]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("sse2") {
+        return unsafe { super::q8_0_simd::dot_row_sse2(data, input) };
+    }
+
+    dot_row_scalar(data, input)
+}
+
+fn dot_row_scalar(data: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     let mut sum = 0.0_f32;
     for (block_index, block) in data
         .chunks_exact(TensorView::Q8_0_BYTES_PER_BLOCK as usize)
@@ -61,6 +82,25 @@ pub fn dot_row(data: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
         }
     }
     Ok(sum)
+}
+
+pub fn active_kernel_label() -> &'static str {
+    if cfg!(willamette_q8_scalar) {
+        return "Q8_0 scalar";
+    }
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("neon") {
+        return "Q8_0 NEON";
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return "Q8_0 AVX2";
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("sse2") {
+        return "Q8_0 SSE2";
+    }
+    "Q8_0 scalar"
 }
 
 #[cfg(test)]
@@ -96,6 +136,23 @@ mod tests {
             .map(|(weight, value)| weight * value)
             .sum::<f32>();
         assert!((dot_row(&data, &input).unwrap() - expected).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dispatched_dot_matches_scalar_across_blocks() {
+        let mut data = Vec::new();
+        for block_index in 0..4 {
+            data.extend(block(
+                0.125 * (block_index + 1) as f32,
+                (0..32).map(move |value| ((value * 17 + block_index * 11) % 127) as i8 - 63),
+            ));
+        }
+        let input = (0..128)
+            .map(|value| ((value * 29 % 101) as f32 - 50.0) / 13.0)
+            .collect::<Vec<_>>();
+        let expected = dot_row_scalar(&data, &input).unwrap();
+        let actual = dot_row(&data, &input).unwrap();
+        assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
     }
 
     #[test]

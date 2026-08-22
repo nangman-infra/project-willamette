@@ -6,16 +6,18 @@ Raspberry-Pi-class ARM — without a GPU. The proof is two binaries:
 an offline **`willamette-prep`** that bakes a model down to a
 hardware-aware form, and an online **`willamette`** runtime that
 just executes the baked form. The runtime is Rust, uses zero-copy
-`mmap`, and targets ARM + x86_64 + i686 (eventually MMX-era),
-validated on real hardware (antiX on Pentium-M today) and on
-emulators (QEMU / 86Box).
+`mmap`, and ships Linux `x86_64`, `i686`, `aarch64`, and `armv7`
+plus macOS `aarch64` and `x86_64` builds. Real-hardware inference is
+validated on Apple aarch64 and Linux x86_64/i686; Linux ARM remains
+build-supported but not yet benchmarked on-device.
 
 > **Sweet spot is hardware-dependent.** On Pentium-M-class SSE2
 > hardware (the verified floor at 2026-05-27) the measured ceiling
-> is roughly **100 M params for chat speed (≥ 5 tok/s)**, **500 M
+> is roughly **100 M params at ≥ 5 cached-forward steps/s**, **500 M
 > for "slow but usable" (≥ 1 tok/s)**, **5 B for demonstration
-> (≥ 0.1 tok/s)**. Modern AVX2 / multi-core moves every threshold an
-> order of magnitude up. Full scaling table and the EXO Pentium-II
+> (≥ 0.1 tok/s)**. These historical thresholds exclude lm-head and
+> token-selection cost, so they are not complete-generation guarantees.
+> Full scaling table and the EXO Pentium-II
 > comparison: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 Starting point: [microsoft/BitNet-b1.58-2B-4T](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T)
@@ -50,7 +52,7 @@ Engineering rules every change is held to (full list in
 │   ── windowing / sparse tables     │         │                                          │
 │   ── target-ISA aware blocking     │         │                                          │
 └────────────────────────────────────┘         └──────────────────────────────────────────┘
- NARROW Q6_K PATH WORKING TODAY                         WORKING TODAY (v0.12.0-mvp)
+ NARROW Q6_K PATH WORKING TODAY                         WORKING ON MAIN
 ```
 
 The split is the same pattern TensorFlow Lite / Core ML / ONNX
@@ -62,7 +64,7 @@ to Q6_K, and preserves every transformer I2_S slot. Additional transform
 profiles, architecture conversion, and target-aware blocking remain roadmap
 work.
 
-## Status: v0.12.0-mvp
+## Status: main after v0.12.0-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -73,15 +75,16 @@ What works **today**, on the path toward the thesis:
 | BitNet-family fine-tunes accepted | ✅ `bitnet-b1.58`, `bitnet-25`, `bitnet` GGUF strings load through `model::architecture::registry`. End-to-end greedy decode verified on antix1 against [`jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF`](https://huggingface.co/jpacifico/Aramis-2B-BitNet-b1.58-i2s-GGUF) (French) and [`Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf`](https://huggingface.co/Bifrost-AI/Bitnet-b1.58-Bifrost-SOL-2B-4T-gguf) (Solana coding). See [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md). |
 | Classic Llama F16 | ✅ unscaled full-head RoPE, GQA/MHA, F16 linears, SiLU/SwiGLU, separate or tied F16 lm-head, and `llama` SentencePiece BPE. Pinned 260K and 15M TinyStories prompt IDs and greedy outputs match llama.cpp exactly; the 260K golden also passes on antix1 i686/Pentium-M. |
 | SmolLM-135M-Instruct F16 | ✅ `smollm` GPT-2 pre-tokenizer, 30-layer GQA graph, tied lm-head, plain completion prompts, and single-turn `run --chatml`. Pinned tokenizer IDs and `2 + 2 → 4` greedy output match llama.cpp; antix1 reaches about 0.765 steady-state tok/s at 274.7 MiB peak RSS. |
-| SmolLM-135M-Instruct Q8_0 | ✅ scalar Q8_0 embedding, transformer linears, and tied lm-head. The pinned arithmetic golden matches llama.cpp, and F16/Q8_0 produce identical 10-token sky completions on Apple M4, HP ProBook 430 G6, mbp2012, and antix1. On antix1 the 138.1 MiB artifact reaches 1.03 tok/s at 154.5 MiB peak RSS. Its first 1,024 WikiText-2 transitions regress perplexity by 0.363% versus F16. |
+| SmolLM-135M-Instruct Q8_0 | ✅ Q8_0 embedding, transformer linears, and tied lm-head with runtime NEON / AVX2 / SSE2 row-dot dispatch and scalar fallback. The pinned arithmetic golden matches llama.cpp. SIMD improves measured complete-token throughput by 2.10-3.04x across four hosts; current 120-token greedy IDs also match across HP ProBook, mbp2012, and antix1. Its first 1,024 WikiText-2 transitions regress perplexity by 0.363% versus F16. |
 | SmolLM-135M-Instruct Q4_0 | ⚠️ supported low-memory scalar path, but not recommended as the default. The pinned mixed artifact uses Q4_0 transformer linears and a Q8_0 tied embedding/lm-head. It is 87.5 MiB and reaches 0.873 tok/s at 103.9 MiB peak RSS on antix1, but is slower than Q8_0 on all four hosts and regresses 1,024-transition perplexity by 19.27% versus F16. |
-| SmolLM2-360M-Instruct Q8_0 | ✅ official 386,404,992-byte artifact loads unchanged. Explicit ChatML system/user prompt IDs and the greedy `The capital of France is Paris.` output match llama.cpp exactly. The same 120 sampled token IDs were reproduced on Apple M4, HP ProBook 430 G6, mbp2012, and the 996 MiB antix1 host; end-to-end throughput was 16.77 / 5.72 / 2.93 / 0.254 tok/s with zero process swap. |
+| SmolLM2-360M-Instruct Q8_0 | ✅ official 386,404,992-byte artifact loads unchanged. Explicit ChatML system/user prompt IDs and the greedy `The capital of France is Paris.` output match llama.cpp exactly. The same 120 sampled token IDs were reproduced on Apple M4, HP ProBook 430 G6, mbp2012, and the 996 MiB antix1 host. The recorded 16.77 / 5.72 / 2.93 / 0.254 tok/s product-path baseline predates the Q8_0 SIMD kernel and is retained for provenance. |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
 | Apple Silicon NEON kernel | ✅ implemented + validated (Apple M4 dev host) |
-| **x86 SSE2 i8 kernel (default)** | ✅ **Stage 6-B landed** — validated on antix1 (Pentium-M 2 GHz, i686). 2.2× over f32 SSE2, ~5.4× over scalar; byte-identical greedy output |
-| Runtime CPU dispatch | ✅ NEON / SSE2-i8 / SSE2-f32 / scalar selected at runtime ([`src/model/dispatch.rs`](src/model/dispatch.rs)) |
-| **Prebuilt static binaries** | ✅ 6 targets per release — `x86_64`, `i686`, `aarch64`, `armv7` Linux musl + `aarch64`, `x86_64` macOS. See [Releases](https://github.com/nangman-infra/project-willamette/releases). |
+| **x86 SSE2 kernels** | ✅ SSE2 i8 is selected on SSSE3+ x86; the pure-Rust scalar LUT is selected on SSE2-only x86 such as antix1. Both preserve verified greedy output. |
+| **Q8_0 SIMD kernels** | ✅ NEON on Apple M4, AVX2 on HP ProBook, and SSE2 on mbp2012/antix1; all measured on-device against the scalar control. |
+| Runtime CPU dispatch | ✅ BitLinear selects NEON / SSE2-i8 / SSE2-only scalar LUT / scalar; Q8_0 independently selects NEON / AVX2 / SSE2 / scalar. |
+| **Prebuilt static binaries** | ✅ the release workflow builds 6 targets — `x86_64`, `i686`, `aarch64`, `armv7` Linux musl + `aarch64`, `x86_64` macOS. See [Releases](https://github.com/nangman-infra/project-willamette/releases). |
 | Multi-core CPU parallelism | ✅ `rayon` per-row BitLinear matvec |
 | Norm-weight + scratch caching | ✅ Stage 10-A / 10-B |
 | **KV cache i8 quantisation** | ✅ **per-token absmax i8 since v0.9.0** — ~3.97× memory shrink (150 KB → 37.7 KB per token on BitNet 2B). Greedy output byte-identical to the f32 reference on Stage 5-E prompts (Apple M4 NEON + antix1 i686 SSE2). See [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md). |
@@ -91,9 +94,9 @@ What works **today**, on the path toward the thesis:
 | `willamette-prep` artifact linker / Q6_K tied embedding | ✅ explicit plan + full GGUF relocation + dry-run; standalone prep binary and compatible runtime subcommand produce the same 0.745 GiB artifact; scalar gather + runtime SSE2 lm-head on x86 |
 | Architecture graph seam | ✅ registered families declare layer tensor roles and a forward variant; BitNet and classic Llama F16/Q4_0/Q8_0 are implemented |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
-| Tests | **285** default tests passing + **100** external-model tests passing (Mac aarch64), 0 warnings; see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
+| Tests | Default and explicitly ignored external-model suites pass on the documented validation hosts; exact counts vary by target architecture. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md). |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
-| Beat vanilla Llama 2 same-machine | ✅ 110M head-to-head on antix1: BitNet+SSE2 **1.97× faster** than `llama2.c` |
+| Historical `llama2.c` comparison | ⚠️ the 110M antix1 comparison used generated tok/s for `llama2.c` but cached-forward-only tok/s for Willamette. It is retained as forward-path evidence, not a complete-generation speedup claim. |
 
 What does **not** work yet but is on the roadmap toward the thesis:
 
@@ -102,13 +105,13 @@ What does **not** work yet but is on the roadmap toward the thesis:
 | Model coverage beyond the implemented classic Llama F16/Q4_0/Q8_0 subset (Llama 3 / Mistral / Phi / Gemma) | ❌ scaled/partial RoPE, other linear formats, architecture-specific biases, and additional tokenizer families remain unsupported — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
 | Standard GGUF quant types beyond the narrow Llama Q4_0/Q8_0 slice (Q4_K, Q5_K, …) | ❌ BitLinear remains `I2_S`-only; tied embedding additionally supports Q6_K |
 | Additional `willamette-prep` transform profiles beyond the tied Q6_K embedding | ❌ architecture conversion, activation analysis, sparse tables, and target-ISA blocking not started; generic GGUF relocation mechanics are implemented |
-| AVX2 / AVX-512 SIMD kernel | ❌ not started — Pentium-M doesn't have it; gain target for modern x86 |
-| LUT (TL1/TL2) kernel | ❌ design RFC drafted 2026-05-30 ([`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md)); plan-then-act, ≥ 1.3× measurement gate before any code lands |
+| BitLinear I2_S AVX2 / AVX-512 kernel | ❌ not started; the new Q8_0 AVX2 row-dot kernel is a separate, shipped path validated on HP ProBook. |
+| Additional LUT kernels | ⚠️ the project-specific scalar LUT shipped in v0.10.0-mvp for SSE2-only x86. SSSE3 `pshufb`, upstream-compatible TL1/TL2, NEON, and AVX LUT variants remain unimplemented; see [`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md). |
 | MMX-era / sub-SSE2 kernel | ❌ not started |
 | KV cache int8 quantisation | ✅ landed in v0.9.0 (see Status table above) |
 | LLM-in-a-Flash style mmap windowing | ❌ |
 | Emulator-based humble-hardware benchmark pipeline (QEMU / 86Box) | ❌ |
-| Generic scalar fallback (every supported ISA) | ✅ correctness-only; ports cleanly |
+| Generic scalar fallback on build-supported targets | ✅ correctness-only; real-hardware inference is not yet documented for every target |
 | GPU | ⛔ explicitly out of scope by thesis (CPU only) |
 
 ## Quick start
@@ -215,9 +218,9 @@ generation as the build host.
     --max-new-tokens 3
 ```
 
-Expected output (Apple M-series, < 3 s on M4; antiX Pentium-M ≈ 8 s
-per token after the prefill, so plan for ~60 s end-to-end for 3
-tokens including model mmap):
+Expected output (Apple M-series, < 3 s on M4). On antix1, complete
+generation is materially slower than the historical 8 s cached-forward
+figure; see the complete-token measurements in `docs/BENCHMARKS.md`:
 
 ```
 Generating:  Paris. Paris
@@ -258,7 +261,7 @@ willamette run        --model PATH --prompt TEXT
                       [--temperature F] [--top-k K] [--top-p P]
                       [--repetition-penalty R] [--seed S]
                       [--stop-id ID]...
-willamette bench      --model PATH [--decode-steps N]
+willamette bench      --model PATH [--decode-steps N] [--format human|json]
 willamette chat       --model PATH [--max-seq-len N] [--max-new-tokens N]
                       [--system TEXT]
                       [--temperature F] [--top-k K] [--top-p P]
@@ -293,10 +296,12 @@ willamette --version
   top-K next-token logits. Useful for comparing against bitnet.cpp.
 * `run` — Stage 5. Real BitLinear forward + greedy or sampled
   generation, with KV cache.
-* `bench` — Stage 6-A. Times one matvec, one no-cache forward, and one
-  cached decode step. Reports the **active backend label** (e.g.
-  `i686 SSE2 (i8)`, `aarch64 NEON`) — also runs a sparse-prototype
-  comparison against the dense kernel on `attn_q`.
+* `bench` — Times one matvec, one no-cache forward, cached transformer
+  forward, lm-head projection, argmax, and their complete steady-state token
+  total. `--format json` supports BitNet and classic Llama F16/Q4_0/Q8_0 and
+  reports the measured linear backend. The default human report remains
+  BitNet-specific and also compares the sparse prototype against dense
+  `attn_q`.
 * `chat` — Stage 9. Multi-turn stdio chat (line-based). `/quit`,
   `/reset`, `/sys [text|off]`, `/history`, `/save <file>`.
 * `tui` — Stage 9-E. Full-screen ratatui chat — left chat pane + right
@@ -325,52 +330,75 @@ use `ssh -t` to force a pseudo-tty when launching one-shot:
 ssh -t user@host '~/bin/willamette tui --model ~/models/ggml-model-i2_s.gguf'
 ```
 
-Expect very slow generation on humble HW — on antix1 Pentium-M the
-real 2B model runs at ~0.4 tok/s (i8 SSE2 default). Use **Esc** to
-cancel a long answer.
+Expect very slow generation on humble HW. The historical antix1
+`~0.4 tok/s` figure measured cached transformer forward only; complete
+steady-state generation measured about 0.08 tok/s with the original F16
+tied embedding and 0.24 tok/s with the prepared Q6_K embedding plus SSE2
+lm-head. Use **Esc** to cancel a long answer.
 
 ## Performance
 
-Headline numbers (real BitNet 2B model, decode step, `cargo
---release`). Full table including the synthetic 110M / 7M points,
+Historical cached-forward-only numbers (real BitNet 2B model, `cargo
+--release`). They exclude lm-head projection and token selection. Full
+table including complete-token measurements and the synthetic 110M / 7M points,
 EXO Pentium-II comparison, and llama2.c head-to-head live in
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-| Host | Kernel | tok/s |
+| Host | Historical kernel | cached-forward tok/s |
 | --- | --- | ---: |
 | **Apple M4** (Mac16,10, dev box) | aarch64 NEON | **7.9** |
 | **mbp2012** Mid-2012 MBP Ivy Bridge i7-3520M (sub-AVX2 host) | x86_64 SSE2 (i8) | **2.65** |
 | **antiX Pentium-M 2 GHz** (humble validation host) | i686 SSE2 (i8) | **0.41** |
 | antiX Pentium-M 2 GHz | i686 scalar (v0.4.1) | 0.05 |
 
-Same hardware, same model, kernel only:
+Historical same-hardware, same-model cached-forward progression:
 
-| antiX Pentium-M progression | tok/s | speed-up |
+| antiX Pentium-M progression | cached-forward tok/s | speed-up |
 | --- | ---: | ---: |
 | scalar reference | 0.05 | — |
 | SSE2 f32 mask-add (v0.4.x f32 path) | 0.19 | 2.49× over scalar |
 | **SSE2 i8 (v0.5.0+ default)** | **0.41** | **2.15× over f32 / 5.4× over scalar** |
 
-Same-machine head-to-head vs `llama2.c` (vanilla Llama 2 f32) on
-antix1 at **110M scale** — both single-thread, both SSE2:
+Historical same-machine comparison vs `llama2.c` at 110M scale. The
+metric boundary differs: `llama2.c` reports generation while the cited
+Willamette value excludes lm-head and token selection, so this is not a
+complete-generation speedup claim:
 
 | Build | tok/s |
 | --- | ---: |
 | `llama2.c` `stories110M` (vanilla f32) | 2.51 |
 | `willamette` synth 110M (BitNet b1.58 + SSE2 i8) | **4.96 (1.97× faster)** |
 
-For SmolLM-family instruction use, choose the model by host and latency target:
+Current SmolLM-135M Q8_0 complete-token profiles, measured with the same
+stage-instrumented binary and a scalar control on each host:
+
+| Host | Q8_0 SIMD | Scalar | SIMD | Speed-up |
+| --- | --- | ---: | ---: | ---: |
+| Apple M4 | NEON | 24.92 ms | 8.19 ms | **3.04x** |
+| HP ProBook 430 G6 | AVX2 | 52.08 ms | 22.08 ms | **2.36x** |
+| mbp2012 | SSE2 | 82.91 ms | 39.47 ms | **2.10x** |
+| antix1 | SSE2 | 967.51 ms | 399.22 ms | **2.42x** |
+
+These are steady-state complete-token profiles, not prompt-inclusive `run`
+throughput. Full stage boundaries and caveats are in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+For SmolLM-family instruction use, the recommendation remains quality and
+latency dependent. The three Linux laptop rows use the post-SIMD greedy rerun;
+the M4 row retains the earlier sampled quality sweep until it is rerun:
 
 | Host | Recommended model | Reason |
 | --- | --- | --- |
-| Apple M4 | SmolLM2-360M-Instruct Q8_0 | 16.77 tok/s end-to-end on the 120-token quality prompt; the larger model's materially better answer is worth the 2.0× slowdown. |
-| mbp2012 | SmolLM2-360M-Instruct Q8_0 | 2.93 tok/s and 404 MiB peak RSS remain practical for interactive use. |
-| antix1 | SmolLM-135M-Instruct Q8_0 | 0.690 tok/s versus 0.254 tok/s for 360M. Use 360M only for quality-first unattended generation; it is memory-safe at 386 MiB peak RSS with zero process swap. |
-| HP ProBook 430 G6 | SmolLM2-360M-Instruct Q8_0 | 5.72 tok/s and 427 MiB peak RSS make the higher-quality model practical for interactive use. |
+| Apple M4 | SmolLM2-360M-Instruct Q8_0 | Earlier sampled quality sweep: 16.77 tok/s. The larger model gave the materially better answer; post-SIMD product-path rerun is pending. |
+| mbp2012 | SmolLM2-360M-Instruct Q8_0 | Post-SIMD greedy rerun: 7.04 tok/s and 405 MiB peak RSS. |
+| antix1 | SmolLM-135M-Instruct Q8_0 | Post-SIMD greedy rerun: 1.87 tok/s versus 0.698 tok/s for 360M. Use 360M for quality-first unattended generation. |
+| HP ProBook 430 G6 | SmolLM2-360M-Instruct Q8_0 | Post-SIMD greedy rerun: 15.44 tok/s and 438 MiB peak RSS. |
 
-These are one-run, prompt-inclusive long-form measurements rather than the
-short steady-state decode figures above. Full prompt, sampling parameters,
-quality observations, and caveats are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+These are one-run, prompt-inclusive measurements rather than the short
+steady-state decode figures above. The M4 row used sampled generation while
+the three post-SIMD laptop rows use greedy generation, so compare within each
+documented sweep rather than ranking those rows directly. Full prompts and
+caveats are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 The runtime is "correctness + memory floor + portability floor" first
 — `llama.cpp` will likely win raw speed on modern x86. We win the
@@ -404,6 +432,7 @@ Full procedure in [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILI
 | ---- | ------- |
 | [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md) | Exact upstream SHA, file/line references, model SHA256 |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | All benchmark numbers, scaling sweep, llama2.c head-to-head, EXO Pentium-II comparison |
+| [`docs/BENCHMARK_SCHEMA.md`](docs/BENCHMARK_SCHEMA.md) | Versioned machine-readable benchmark contract and remote matrix runner |
 | [`REFERENCE_COMMIT.md`](REFERENCE_COMMIT.md) | Stage 1 GGUF inspection log + verification table |
 | [`docs/I2_S_LAYOUT.md`](docs/I2_S_LAYOUT.md) | Pinned-source citation for the I2_S byte/scale layout |
 | [`docs/BITLINEAR_I2S_MATVEC.md`](docs/BITLINEAR_I2S_MATVEC.md) | BitLinear matvec contract & code → ternary map |
@@ -411,7 +440,7 @@ Full procedure in [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILI
 | [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md) | Willamette ↔ bitnet.cpp comparison procedure & result |
 | [`LIMITATIONS.md`](LIMITATIONS.md) | What's supported, what isn't, what won't be |
 | [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md) | v0.9.0 KV i8 design + memory math + fidelity contract + measured-negative i4 prototypes |
-| [`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md) | Plan-then-act RFC for the table-lookup BitLinear kernel — gates, steps, risks |
+| [`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md) | Design and outcome record for the shipped scalar LUT; SSSE3 follow-up remains measurement-gated |
 | [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) | Exact env to reproduce every number above |
 | [`GOLDEN_TESTS.md`](GOLDEN_TESTS.md) | Reference prompts, token ids, expected outputs |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history |
@@ -428,10 +457,10 @@ Full procedure in [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILI
    `UnsupportedTensorType`, `UnsupportedTokenizer`, …) — it does not
    synthesise output.
 4. **No unverified SIMD.** `target-cpu=native` is not the default;
-   every SIMD kernel ships only after on-target validation against
-   the scalar reference. SSE2 (i8) is validated on antiX Pentium-M;
-   AVX2 / AVX-512 / LUT (SSSE3+) remain unmerged until a host is in
-   hand to test them.
+   every SIMD kernel ships only after on-target validation against the scalar
+   reference. BitLinear SSE2 is validated on antiX Pentium-M; Q8_0 NEON,
+   AVX2, and SSE2 are validated on M4, HP ProBook, mbp2012, and antix1. The
+   BitLinear AVX2/AVX-512 and additional LUT variants remain unmerged.
 5. **No model files in this repo.** GGUFs are downloaded at use time.
 6. **Source-pinned changes.** Any modification of a constant
    (`GGML_TYPE_*`, RoPE type, regex set, scale offset, …) must cite

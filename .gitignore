@@ -8,6 +8,7 @@
 # Generated outputs from Stage 5-E reference scripts.
 /outputs/
 /reference_outputs/
+/benchmark_outputs/
 
 # Generated reports (re-created by `scripts/compare_reference.sh`).
 /compat_report.md
