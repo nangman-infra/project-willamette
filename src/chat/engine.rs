@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::error::WillametteError;
+use crate::gguf::types::GgmlType;
 use crate::model::cached_forward::{
     forward_with_cache_into, forward_with_cache_progress_into, ForwardWorkspace,
 };
@@ -89,6 +90,12 @@ pub struct ChatMessage {
 /// model inherits the same tokenizer (see `inspect.log`). Stop on it
 /// in addition to the configured EOS.
 const LLAMA3_EOT_ID: u32 = 128009;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatTemplate {
+    BitNetText,
+    ChatMl { stop_id: u32 },
+}
 
 /// Text-level stop sequences for the chat loop.
 ///
@@ -230,6 +237,7 @@ pub struct ChatEngine<'g, 'a> {
     /// Optional system prompt; sits in front of the first user turn
     /// when present.
     system_prompt: Option<String>,
+    chat_template: ChatTemplate,
     /// Optional shared progress + cancel state. Stdio chat leaves
     /// this as `None`; the TUI installs an `Arc<WorkerProgress>` so
     /// it can show layer-by-layer + tok/s and trigger mid-turn
@@ -276,6 +284,12 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         }
         let n_layers = graph.layers.len();
         let kv_dim = graph.config.kv_dim as usize;
+        let chat_template = if graph.config.architecture == "llama" {
+            let (_, stop_id) = tokenizer.chatml_marker_ids()?;
+            ChatTemplate::ChatMl { stop_id }
+        } else {
+            ChatTemplate::BitNetText
+        };
         Ok(Self {
             graph,
             tokenizer,
@@ -286,6 +300,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             next_pos: 0,
             max_seq_len,
             system_prompt: None,
+            chat_template,
             progress: None,
         })
     }
@@ -308,6 +323,26 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
     }
     pub fn config_architecture(&self) -> &str {
         &self.graph.config.architecture
+    }
+    pub fn quant_label(&self) -> String {
+        self.graph.layers.first().map_or_else(
+            || self.graph.token_embd.ggml_type.name(),
+            |layer| layer.attn_q.ggml_type.name(),
+        )
+    }
+    pub fn active_kernel_label(&self) -> String {
+        let ggml_type = self
+            .graph
+            .layers
+            .first()
+            .map_or(self.graph.token_embd.ggml_type, |layer| {
+                layer.attn_q.ggml_type
+            });
+        match ggml_type {
+            GgmlType::BitNetI2S => crate::model::dispatch::active_kernel().label().to_string(),
+            GgmlType::Q8_0 => crate::model::q8_0::active_kernel_label().to_string(),
+            other => format!("{} scalar", other.name()),
+        }
     }
     pub fn config_kv_dim(&self) -> u32 {
         self.graph.config.kv_dim
@@ -388,11 +423,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
     where
         F: FnMut(&str),
     {
-        // v0.2.1 chat template — see [`build_chat_fragment`] below for
-        // why we use a plain text bridge instead of injecting the GGUF
-        // chat_template's `eos_token` marker between turns.
-        let (fragment, opts) = self.build_chat_fragment(user_text);
-        let prompt_tokens = self.tokenizer.encode(&fragment, opts)?;
+        let prompt_tokens = self.build_prompt_tokens(user_text)?;
         if prompt_tokens.is_empty() {
             return Err(WillametteError::GgufParse(
                 "chat: user fragment encoded to zero tokens".to_string(),
@@ -512,6 +543,20 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         }
     }
 
+    fn build_prompt_tokens(&self, user_text: &str) -> Result<Vec<u32>, WillametteError> {
+        match self.chat_template {
+            ChatTemplate::BitNetText => {
+                let (fragment, opts) = self.build_chat_fragment(user_text);
+                self.tokenizer.encode(&fragment, opts)
+            }
+            ChatTemplate::ChatMl { .. } if self.history.is_empty() => self
+                .tokenizer
+                .encode_chatml_turn(self.system_prompt.as_deref(), user_text)
+                .map(|(ids, _)| ids),
+            ChatTemplate::ChatMl { .. } => self.tokenizer.encode_chatml_follow_up(user_text),
+        }
+    }
+
     /// Prefill the prompt tokens into the KV cache, advance position,
     /// observe each token for the sampler's rolling history, return
     /// the last layer's hidden state for the first generation step.
@@ -619,7 +664,10 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 }
             };
 
-            if Some(next) == self.tokenizer.eos_id || next == LLAMA3_EOT_ID {
+            if Some(next) == self.tokenizer.eos_id
+                || next == LLAMA3_EOT_ID
+                || matches!(self.chat_template, ChatTemplate::ChatMl { stop_id } if next == stop_id)
+            {
                 break;
             }
 
@@ -648,7 +696,9 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             // Keep cache and sampler aligned with every token the model
             // generated, even when its visible bytes are a turn marker that
             // we suppress from the transcript.
-            if truncate_at_chat_stop_sequence(&mut response_text) {
+            if self.chat_template == ChatTemplate::BitNetText
+                && truncate_at_chat_stop_sequence(&mut response_text)
+            {
                 break;
             }
 

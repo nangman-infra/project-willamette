@@ -772,7 +772,6 @@ fn cmd_chat(args: &ChatArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
-    ensure_bitnet_only(&graph, "chat")?;
     let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
 
     let mut engine = ChatEngine::try_new(
@@ -897,8 +896,6 @@ fn cmd_tui(args: &ChatArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
     let graph = ModelGraph::from_gguf(&gguf)
         .map_err(|e| anyhow::anyhow!("model graph load failed: {}", e))?;
-    ensure_bitnet_only(&graph, "tui")?;
-
     let mut engine = ChatEngine::try_new(
         &graph,
         tokenizer,
@@ -908,7 +905,12 @@ fn cmd_tui(args: &ChatArgs) -> Result<()> {
     if let Some(sys) = args.system.as_deref() {
         engine.set_system_prompt(Some(sys.to_string()));
     }
-    project_willamette::chat::run_tui(engine, args.max_new_tokens)
+    project_willamette::chat::run_tui_with_model_info(
+        engine,
+        args.max_new_tokens,
+        args.model.display().to_string(),
+        bytes.len() as u64,
+    )
 }
 
 enum SlashOutcome {

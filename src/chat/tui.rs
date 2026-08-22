@@ -203,9 +203,19 @@ impl UiState {
 
 /// Run the TUI. Takes ownership of the engine; returns when the user
 /// exits cleanly (Esc / Ctrl-C / `/quit`).
-pub fn run_tui(mut engine: ChatEngine<'_, '_>, max_new_tokens: usize) -> Result<()> {
+pub fn run_tui(engine: ChatEngine<'_, '_>, max_new_tokens: usize) -> Result<()> {
+    run_tui_with_model_info(engine, max_new_tokens, "(mmap)".to_string(), 0)
+}
+
+/// Run the TUI with model metadata shown in the dashboard.
+pub fn run_tui_with_model_info(
+    mut engine: ChatEngine<'_, '_>,
+    max_new_tokens: usize,
+    model_path: String,
+    model_file_bytes: u64,
+) -> Result<()> {
     // Initial dashboard data from the engine.
-    let dashboard = initial_dashboard_state(&engine, max_new_tokens);
+    let dashboard = initial_dashboard_state(&engine, max_new_tokens, model_path, model_file_bytes);
     let max_seq = engine.max_seq_len();
 
     // Shared progress + cancel state — wires engine forward callbacks
@@ -279,11 +289,12 @@ pub fn run_tui(mut engine: ChatEngine<'_, '_>, max_new_tokens: usize) -> Result<
     run_result
 }
 
-fn initial_dashboard_state(engine: &ChatEngine<'_, '_>, max_new_tokens: usize) -> DashboardState {
-    // Single source of truth for both the dashboard label and the
-    // matvec dispatch — see `src/model/dispatch.rs`. Whatever runs
-    // on the matvec hot path is what gets displayed here.
-    let active_kernel = crate::model::dispatch::active_kernel().label().to_string();
+fn initial_dashboard_state(
+    engine: &ChatEngine<'_, '_>,
+    max_new_tokens: usize,
+    model_path: String,
+    model_file_bytes: u64,
+) -> DashboardState {
     let features = crate::model::dispatch::detected_features();
 
     let sampler = engine.sampler();
@@ -291,14 +302,14 @@ fn initial_dashboard_state(engine: &ChatEngine<'_, '_>, max_new_tokens: usize) -
 
     let _ = max_new_tokens;
     DashboardState {
-        model_path: "(mmap)".into(),
+        model_path,
         architecture: engine.config_architecture().to_string(),
         n_layers: engine.config_n_layers(),
         n_embd: engine.config_n_embd(),
         vocab_size: engine.config_vocab_size(),
-        model_file_bytes: 0, // populated by caller if known
-        quant_label: "I2_S (1.58b)".into(),
-        active_kernel,
+        model_file_bytes,
+        quant_label: engine.quant_label(),
+        active_kernel: engine.active_kernel_label(),
         kernel_features: features,
         temperature: sp.temperature,
         top_k: sp.top_k.unwrap_or(0),

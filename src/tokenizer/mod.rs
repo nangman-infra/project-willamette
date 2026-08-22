@@ -265,16 +265,7 @@ impl Tokenizer {
         system: Option<&str>,
         prompt: &str,
     ) -> Result<(Vec<u32>, u32), WillametteError> {
-        let start_id = self.token_id("<|im_start|>").ok_or_else(|| {
-            WillametteError::UnsupportedTokenizer(
-                "ChatML requested but <|im_start|> is missing from the vocabulary".to_string(),
-            )
-        })?;
-        let end_id = self.token_id("<|im_end|>").ok_or_else(|| {
-            WillametteError::UnsupportedTokenizer(
-                "ChatML requested but <|im_end|> is missing from the vocabulary".to_string(),
-            )
-        })?;
+        let (start_id, end_id) = self.chatml_marker_ids()?;
         let mut parts = Vec::with_capacity(if system.is_some() { 12 } else { 7 });
         if let Some(system) = system {
             parts.extend_from_slice(&[
@@ -296,6 +287,37 @@ impl Tokenizer {
         ]);
         let ids = self.encode_with_specials(&parts)?;
         Ok((ids, end_id))
+    }
+
+    /// Encode the incremental fragment for a ChatML turn after an assistant
+    /// response whose opening marker and generated content are already cached.
+    pub fn encode_chatml_follow_up(&self, prompt: &str) -> Result<Vec<u32>, WillametteError> {
+        let (start_id, end_id) = self.chatml_marker_ids()?;
+        self.encode_with_specials(&[
+            PromptPart::Special(end_id),
+            PromptPart::Text("\n"),
+            PromptPart::Special(start_id),
+            PromptPart::Text("user\n"),
+            PromptPart::Text(prompt),
+            PromptPart::Special(end_id),
+            PromptPart::Text("\n"),
+            PromptPart::Special(start_id),
+            PromptPart::Text("assistant\n"),
+        ])
+    }
+
+    pub(crate) fn chatml_marker_ids(&self) -> Result<(u32, u32), WillametteError> {
+        let start_id = self.token_id("<|im_start|>").ok_or_else(|| {
+            WillametteError::UnsupportedTokenizer(
+                "ChatML requested but <|im_start|> is missing from the vocabulary".to_string(),
+            )
+        })?;
+        let end_id = self.token_id("<|im_end|>").ok_or_else(|| {
+            WillametteError::UnsupportedTokenizer(
+                "ChatML requested but <|im_end|> is missing from the vocabulary".to_string(),
+            )
+        })?;
+        Ok((start_id, end_id))
     }
 
     fn push_checked_special(&self, id: u32, ids: &mut Vec<u32>) -> Result<(), WillametteError> {

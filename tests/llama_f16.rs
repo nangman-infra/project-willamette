@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use project_willamette::chat::ChatEngine;
 use project_willamette::gguf::reader::GgufFile;
 use project_willamette::memory::mmap::ModelMmap;
 use project_willamette::model::cached_forward::forward_with_cache;
@@ -273,6 +274,37 @@ fn pinned_smollm2_360m_q8_0_matches_llama_cpp_golden() {
         tokenizer.decode_lossy(&generated).unwrap(),
         "The capital of France is Paris."
     );
+}
+
+#[test]
+#[ignore = "requires the pinned 386404992-byte SmolLM2-360M-Instruct-Q8_0.gguf; see REPRODUCIBILITY.md"]
+fn pinned_smollm2_chatml_runs_two_incremental_turns() {
+    let mmap = ModelMmap::open(SMOLLM2_360M_Q8_PATH).expect("open model");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(mmap.as_bytes())),
+        SMOLLM2_360M_Q8_SHA256
+    );
+    let gguf = GgufFile::parse(mmap.as_bytes()).expect("parse model");
+    let graph = ModelGraph::from_gguf(&gguf).expect("build graph");
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata).expect("load tokenizer");
+    let mut engine = ChatEngine::try_new(&graph, tokenizer, SamplingParams::greedy(), 256)
+        .expect("create ChatML engine");
+    assert_eq!(engine.quant_label(), "Q8_0");
+    assert!(engine.active_kernel_label().starts_with("Q8_0 "));
+    engine.set_system_prompt(Some("You are a concise assistant.".to_string()));
+
+    let first = engine
+        .send_user_message("What is the capital of France?", 24, |_| {})
+        .expect("first turn");
+    let first_position = engine.token_position();
+    let second = engine
+        .send_user_message("Answer with only that city again.", 24, |_| {})
+        .expect("second turn");
+
+    assert_eq!(first, "The capital of France is Paris.");
+    assert_eq!(second, "The capital of France is Paris.");
+    assert!(engine.token_position() > first_position);
+    assert_eq!(engine.history().len(), 4);
 }
 
 #[test]

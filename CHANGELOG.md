@@ -22,6 +22,26 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+### Added
+
+* `chat` and `tui` now reuse one incremental engine for the existing BitNet
+  text bridge and SmolLM-compatible multi-turn ChatML, including
+  `<|im_end|>` stopping and model-specific dashboard kernel/quant labels.
+* `scripts/willamette --profile {bitnet|smollm-135m|smollm2-360m}` selects and
+  verifies a pinned demo model. `scripts/demo_antix.sh` brings the existing
+  antiX menu into the repository with 135M, 360M, BitNet, and llama2.c entries.
+
+### Validated
+
+* On antix1 i686/Pentium-M, the 360M ChatML engine completed two incremental
+  turns with exact `The capital of France is Paris.` responses in 26.9 and
+  20.2 seconds. The faster 135M profile ran correctly but produced an
+  incoherent arithmetic response, so the demo labels it as a limited-quality
+  comparison rather than the recommended model.
+* On the HP ProBook x86_64/AVX2 host, the same 360M two-turn check completed in
+  1.1 and 0.9 seconds. A pseudo-terminal smoke test also confirmed that the TUI
+  dashboard reports the pinned model, Q8_0 weights, and the AVX2 kernel.
+
 ## [v0.13.0-mvp] — 2026-08-22
 
 Q8_0 SIMD and reproducible benchmark release.

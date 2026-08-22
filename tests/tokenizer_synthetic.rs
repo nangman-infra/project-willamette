@@ -292,6 +292,42 @@ fn chatml_turn_can_prepend_a_system_message() {
 }
 
 #[test]
+fn chatml_follow_up_closes_the_cached_assistant_turn() {
+    let mut tokens = gpt2_byte_unicode_vocab();
+    tokens.push("<|im_start|>".to_string());
+    tokens.push("<|im_end|>".to_string());
+    let metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(tokens.into_iter().map(GgufValue::Str).collect()),
+        ),
+        (
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(Vec::new()),
+        ),
+    ]);
+    let tokenizer = Tokenizer::from_gguf_metadata(&metadata).expect("GPT-2 tokenizer");
+    let start_id = tokenizer.token_id("<|im_start|>").unwrap();
+    let end_id = tokenizer.token_id("<|im_end|>").unwrap();
+    let ids = tokenizer.encode_chatml_follow_up("Again").unwrap();
+
+    assert_eq!(ids.first(), Some(&end_id));
+    assert_eq!(ids.iter().filter(|&&id| id == start_id).count(), 2);
+    assert_eq!(ids.iter().filter(|&&id| id == end_id).count(), 2);
+    assert_eq!(
+        ids.last(),
+        tokenizer
+            .encode("\n", EncodeOptions::none())
+            .unwrap()
+            .last()
+    );
+}
+
+#[test]
 fn malformed_add_special_flags_are_rejected() {
     let mut metadata = sentencepiece_metadata(None);
     metadata.insert(

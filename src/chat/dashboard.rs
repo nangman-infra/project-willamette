@@ -86,7 +86,7 @@ impl DashboardState {
         self.render_memory(&mut lines, sys, width);
         self.render_inference(&mut lines);
         self.render_sampling(&mut lines, width);
-        self.render_model(&mut lines);
+        self.render_model(&mut lines, width);
         lines
     }
 
@@ -232,8 +232,17 @@ impl DashboardState {
         lines.push(Line::from(""));
     }
 
-    fn render_model(&self, lines: &mut Vec<Line<'static>>) {
+    fn render_model(&self, lines: &mut Vec<Line<'static>>, width: u16) {
         push_section_header(lines, "MODEL");
+        let model_name = std::path::Path::new(&self.model_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.model_path);
+        push_kv(
+            lines,
+            "model",
+            truncate(model_name, width.saturating_sub(10) as usize),
+        );
         push_kv(lines, "arch", self.architecture.clone());
         push_kv(lines, "layers", self.n_layers.to_string());
         push_kv(lines, "embd", self.n_embd.to_string());
@@ -418,6 +427,14 @@ mod tests {
                 joined.contains(header),
                 "expected section '{}' in rendered output; got:\n{}",
                 header,
+                joined
+            );
+        }
+        for value in &["model.gguf", "I2_S (1.58b)", "aarch64 NEON"] {
+            assert!(
+                joined.contains(value),
+                "expected value '{}' in rendered output; got:\n{}",
+                value,
                 joined
             );
         }

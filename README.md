@@ -88,7 +88,7 @@ What works **today**, on the path toward the thesis:
 | Multi-core CPU parallelism | ✅ `rayon` per-row BitLinear matvec |
 | Norm-weight + scratch caching | ✅ Stage 10-A / 10-B |
 | **KV cache i8 quantisation** | ✅ **per-token absmax i8 since v0.9.0** — ~3.97× memory shrink (150 KB → 37.7 KB per token on BitNet 2B). Greedy output byte-identical to the f32 reference on Stage 5-E prompts (Apple M4 NEON + antix1 i686 SSE2). See [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md). |
-| Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui full-screen) |
+| Chat + TUI surfaces | ✅ `willamette chat` (stdio) + `willamette tui` (ratatui full-screen), using the BitNet text bridge or incremental SmolLM ChatML |
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | `willamette-prep` artifact linker / Q6_K tied embedding | ✅ explicit plan + full GGUF relocation + dry-run; standalone prep binary and compatible runtime subcommand produce the same 0.745 GiB artifact; scalar gather + runtime SSE2 lm-head on x86 |
@@ -302,7 +302,8 @@ willamette --version
   reports the measured linear backend. The default human report remains
   BitNet-specific and also compares the sparse prototype against dense
   `attn_q`.
-* `chat` — Stage 9. Multi-turn stdio chat (line-based). `/quit`,
+* `chat` — Stage 9. Multi-turn stdio chat (line-based) for BitNet and
+  ChatML-compatible SmolLM models. `/quit`,
   `/reset`, `/sys [text|off]`, `/history`, `/save <file>`.
 * `tui` — Stage 9-E. Full-screen ratatui chat — left chat pane + right
   live dashboard (per-core CPU %, KV cache size, **tok/s**, current
@@ -321,7 +322,14 @@ willamette --version
 
 ```bash
 ./willamette tui --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf
+scripts/willamette --profile smollm-135m tui
+scripts/willamette --profile smollm2-360m tui
 ```
+
+The launcher verifies each profile's pinned SHA256 before starting. On the
+Pentium-M antiX demo host, `scripts/demo_antix.sh` presents the 360M quality
+demo first, the faster but limited 135M comparison, the historical BitNet TUI,
+the Paris golden, and llama2.c side by side.
 
 Needs a real terminal (not the Claude-Code embedded chat). Over SSH
 use `ssh -t` to force a pseudo-tty when launching one-shot:

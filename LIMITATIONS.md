@@ -58,11 +58,12 @@ Anything outside this combination returns a typed error
   instruction prompts are covered.
 * **Llama chat/TUI and BitNet tooling.** Llama F16/Q4_0/Q8_0 is enabled for
   `run`, `tokenize`, `logits`, `perplexity`, and machine-readable
-  `bench --format json`. The human `bench` report, `chat`, `tui`, and `analyze` remain
-  explicitly BitNet-only until their prompt/template and reporting surfaces
-  are generalized. `run --chatml` supports one standard ChatML user turn by
-  inserting `<|im_start|>` and `<|im_end|>` as special token ids; generic Jinja
-  templates and multi-turn Llama chat remain unsupported.
+  `bench --format json`. `chat` and `tui` support Llama-family instruct models
+  whose vocabulary provides the standard ChatML `<|im_start|>` and
+  `<|im_end|>` markers; classic TinyStories completion models therefore remain
+  unsuitable for those interactive commands. The human `bench` report and
+  `analyze` remain BitNet-only. Generic Jinja templates and other chat formats
+  are unsupported.
 * **Other pre-tokeniser hints.** If a future GGUF arrives with
   `tokenizer.ggml.pre = "llama-bpe"` (instead of the missing-key
   default our reference file has), the LLaMA 3 regex set in
