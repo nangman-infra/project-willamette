@@ -22,6 +22,17 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+### Added
+
+* `scripts/demo_host.sh` provides the same pinned SmolLM TUI and Paris-golden
+  menu on the HP ProBook and mbp2012 x86_64 Linux demo hosts.
+
+### Validated
+
+* The portable menu launched the 360M TUI successfully with Q8_0/AVX2 on HP
+  and Q8_0/SSE2 on mbp2012. Its Paris golden completed in 1.771 and 3.441
+  seconds respectively with the exact pinned response.
+
 ## [v0.14.0-mvp] — 2026-08-22
 
 Incremental ChatML and reproducible humble-hardware demo release.

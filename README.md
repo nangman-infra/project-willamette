@@ -331,7 +331,8 @@ Pentium-M antiX demo host, `scripts/demo_antix.sh` presents the 360M quality
 demo first, the faster but limited 135M comparison, the historical BitNet TUI,
 the Paris golden, and llama2.c side by side. See
 [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) for deployment, preflight, live
-demo, expected timing, and recovery steps.
+demo, expected timing, and recovery steps. `scripts/demo_host.sh` provides the
+portable 360M/135M/Paris menu used on HP and mbp2012.
 
 Needs a real terminal (not the Claude-Code embedded chat). Over SSH
 use `ssh -t` to force a pseudo-tty when launching one-shot:

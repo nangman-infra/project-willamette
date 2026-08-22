@@ -1,7 +1,7 @@
 # Demo Runbook
 
-This runbook keeps the Project Willamette demonstration reproducible on the
-two product hosts. Apple Silicon is the build machine, not the demo target.
+This runbook keeps the Project Willamette demonstration reproducible on antiX,
+HP, and mbp2012. Apple Silicon is the build machine, not the demo target.
 
 ## Pinned Demo
 
@@ -11,9 +11,14 @@ The recommended interactive model is SmolLM2-360M-Instruct Q8_0:
 * SHA256: `48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201`
 * antiX path: `$HOME/willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf`
 * HP path: `$HOME/willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf`
+* mbp2012 path: `$HOME/willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf`
 
-The antiX menu labels the 135M model as a limited-quality comparison. Use the
-360M profile for the main conversation.
+The limited-quality comparison model is `models/SmolLM-135M-Instruct-Q8_0.gguf`
+with SHA256
+`76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8795ef4d23c23c1f0`.
+Each host stores it at
+`$HOME/willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf`. Use the 360M
+profile for the main conversation.
 
 ## Build And Deploy
 
@@ -25,6 +30,11 @@ cargo zigbuild --release \
   --target x86_64-unknown-linux-musl \
   --bin project-willamette
 
+ssh antix1 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m"'
+scp models/SmolLM-135M-Instruct-Q8_0.gguf \
+  antix1:willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf
+scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
+  antix1:willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf
 scp target/i686-unknown-linux-musl/release/project-willamette \
   antix1:willamette-demo-current.new
 scp scripts/demo_antix.sh antix1:demo.sh.new
@@ -36,12 +46,33 @@ the HP host using its configured SSH destination:
 
 ```bash
 HP_HOST=your-hp-ssh-alias
-ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm2-360m"'
+ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m"'
+scp models/SmolLM-135M-Instruct-Q8_0.gguf \
+  "${HP_HOST}:willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf"
 scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
   "${HP_HOST}:willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf"
 scp target/x86_64-unknown-linux-musl/release/project-willamette \
   "${HP_HOST}:willamette-demo-current.new"
 ssh "${HP_HOST}" 'chmod +x "$HOME/willamette-demo-current.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current"'
+
+ssh mbp2012 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m"'
+scp models/SmolLM-135M-Instruct-Q8_0.gguf \
+  mbp2012:willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf
+scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
+  mbp2012:willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf
+scp target/x86_64-unknown-linux-musl/release/project-willamette \
+  mbp2012:willamette-demo-current.new
+ssh mbp2012 'chmod +x "$HOME/willamette-demo-current.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current"'
+```
+
+Install the portable menu on HP and mbp2012:
+
+```bash
+HP_HOST=your-hp-ssh-alias
+scp scripts/demo_host.sh "${HP_HOST}:demo.sh.new"
+ssh "${HP_HOST}" 'chmod +x "$HOME/demo.sh.new" && mv "$HOME/demo.sh.new" "$HOME/demo.sh"'
+scp scripts/demo_host.sh mbp2012:demo.sh.new
+ssh mbp2012 'chmod +x "$HOME/demo.sh.new" && mv "$HOME/demo.sh.new" "$HOME/demo.sh"'
 ```
 
 Do not add host addresses or credentials to the repository.
@@ -51,14 +82,33 @@ Do not add host addresses or credentials to the repository.
 Check antiX immediately before a live demonstration:
 
 ```bash
-ssh antix1 'cd "$HOME" && test -x willamette-demo-current && test -x demo.sh && ./willamette-demo-current --version && printf "%s  %s\n" "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201" "willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf" | sha256sum -c -'
+ssh antix1 '
+  cd "$HOME" &&
+  test -x willamette-demo-current && test -x demo.sh &&
+  ./willamette-demo-current --version &&
+  printf "%s  %s\n%s  %s\n" \
+    "76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8795ef4d23c23c1f0" "willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf" \
+    "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201" "willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf" |
+  sha256sum -c -
+'
 ```
 
 Check the HP host with the same pinned digest:
 
 ```bash
+set -e
 HP_HOST=your-hp-ssh-alias
-ssh "${HP_HOST}" 'cd "$HOME" && test -x willamette-demo-current && ./willamette-demo-current --version && printf "%s  %s\n" "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201" "willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf" | sha256sum -c -'
+for host in "${HP_HOST}" mbp2012; do
+  ssh "${host}" '
+    cd "$HOME" &&
+    test -x willamette-demo-current && test -x demo.sh &&
+    ./willamette-demo-current --version &&
+    printf "%s  %s\n%s  %s\n" \
+      "76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8795ef4d23c23c1f0" "willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf" \
+      "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201" "willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf" |
+    sha256sum -c -
+  '
+done
 ```
 
 ## Live Demo
@@ -90,6 +140,13 @@ ssh -t "${HP_HOST}" 'env RAYON_NUM_THREADS=4 "$HOME/willamette-demo-current" tui
 Use the same two prompts and confirm that the HP dashboard reports `Q8_0` and
 the x86_64 AVX2 kernel.
 
+HP and mbp2012 can also start their shared menu with:
+
+```bash
+ssh -t "${HP_HOST}" '$HOME/demo.sh'
+ssh -t mbp2012 '$HOME/demo.sh'
+```
+
 ## Expected Timing
 
 Pinned greedy two-turn acceptance on 2026-08-22:
@@ -98,6 +155,9 @@ Pinned greedy two-turn acceptance on 2026-08-22:
 | ---- | ------ | ---------: | ----------: | ------- |
 | antiX i686 Pentium-M | Q8_0 SSE2 | 27.0 s | 20.2 s | 34 to 59 tokens |
 | HP ProBook x86_64 | Q8_0 AVX2 | 1.1 s | 0.9 s | 34 to 59 tokens |
+
+The portable menu's deterministic Paris check completed in 1.771 seconds on
+HP and 3.441 seconds on mbp2012. Both generated the exact pinned sentence.
 
 The antiX pause is expected. Explain that the second turn reuses the existing
 KV cache instead of replaying the full transcript.
