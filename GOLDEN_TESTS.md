@@ -1,4 +1,4 @@
-# Golden Tests — Project Willamette v0.13.0-mvp
+# Golden Tests — Project Willamette v0.14.0-mvp
 
 *Last revised 2026-08-22.*
 
@@ -128,6 +128,12 @@ sentence.` uses vocabulary-resolved system/user markers and generates
 `[504, 3575, 282, 4649, 314, 7042, 30]`, or `"The capital of France is
 Paris."`. This exact golden passes with both the default SIMD kernel and the
 `willamette_q8_scalar` control.
+
+The incremental chat golden asks `What is the capital of France?` and follows
+with `Answer with only that city again.`. Both turns return `The capital of
+France is Paris.`, the history contains two user/assistant pairs, and the KV
+position advances from 34 to 59 tokens. The default SIMD and forced-scalar
+paths both pass this check.
 
 Q8_0 SIMD changes reduction order and does not promise universal cross-kernel
 greedy identity. The longer sky prompt reverses the first two candidates

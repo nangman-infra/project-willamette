@@ -297,13 +297,14 @@ fn pinned_smollm2_chatml_runs_two_incremental_turns() {
         .send_user_message("What is the capital of France?", 24, |_| {})
         .expect("first turn");
     let first_position = engine.token_position();
+    assert_eq!(first_position, 34);
     let second = engine
         .send_user_message("Answer with only that city again.", 24, |_| {})
         .expect("second turn");
 
     assert_eq!(first, "The capital of France is Paris.");
     assert_eq!(second, "The capital of France is Paris.");
-    assert!(engine.token_position() > first_position);
+    assert_eq!(engine.token_position(), 59);
     assert_eq!(engine.history().len(), 4);
 }
 

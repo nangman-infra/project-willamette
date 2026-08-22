@@ -22,6 +22,10 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+## [v0.14.0-mvp] — 2026-08-22
+
+Incremental ChatML and reproducible humble-hardware demo release.
+
 ### Added
 
 * `chat` and `tui` now reuse one incremental engine for the existing BitNet
@@ -36,7 +40,7 @@ public API guarantee. It will be dropped when that guarantee is established.
 ### Validated
 
 * On antix1 i686/Pentium-M, the 360M ChatML engine completed two incremental
-  turns with exact `The capital of France is Paris.` responses in 26.9 and
+  turns with exact `The capital of France is Paris.` responses in 27.0 and
   20.2 seconds. The faster 135M profile ran correctly but produced an
   incoherent arithmetic response, so the demo labels it as a limited-quality
   comparison rather than the recommended model.
