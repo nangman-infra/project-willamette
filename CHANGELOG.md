@@ -30,6 +30,8 @@ public API guarantee. It will be dropped when that guarantee is established.
 * `scripts/willamette --profile {bitnet|smollm-135m|smollm2-360m}` selects and
   verifies a pinned demo model. `scripts/demo_antix.sh` brings the existing
   antiX menu into the repository with 135M, 360M, BitNet, and llama2.c entries.
+* `docs/DEMO_RUNBOOK.md` records the reproducible antiX/HP deployment,
+  preflight, live demonstration, expected timing, and recovery procedure.
 
 ### Validated
 

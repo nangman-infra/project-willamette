@@ -329,7 +329,9 @@ scripts/willamette --profile smollm2-360m tui
 The launcher verifies each profile's pinned SHA256 before starting. On the
 Pentium-M antiX demo host, `scripts/demo_antix.sh` presents the 360M quality
 demo first, the faster but limited 135M comparison, the historical BitNet TUI,
-the Paris golden, and llama2.c side by side.
+the Paris golden, and llama2.c side by side. See
+[`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) for deployment, preflight, live
+demo, expected timing, and recovery steps.
 
 Needs a real terminal (not the Claude-Code embedded chat). Over SSH
 use `ssh -t` to force a pseudo-tty when launching one-shot:
