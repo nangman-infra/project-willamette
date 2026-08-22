@@ -33,6 +33,9 @@ public API guarantee. It will be dropped when that guarantee is established.
 * `bench --format json` now accepts the implemented classic Llama graph and
   reports the actual Q8_0 SIMD backend; the detailed human report remains
   BitNet-specific.
+* An ignored pinned-360M diagnostic records every greedy step's top-two logits
+  and gates the known first-step scalar/SIMD candidate, logit, and margin
+  envelope for the long-form sky prompt.
 
 ### Measured
 
@@ -53,6 +56,9 @@ public API guarantee. It will be dropped when that guarantee is established.
   on antix1. The 135M IDs matched across all three hosts. The longer 360M
   sequence diverged near the end between AVX2 and SSE2, while the pinned Paris
   golden still matched exactly on HP AVX2.
+* Three-run Q8_0 JSON benchmark medians for 135M / 360M complete-token latency
+  were 18.02 / 33.82 ms on HP AVX2, 32.83 / 77.09 ms on mbp2012 SSE2, and
+  333.95 / 876.63 ms on antix1 SSE2.
 
 ## [v0.12.0-mvp] — 2026-08-12
 

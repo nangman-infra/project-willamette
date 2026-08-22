@@ -1,6 +1,6 @@
 # Limitations — main after Project Willamette v0.12.0-mvp
 
-*Last revised 2026-08-12 (Q8_0 SIMD and complete-token profiling).*
+*Last revised 2026-08-22 (Q8_0 scalar/NEON first-step parity envelope).*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
@@ -135,9 +135,11 @@ Q8_0 SIMD changes floating-point reduction order and is therefore not promised
 to be bit-identical to the scalar row dot. Multi-block unit coverage enforces a
 bounded absolute delta, while the pinned 135M arithmetic and 360M Paris goldens
 guard selected output-level behavior. The longer 360M sky prompt diverged
-between scalar and SIMD and near the end between AVX2 and SSE2. Greedy parity
-is therefore a prompt-specific acceptance gate, not a universal cross-kernel
-promise.
+between scalar and SIMD at its first generated token and near the end between
+AVX2 and SSE2. On M4, scalar and NEON retain the same two leading first-step
+candidates but reverse their order; the external-model diagnostic gates that
+bounded candidate/logit/margin envelope. Greedy parity is therefore a
+prompt-specific acceptance gate, not a universal cross-kernel promise.
 
 ## 4. Error surfaces
 

@@ -345,10 +345,44 @@ The pinned 360M `The capital of France is Paris.` golden still matched exactly
 on HP AVX2. Q8_0 SIMD therefore has bounded row-level numerical equivalence and
 prompt-specific golden parity, not universal byte identity across kernels.
 
+A 2026-08-22 Apple M4 first-step trace localized the scalar/NEON split rather
+than attributing it only to later autoregressive accumulation. NEON ranked token
+504 over 30300 (`18.167822` vs `18.097136`, margin `0.070686`), while scalar
+ranked 30300 over 504 (`18.282335` vs `18.131895`, margin `0.150440`). For the
+same initial prompt, the NEON-minus-scalar deltas were `+0.035927` for token 504
+and `-0.185200` for token 30300. The ignored external-model diagnostic in
+`tests/q8_simd_parity.rs` now gates the shared top-two candidate set, bounded
+logit range, and margin while retaining the full 120-step trace. The short Paris
+golden was also rerun successfully with both NEON and scalar builds.
+
 These remain one-run observations. mbp2012 was under variable background load;
 its first 360M run measured 2.749 tok/s and an immediate repeat measured 7.043
 tok/s. The repeated value is reported above, but a future median sweep should
 replace both single observations.
+
+### Repeated JSON benchmark follow-up
+
+On 2026-08-22, three sequential non-instrumented schema-v1 JSON benchmark
+processes were run for each host/model pair using the current Q8_0 binary. HP
+used AVX2 with eight Rayon threads and ten decode steps; mbp2012 used SSE2 with
+four threads and ten steps; antix1 used SSE2 with one thread and five steps.
+These are steady-state `complete_token_ms` measurements and do not include
+product-path prompt prefill, so they do not replace the product `run` rows
+above.
+
+| Host | Model | Complete token runs | Median | Throughput range |
+| --- | --- | --- | ---: | ---: |
+| HP ProBook 430 G6 | SmolLM-135M Q8_0 | 18.017 / 18.101 / 17.866 ms | **18.017 ms** | 55.247-55.974 tok/s |
+| HP ProBook 430 G6 | SmolLM2-360M Q8_0 | 33.817 / 33.481 / 34.976 ms | **33.817 ms** | 28.591-29.867 tok/s |
+| mbp2012 | SmolLM-135M Q8_0 | 32.523 / 32.827 / 33.718 ms | **32.827 ms** | 29.658-30.748 tok/s |
+| mbp2012 | SmolLM2-360M Q8_0 | 77.086 / 77.819 / 76.234 ms | **77.086 ms** | 12.850-13.118 tok/s |
+| antix1 | SmolLM-135M Q8_0 | 373.558 / 325.519 / 333.948 ms | **333.948 ms** | 2.677-3.072 tok/s |
+| antix1 | SmolLM2-360M Q8_0 | 866.338 / 877.149 / 876.631 ms | **876.631 ms** | 1.140-1.154 tok/s |
+
+The antix1 135M first run retained a visible cold-page penalty; the median is
+reported without discarding it. The HP ProBook initially failed ARP/SSH
+discovery but became reachable after a LAN probe; its rows are direct AVX2
+measurements rather than values inferred from the other hosts.
 
 ## 2026-08-11 — SmolLM-135M-Instruct F16 on antix1
 
