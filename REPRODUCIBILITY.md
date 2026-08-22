@@ -1,6 +1,6 @@
-# Reproducibility — main after Project Willamette v0.12.0-mvp
+# Reproducibility — Project Willamette v0.13.0-mvp
 
-*Last revised 2026-08-12.*
+*Last revised 2026-08-22.*
 
 This file pins every external value that the numbers in
 [`README.md`](README.md), [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md),
@@ -116,6 +116,8 @@ curl -fL https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve
   -o models/SmolLM2-360M-Instruct-Q8_0.gguf
 shasum -a 256 models/SmolLM2-360M-Instruct-Q8_0.gguf
 cargo test --test llama_f16 pinned_smollm2_360m_q8_0_matches_llama_cpp_golden -- --ignored --exact
+cargo test --release --test q8_simd_parity trace_smollm2_360m_q8_greedy_margins -- --ignored --exact
+RUSTFLAGS='--cfg willamette_q8_scalar' cargo test --release --test q8_simd_parity trace_smollm2_360m_q8_greedy_margins -- --ignored --exact
 ```
 
 The F16/Q4_0/Q8_0 quality comparison uses the first 1,024 contiguous transitions of

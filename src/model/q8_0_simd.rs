@@ -27,7 +27,10 @@ fn scale(block: &[u8]) -> Result<f32, WillametteError> {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn dot_row_neon(data: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
-    use core::arch::aarch64::*;
+    use core::arch::aarch64::{
+        vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_high_s16, vget_high_s8,
+        vget_low_s16, vget_low_s8, vld1q_f32, vld1q_s8, vmovl_s16, vmovl_s8,
+    };
 
     let mut total = 0.0_f32;
     for (block_index, block) in data.chunks_exact(BLOCK_BYTES).enumerate() {
@@ -68,9 +71,17 @@ pub unsafe fn dot_row_neon(data: &[u8], input: &[f32]) -> Result<f32, Willamette
 #[target_feature(enable = "avx2")]
 pub unsafe fn dot_row_avx2(data: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     #[cfg(target_arch = "x86")]
-    use core::arch::x86::*;
+    use core::arch::x86::{
+        __m128i, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi32_ps, _mm256_cvtepi8_epi32,
+        _mm256_extractf128_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm_add_ps,
+        _mm_loadl_epi64,
+    };
     #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64::*;
+    use core::arch::x86_64::{
+        __m128i, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi32_ps, _mm256_cvtepi8_epi32,
+        _mm256_extractf128_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm_add_ps,
+        _mm_loadl_epi64,
+    };
 
     let mut total = 0.0_f32;
     for (block_index, block) in data.chunks_exact(BLOCK_BYTES).enumerate() {
@@ -96,9 +107,15 @@ pub unsafe fn dot_row_avx2(data: &[u8], input: &[f32]) -> Result<f32, Willamette
 #[target_feature(enable = "sse2")]
 pub unsafe fn dot_row_sse2(data: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     #[cfg(target_arch = "x86")]
-    use core::arch::x86::*;
+    use core::arch::x86::{
+        _mm_add_ps, _mm_cvtepi32_ps, _mm_cvtsi32_si128, _mm_loadu_ps, _mm_mul_ps, _mm_setzero_ps,
+        _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
+    };
     #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64::*;
+    use core::arch::x86_64::{
+        _mm_add_ps, _mm_cvtepi32_ps, _mm_cvtsi32_si128, _mm_loadu_ps, _mm_mul_ps, _mm_setzero_ps,
+        _mm_srai_epi16, _mm_srai_epi32, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
+    };
 
     let mut total = 0.0_f32;
     for (block_index, block) in data.chunks_exact(BLOCK_BYTES).enumerate() {
@@ -127,9 +144,11 @@ pub unsafe fn dot_row_sse2(data: &[u8], input: &[f32]) -> Result<f32, Willamette
 #[target_feature(enable = "sse2")]
 unsafe fn hsum_sse(value: M128) -> f32 {
     #[cfg(target_arch = "x86")]
-    use core::arch::x86::*;
+    use core::arch::x86::{_mm_add_ps, _mm_add_ss, _mm_cvtss_f32, _mm_movehl_ps, _mm_shuffle_ps};
     #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64::*;
+    use core::arch::x86_64::{
+        _mm_add_ps, _mm_add_ss, _mm_cvtss_f32, _mm_movehl_ps, _mm_shuffle_ps,
+    };
 
     let high = _mm_movehl_ps(value, value);
     let pairs = _mm_add_ps(value, high);

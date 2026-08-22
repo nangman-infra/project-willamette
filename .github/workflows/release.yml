@@ -24,8 +24,35 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  preflight:
+    name: Validate release tag and source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate tag and changelog version
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "project-willamette") | .version')"
+          EXPECTED_TAG="v${VERSION}-mvp"
+          if [ "${{ github.ref_name }}" != "$EXPECTED_TAG" ]; then
+            echo "tag ${{ github.ref_name }} does not match Cargo version $EXPECTED_TAG" >&2
+            exit 1
+          fi
+          if ! grep -Fq "## [$EXPECTED_TAG]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no section for $EXPECTED_TAG" >&2
+            exit 1
+          fi
+
+      - name: Quality checks
+        run: |
+          cargo fmt --all -- --check
+          cargo test --all-targets
+          cargo clippy --all-targets -- -D warnings
+
   build:
     name: Build ${{ matrix.target }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -176,8 +203,8 @@ jobs:
             p                          { print }
           ' CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
-            echo "No CHANGELOG entry found for $TAG — falling back to tag message" >&2
-            echo "Release $TAG" > release-notes.md
+            echo "No CHANGELOG entry found for $TAG" >&2
+            exit 1
           fi
           echo "----- release notes -----"
           cat release-notes.md

@@ -1,4 +1,4 @@
-# Limitations — main after Project Willamette v0.12.0-mvp
+# Limitations — Project Willamette v0.13.0-mvp
 
 *Last revised 2026-08-22 (Q8_0 scalar/NEON first-step parity envelope).*
 
@@ -15,7 +15,7 @@ the following narrow, source-pinned model surfaces:
 | `microsoft/BitNet-b1.58-2B-4T` (GGUF distribution `microsoft/bitnet-b1.58-2B-4T-gguf`) | `I2_S` (raw ggml_type = 36) | `gpt2` byte-level BPE with `LLAMA_VOCAB_PRE_TYPE_DEFAULT` pre-tokeniser |
 | Classic Llama/Llama-2 (`shibatch/stories-converted` acceptance artifacts) | F16 transformer, embedding, and lm-head weights; F32 RMSNorm | `llama` SentencePiece BPE with byte fallback |
 | `SmolLM-135M-Instruct` acceptance artifacts | F16, Q4_0, or Q8_0 transformer linears; F16/Q4_0/Q8_0 embedding and tied lm-head; F32 RMSNorm | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_SMOLLM` |
-| `SmolLM2-360M-Instruct` acceptance artifact (main/unreleased) | Q8_0 transformer linears, embedding, and tied lm-head; F32 RMSNorm | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_SMOLLM` and explicit single-turn ChatML system/user encoding |
+| `SmolLM2-360M-Instruct` acceptance artifact | Q8_0 transformer linears, embedding, and tied lm-head; F32 RMSNorm | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_SMOLLM` and explicit single-turn ChatML system/user encoding |
 
 Anything outside this combination returns a typed error
 (`UnsupportedArchitecture`, `UnsupportedTensorType`,

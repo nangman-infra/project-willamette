@@ -1,6 +1,6 @@
-# Golden Tests — Project Willamette v0.12.0-mvp
+# Golden Tests — Project Willamette v0.13.0-mvp
 
-*Last revised 2026-08-12.*
+*Last revised 2026-08-22.*
 
 Reference outputs that future code changes must preserve. If anything
 in this file regresses, the change is wrong by construction — either
@@ -120,6 +120,20 @@ of why the sky is blue. F16, Q4_0, and Q8_0 also produced the identical sky-prom
 `[378, 6376, 314, 4461, 975, 282, 260, 24484, 282, 1420]` on Apple M4,
 HP ProBook 430 G6, mbp2012, and antix1. These are behavior examples, not broad
 quality-equivalence claims for a 135M-parameter model.
+
+### SmolLM2-360M-Instruct Q8_0
+
+The pinned ChatML prompt `What is the capital of France? Answer in one
+sentence.` uses vocabulary-resolved system/user markers and generates
+`[504, 3575, 282, 4649, 314, 7042, 30]`, or `"The capital of France is
+Paris."`. This exact golden passes with both the default SIMD kernel and the
+`willamette_q8_scalar` control.
+
+Q8_0 SIMD changes reduction order and does not promise universal cross-kernel
+greedy identity. The longer sky prompt reverses the first two candidates
+between M4 NEON and scalar. `tests/q8_simd_parity.rs` therefore gates the pinned
+first-step candidate, logit, and margin envelope and retains a 120-step trace
+for diagnosis.
 
 ## Backend equivalence (Apple Silicon NEON)
 

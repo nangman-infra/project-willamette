@@ -64,7 +64,7 @@ to Q6_K, and preserves every transformer I2_S slot. Additional transform
 profiles, architecture conversion, and target-aware blocking remain roadmap
 work.
 
-## Status: main after v0.12.0-mvp
+## Status: v0.13.0-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -124,7 +124,7 @@ humble hardware:
 No toolchain, no compile time. Pick the tarball matching your host:
 
 ```bash
-TAG=v0.12.0-mvp
+TAG=v0.13.0-mvp
 TARGET=i686-unknown-linux-musl   # also: x86_64-unknown-linux-musl,
                                  #       aarch64-unknown-linux-musl,
                                  #       armv7-unknown-linux-musleabihf,

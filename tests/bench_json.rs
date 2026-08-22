@@ -69,11 +69,9 @@ fn bench_rejects_zero_decode_steps() {
 }
 
 #[test]
-fn bench_json_accepts_pinned_q8_0_model_when_available() {
+#[ignore = "requires the pinned 144810912-byte SmolLM-135M-Instruct-Q8_0.gguf"]
+fn bench_json_accepts_pinned_q8_0_model() {
     let model = std::path::Path::new("models/SmolLM-135M-Instruct-Q8_0.gguf");
-    if !model.exists() {
-        return;
-    }
 
     let output = Command::new(env!("CARGO_BIN_EXE_project-willamette"))
         .args(["bench", "--model"])

@@ -1,6 +1,6 @@
 //! Project Willamette CLI.
 //!
-//! v0.12.0 exposes GGUF inspection and analysis, tokenization, inference,
+//! v0.13.0 exposes GGUF inspection and analysis, tokenization, inference,
 //! logits/bench tooling, interactive chat/TUI modes, and synthetic benchmark
 //! model generation.
 

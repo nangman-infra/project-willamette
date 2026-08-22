@@ -22,6 +22,10 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+## [v0.13.0-mvp] — 2026-08-22
+
+Q8_0 SIMD and reproducible benchmark release.
+
 ### Added
 
 * `run --chatml --system TEXT` and `Tokenizer::encode_chatml_turn` support an
