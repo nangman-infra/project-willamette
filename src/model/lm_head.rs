@@ -10,7 +10,7 @@
 //!   logits[v] = Σᵢ token_embd[v, i] * final_hidden[i]
 //! ```
 //!
-//! `token_embd.weight` is F16, Q4_0, Q6_K, or Q8_0 with shape
+//! `token_embd.weight` is F16, Q4_0, Q4_K, Q6_K, or Q8_0 with shape
 //! `[embedding_length, vocab_size]`. Row `v` holds the embedding for vocab id
 //! `v` contiguously in GGML's row layout.
 //!
@@ -25,7 +25,7 @@ use crate::model::q6_k;
 use rayon::prelude::*;
 
 /// Compute the full vocab-size logit vector by dotting `final_hidden`
-/// against each row of an F16, Q4_0, Q6_K, or Q8_0 `token_embd` table.
+/// against each row of an F16, Q4_0, Q4_K, Q6_K, or Q8_0 `token_embd` table.
 pub fn compute_logits(
     final_hidden: &[f32],
     token_embd: &TensorView<'_>,
@@ -34,10 +34,10 @@ pub fn compute_logits(
 ) -> Result<Vec<f32>, WillametteError> {
     if !matches!(
         token_embd.ggml_type,
-        GgmlType::F16 | GgmlType::Q4_0 | GgmlType::Q6K | GgmlType::Q8_0
+        GgmlType::F16 | GgmlType::Q4_0 | GgmlType::Q4K | GgmlType::Q6K | GgmlType::Q8_0
     ) {
         return Err(WillametteError::GgufParse(format!(
-            "compute_logits: token_embd is {} (raw {}), expected F16, Q4_0, Q6_K, or Q8_0",
+            "compute_logits: token_embd is {} (raw {}), expected F16, Q4_0, Q4_K, Q6_K, or Q8_0",
             token_embd.ggml_type.name(),
             token_embd.ggml_type.to_raw()
         )));
@@ -59,6 +59,9 @@ pub fn compute_logits(
     let row_bytes = match token_embd.ggml_type {
         GgmlType::F16 => n_embd.checked_mul(2),
         GgmlType::Q4_0 => TensorView::q4_0_expected_byte_len(&[embedding_length as u64])
+            .ok()
+            .and_then(|bytes| usize::try_from(bytes).ok()),
+        GgmlType::Q4K => TensorView::q4k_expected_byte_len(&[embedding_length as u64])
             .ok()
             .and_then(|bytes| usize::try_from(bytes).ok()),
         GgmlType::Q6K => TensorView::q6k_expected_byte_len(&[embedding_length as u64])
@@ -95,6 +98,7 @@ pub fn compute_logits(
                     Ok(sum)
                 }
                 GgmlType::Q4_0 => crate::model::q4_0::dot_row(row, final_hidden),
+                GgmlType::Q4K => crate::model::q4_k::dot_row(row, final_hidden),
                 GgmlType::Q6K => q6_k::dot_row(row, final_hidden),
                 GgmlType::Q8_0 => crate::model::q8_0::dot_row(row, final_hidden),
                 _ => unreachable!("dtype checked above"),

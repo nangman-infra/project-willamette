@@ -1,6 +1,6 @@
 # Phase III RFC — Generic Model Architecture support
 
-*Status: accepted; steps 2-5 implemented for classic Llama F16/Q4_0/Q8_0, 2026-08-12.*
+*Status: accepted; steps 2-5 implemented for classic Llama F16/Q4_0/Q4_K/Q6_K/Q8_0.*
 *Owner: pandora0667. Reviewer: collaborator (Claude).*
 
 ## 1. Why this exists
@@ -256,7 +256,7 @@ The first Phase III-B vertical slice implements:
 //   forward_variant      → ForwardVariant::VanillaLlama
 //
 // Forward graph: VanillaLlama skips the two BitNet sub-norm calls and uses
-// normal RoPE, SiLU/SwiGLU, and F16/Q4_0/Q8_0 Linear.
+// normal RoPE, SiLU/SwiGLU, and F16/Q4_0/Q4_K/Q6_K/Q8_0 Linear.
 ```
 
 Pinned 260K GQA and 15M MHA TinyStories artifacts exercise both the seam and
@@ -277,7 +277,7 @@ Five PR-sized steps, each shippable:
 4. **Forward entry points dispatch on `forward_variant()`.** Bodies are
    unchanged for `BitNetSubNorm`; reserved variants return typed
    `NotImplemented` errors before computation until step 5.
-5. **`LlamaArchitecture` impl + `VanillaLlama` forward arm + F16/Q4_0/Q8_0
+5. **`LlamaArchitecture` impl + `VanillaLlama` forward arm + F16/Q4_0/Q4_K/Q6_K/Q8_0
    Linear matvec kernels.** Implemented for classic unscaled full-head RoPE
    GGUFs. Llama 3 and Mistral remain follow-up work.
 

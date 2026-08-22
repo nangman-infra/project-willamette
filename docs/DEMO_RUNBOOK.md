@@ -5,7 +5,7 @@ HP, and mbp2012. Apple Silicon is the build machine, not the demo target.
 
 ## Pinned Demo
 
-The recommended interactive model is SmolLM2-360M-Instruct Q8_0:
+The responsive interactive model is SmolLM2-360M-Instruct Q8_0:
 
 * Local filename: `models/SmolLM2-360M-Instruct-Q8_0.gguf`
 * SHA256: `48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201`
@@ -19,6 +19,17 @@ with SHA256
 Each host stores it at
 `$HOME/willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf`. Use the 360M
 profile for the main conversation.
+
+HP and mbp2012 also expose the higher-quality SmolLM2-1.7B-Instruct Q4_K_M
+profile. It is not deployed to antiX:
+
+* Local filename: `models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf`
+* SHA256: `decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33`
+* HP/mbp2012 path: `$HOME/willamette-smollm2-1.7b/SmolLM2-1.7B-Instruct-Q4_K_M.gguf`
+* Expected dashboard kernel: `Q4_K AVX2` on HP, `Q4_K SSE2` on mbp2012
+
+Physical-host latency is not yet pinned, so keep the 360M profile available as
+the known-responsive fallback.
 
 ## Build And Deploy
 
@@ -46,20 +57,24 @@ the HP host using its configured SSH destination:
 
 ```bash
 HP_HOST=your-hp-ssh-alias
-ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m"'
+ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m" "$HOME/willamette-smollm2-1.7b"'
 scp models/SmolLM-135M-Instruct-Q8_0.gguf \
   "${HP_HOST}:willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf"
 scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
   "${HP_HOST}:willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf"
+scp models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf \
+  "${HP_HOST}:willamette-smollm2-1.7b/SmolLM2-1.7B-Instruct-Q4_K_M.gguf"
 scp target/x86_64-unknown-linux-musl/release/project-willamette \
   "${HP_HOST}:willamette-demo-current.new"
 ssh "${HP_HOST}" 'chmod +x "$HOME/willamette-demo-current.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current"'
 
-ssh mbp2012 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m"'
+ssh mbp2012 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m" "$HOME/willamette-smollm2-1.7b"'
 scp models/SmolLM-135M-Instruct-Q8_0.gguf \
   mbp2012:willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf
 scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
   mbp2012:willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf
+scp models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf \
+  mbp2012:willamette-smollm2-1.7b/SmolLM2-1.7B-Instruct-Q4_K_M.gguf
 scp target/x86_64-unknown-linux-musl/release/project-willamette \
   mbp2012:willamette-demo-current.new
 ssh mbp2012 'chmod +x "$HOME/willamette-demo-current.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current"'
@@ -146,6 +161,9 @@ HP and mbp2012 can also start their shared menu with:
 ssh -t "${HP_HOST}" '$HOME/demo.sh'
 ssh -t mbp2012 '$HOME/demo.sh'
 ```
+
+Select menu item `1` for the 1.7B Q4_K_M TUI or item `4` for its deterministic
+Paris check. The 360M fallback remains menu items `2` and `5`.
 
 ## Expected Timing
 

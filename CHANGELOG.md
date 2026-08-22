@@ -26,12 +26,23 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 * `scripts/demo_host.sh` provides the same pinned SmolLM TUI and Paris-golden
   menu on the HP ProBook and mbp2012 x86_64 Linux demo hosts.
+* Classic Llama now accepts canonical Q4_K and Q6_K rows across embedding,
+  transformer linears, and lm-head, enabling official mixed Q4_K_M artifacts.
+  Q4_K row dots dispatch to AVX2, SSE2, or scalar at runtime.
+* `scripts/willamette --profile smollm2-1.7b-q4-k-m` pins and verifies the
+  official SmolLM2-1.7B-Instruct artifact. The portable x86 host menu exposes
+  the same model as its highest-quality profile.
 
 ### Validated
 
 * The portable menu launched the 360M TUI successfully with Q8_0/AVX2 on HP
   and Q8_0/SSE2 on mbp2012. Its Paris golden completed in 1.771 and 3.441
   seconds respectively with the exact pinned response.
+* The pinned 1.7B Q4_K_M artifact generated the exact seven-token Paris golden
+  and completed two incremental turns with context positions 34 to 54. On the
+  M4 build host, the x86_64 AVX2 binary under Rosetta reduced the prompt-inclusive
+  golden from 9.867 seconds on the native scalar path to 3.566 seconds; this is
+  a dispatch smoke benchmark, not a physical x86-host performance claim.
 
 ## [v0.14.0-mvp] — 2026-08-22
 

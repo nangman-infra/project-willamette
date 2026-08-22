@@ -17,9 +17,100 @@ pub fn linear_matvec_f32(
         GgmlType::BitNetI2S => bitlinear_i2s_matvec_f32(weight, input, output),
         GgmlType::F16 => f16_matvec_f32(weight, input, output),
         GgmlType::Q4_0 => q4_0_matvec_f32(weight, input, output),
+        GgmlType::Q4K => q4_k_matvec_f32(weight, input, output),
+        GgmlType::Q6K => q6_k_matvec_f32(weight, input, output),
         GgmlType::Q8_0 => q8_0_matvec_f32(weight, input, output),
         other => Err(WillametteError::UnsupportedTensorType(other.to_raw())),
     }
+}
+
+pub fn q4_k_matvec_f32(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), WillametteError> {
+    quantized_matvec_f32(
+        weight,
+        input,
+        output,
+        GgmlType::Q4K,
+        "Q4_K",
+        TensorView::q4k_expected_byte_len,
+        crate::model::q4_k::dot_row,
+    )
+}
+
+pub fn q6_k_matvec_f32(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), WillametteError> {
+    quantized_matvec_f32(
+        weight,
+        input,
+        output,
+        GgmlType::Q6K,
+        "Q6_K",
+        TensorView::q6k_expected_byte_len,
+        crate::model::q6_k::dot_row,
+    )
+}
+
+fn quantized_matvec_f32(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &mut [f32],
+    expected_type: GgmlType,
+    type_name: &str,
+    expected_byte_len: fn(&[u64]) -> Result<u64, WillametteError>,
+    dot_row: fn(&[u8], &[f32]) -> Result<f32, WillametteError>,
+) -> Result<(), WillametteError> {
+    if weight.ggml_type != expected_type {
+        return Err(WillametteError::UnsupportedTensorType(
+            weight.ggml_type.to_raw(),
+        ));
+    }
+    if weight.shape.len() != 2 {
+        return Err(WillametteError::GgufParse(format!(
+            "{type_name} linear {:?}: expected 2 dimensions, got {:?}",
+            weight.name, weight.shape
+        )));
+    }
+    let in_dim = usize::try_from(weight.shape[0])
+        .map_err(|_| WillametteError::GgufParse(format!("{type_name} input dimension overflow")))?;
+    let out_dim = usize::try_from(weight.shape[1]).map_err(|_| {
+        WillametteError::GgufParse(format!("{type_name} output dimension overflow"))
+    })?;
+    if input.len() != in_dim || output.len() != out_dim {
+        return Err(WillametteError::GgufParse(format!(
+            "{type_name} linear {:?}: input/output lengths {}/{} != {}/{}",
+            weight.name,
+            input.len(),
+            output.len(),
+            in_dim,
+            out_dim
+        )));
+    }
+    let row_bytes = usize::try_from(expected_byte_len(&[weight.shape[0]])?)
+        .map_err(|_| WillametteError::GgufParse(format!("{type_name} row size overflow")))?;
+    let expected = row_bytes
+        .checked_mul(out_dim)
+        .ok_or_else(|| WillametteError::GgufParse(format!("{type_name} tensor size overflow")))?;
+    if weight.data.len() != expected {
+        return Err(WillametteError::GgufParse(format!(
+            "{type_name} linear {:?}: data length {} != expected {}",
+            weight.name,
+            weight.data.len(),
+            expected
+        )));
+    }
+    output
+        .par_iter_mut()
+        .enumerate()
+        .try_for_each(|(row, out)| {
+            *out = dot_row(&weight.data[row * row_bytes..(row + 1) * row_bytes], input)?;
+            Ok(())
+        })
 }
 
 pub fn q4_0_matvec_f32(
@@ -274,5 +365,58 @@ mod tests {
         let mut output = [0.0; 2];
         q4_0_matvec_f32(&tensor, &[1.0; 32], &mut output).unwrap();
         assert_eq!(output, [32.0, -32.0]);
+    }
+
+    fn q4_k_constant_block(quant: u8) -> Vec<u8> {
+        let mut block = vec![0u8; 144];
+        block[..2].copy_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        block[4..8].fill(1);
+        block[12..16].fill(1);
+        block[16..].fill(quant | (quant << 4));
+        block
+    }
+
+    #[test]
+    fn q4_k_rectangular_matvec_matches_hand_result() {
+        let mut bytes = q4_k_constant_block(2);
+        bytes.extend(q4_k_constant_block(4));
+        let tensor = TensorView {
+            name: "q4_k.weight".to_string(),
+            shape: vec![256, 2],
+            ggml_type: GgmlType::Q4K,
+            offset: 0,
+            byte_len: bytes.len() as u64,
+            data: &bytes,
+            scale_data: None,
+        };
+        let mut output = [0.0; 2];
+        q4_k_matvec_f32(&tensor, &[1.0; 256], &mut output).unwrap();
+        assert_eq!(output, [512.0, 1_024.0]);
+    }
+
+    fn q6_k_constant_block(scale: u8) -> Vec<u8> {
+        let mut block = vec![0x11; 128];
+        block.extend_from_slice(&[0xaa; 64]);
+        block.extend_from_slice(&[scale; 16]);
+        block.extend_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        block
+    }
+
+    #[test]
+    fn q6_k_rectangular_matvec_matches_hand_result() {
+        let mut bytes = q6_k_constant_block(1);
+        bytes.extend(q6_k_constant_block(2));
+        let tensor = TensorView {
+            name: "q6_k.weight".to_string(),
+            shape: vec![256, 2],
+            ggml_type: GgmlType::Q6K,
+            offset: 0,
+            byte_len: bytes.len() as u64,
+            data: &bytes,
+            scale_data: None,
+        };
+        let mut output = [0.0; 2];
+        q6_k_matvec_f32(&tensor, &[1.0; 256], &mut output).unwrap();
+        assert_eq!(output, [256.0, 512.0]);
     }
 }

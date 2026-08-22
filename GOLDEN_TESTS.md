@@ -1,6 +1,6 @@
 # Golden Tests — Project Willamette v0.14.0-mvp
 
-*Last revised 2026-08-22.*
+*Last revised 2026-08-23.*
 
 Reference outputs that future code changes must preserve. If anything
 in this file regresses, the change is wrong by construction — either
@@ -134,6 +134,22 @@ with `Answer with only that city again.`. Both turns return `The capital of
 France is Paris.`, the history contains two user/assistant pairs, and the KV
 position advances from 34 to 59 tokens. The default SIMD and forced-scalar
 paths both pass this check.
+
+### SmolLM2-1.7B-Instruct Q4_K_M
+
+The pinned mixed Q4_K/Q6_K artifact uses the same ChatML Paris prompt as the
+360M gate and generates the same token IDs
+`[504, 3575, 282, 4649, 314, 7042, 30]`, or `"The capital of France is
+Paris."`. This gates Q4_K/Q6_K graph admission, row decoding, transformer
+matvecs, tied lm-head projection, and generation together. Pinned llama.cpp
+b10369 directly generated the same text from this exact 1.7B artifact on its
+CPU backend.
+
+The incremental golden asks `What is the capital of France?` and follows with
+`Answer with only that city again.`. The responses are `The capital of France
+is Paris.` and `Paris.`, history contains two user/assistant pairs, and KV
+position advances from 34 to 54 tokens. Run both checks in release mode using
+the commands in [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md).
 
 Q8_0 SIMD changes reduction order and does not promise universal cross-kernel
 greedy identity. The longer sky prompt reverses the first two candidates

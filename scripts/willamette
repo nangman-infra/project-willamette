@@ -14,7 +14,7 @@
 # Usage:
 #   scripts/willamette                  # full TUI (default)
 #   scripts/willamette --profile smollm-135m
-#   scripts/willamette --profile smollm2-360m tui
+#   scripts/willamette --profile smollm2-1.7b-q4-k-m tui
 #   scripts/willamette chat             # stdin/stdout chat
 #   scripts/willamette inspect          # metadata + tensor table
 #   scripts/willamette bench            # latency benchmarks
@@ -24,7 +24,7 @@
 # Anything after the mode keyword is forwarded to the binary, e.g.
 #   scripts/willamette tui --temperature 0 --max-new-tokens 64
 #
-# Profiles: bitnet (default), smollm-135m, smollm2-360m.
+# Profiles: bitnet (default), smollm-135m, smollm2-360m, smollm2-1.7b-q4-k-m.
 
 set -euo pipefail
 
@@ -94,9 +94,17 @@ case "${PROFILE}" in
         HF_REPO="HuggingFaceTB/SmolLM2-360M-Instruct-GGUF"
         HF_REVISION="593b5a2e04c8f3e4ee880263f93e0bd2901ad47f"
         ;;
+    smollm2-1.7b-q4-k-m)
+        MODEL_DIR="models"
+        MODEL_NAME="SmolLM2-1.7B-Instruct-Q4_K_M.gguf"
+        HF_FILE="smollm2-1.7b-instruct-q4_k_m.gguf"
+        EXPECTED_SHA256="decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33"
+        HF_REPO="HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF"
+        HF_REVISION="2d4a76a30b4af41ecd395c35725ac11688d4cfe4"
+        ;;
     *)
         echo "willamette: unknown profile '${PROFILE}'" >&2
-        echo "  expected: bitnet, smollm-135m, or smollm2-360m" >&2
+        echo "  expected: bitnet, smollm-135m, smollm2-360m, or smollm2-1.7b-q4-k-m" >&2
         exit 2
         ;;
 esac

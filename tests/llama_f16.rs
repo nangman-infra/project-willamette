@@ -4,6 +4,7 @@ use std::path::Path;
 
 use project_willamette::chat::ChatEngine;
 use project_willamette::gguf::reader::GgufFile;
+use project_willamette::gguf::types::GgmlType;
 use project_willamette::memory::mmap::ModelMmap;
 use project_willamette::model::cached_forward::forward_with_cache;
 use project_willamette::model::forward::forward_single_token_position_zero;
@@ -28,6 +29,9 @@ const SMOLLM_Q8_SHA256: &str = "76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8
 const SMOLLM2_360M_Q8_PATH: &str = "./models/SmolLM2-360M-Instruct-Q8_0.gguf";
 const SMOLLM2_360M_Q8_SHA256: &str =
     "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201";
+const SMOLLM2_1_7B_Q4_K_M_PATH: &str = "./models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf";
+const SMOLLM2_1_7B_Q4_K_M_SHA256: &str =
+    "decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33";
 
 #[test]
 #[ignore = "requires the pinned 601248-byte stories260K.F16.gguf; see REPRODUCIBILITY.md"]
@@ -305,6 +309,97 @@ fn pinned_smollm2_chatml_runs_two_incremental_turns() {
     assert_eq!(first, "The capital of France is Paris.");
     assert_eq!(second, "The capital of France is Paris.");
     assert_eq!(engine.token_position(), 59);
+    assert_eq!(engine.history().len(), 4);
+}
+
+#[test]
+#[ignore = "requires the pinned 1055609536-byte SmolLM2-1.7B-Instruct-Q4_K_M.gguf; see REPRODUCIBILITY.md"]
+fn pinned_smollm2_1_7b_q4_k_m_matches_llama_cpp_golden() {
+    let mmap = ModelMmap::open(SMOLLM2_1_7B_Q4_K_M_PATH).expect("open model");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(mmap.as_bytes())),
+        SMOLLM2_1_7B_Q4_K_M_SHA256
+    );
+    let gguf = GgufFile::parse(mmap.as_bytes()).expect("parse model");
+    let graph = ModelGraph::from_gguf(&gguf).expect("build graph");
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata).expect("load tokenizer");
+
+    assert_eq!(graph.config.block_count, 24);
+    assert_eq!(graph.config.embedding_length, 2048);
+    assert_eq!(graph.config.context_length, 8192);
+    let linear_types: Vec<_> = graph
+        .layers
+        .iter()
+        .flat_map(|layer| {
+            [
+                &layer.attn_q,
+                &layer.attn_k,
+                &layer.attn_v,
+                &layer.attn_output,
+                &layer.ffn_gate,
+                &layer.ffn_up,
+                &layer.ffn_down,
+            ]
+        })
+        .map(|tensor| tensor.ggml_type)
+        .collect();
+    assert!(linear_types.contains(&GgmlType::Q4K));
+    assert!(linear_types.contains(&GgmlType::Q6K));
+    assert!(linear_types
+        .iter()
+        .all(|kind| matches!(kind, GgmlType::Q4K | GgmlType::Q6K)));
+
+    let system = "You are a helpful AI assistant named SmolLM, trained by Hugging Face";
+    let prompt_text = "What is the capital of France? Answer in one sentence.";
+    let (prompt, stop_id) = tokenizer
+        .encode_chatml_turn(Some(system), prompt_text)
+        .expect("tokenize ChatML prompt");
+    let mut sampler = Sampler::new(SamplingParams::greedy());
+    let generated = generate_with_cache_and_sampler(
+        &graph,
+        &prompt,
+        30,
+        tokenizer.eos_id,
+        &[stop_id],
+        graph.config.context_length as usize,
+        &mut sampler,
+        |_, _, _| {},
+    )
+    .expect("generate");
+    assert_eq!(generated, [504, 3575, 282, 4649, 314, 7042, 30]);
+    assert_eq!(
+        tokenizer.decode_lossy(&generated).unwrap(),
+        "The capital of France is Paris."
+    );
+}
+
+#[test]
+#[ignore = "requires the pinned 1055609536-byte SmolLM2-1.7B-Instruct-Q4_K_M.gguf; see REPRODUCIBILITY.md"]
+fn pinned_smollm2_1_7b_q4_k_m_runs_two_incremental_turns() {
+    let mmap = ModelMmap::open(SMOLLM2_1_7B_Q4_K_M_PATH).expect("open model");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(mmap.as_bytes())),
+        SMOLLM2_1_7B_Q4_K_M_SHA256
+    );
+    let gguf = GgufFile::parse(mmap.as_bytes()).expect("parse model");
+    let graph = ModelGraph::from_gguf(&gguf).expect("build graph");
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf.metadata).expect("load tokenizer");
+    let mut engine = ChatEngine::try_new(&graph, tokenizer, SamplingParams::greedy(), 256)
+        .expect("create ChatML engine");
+    engine.set_system_prompt(Some("You are a concise assistant.".to_string()));
+
+    let first = engine
+        .send_user_message("What is the capital of France?", 24, |_| {})
+        .expect("first turn");
+    let first_position = engine.token_position();
+    let second = engine
+        .send_user_message("Answer with only that city again.", 24, |_| {})
+        .expect("second turn");
+
+    assert_eq!(first, "The capital of France is Paris.");
+    assert_eq!(first_position, 34);
+    assert_eq!(second, "Paris.");
+    assert_eq!(engine.token_position(), 54);
     assert_eq!(engine.history().len(), 4);
 }
 

@@ -100,7 +100,16 @@ impl<'a> ModelGraph<'a> {
                 check_dtype_one_of(token_embd, &[GgmlType::F16, GgmlType::Q6K])?;
             }
             ForwardVariant::VanillaLlama => {
-                check_dtype_one_of(token_embd, &[GgmlType::F16, GgmlType::Q4_0, GgmlType::Q8_0])?;
+                check_dtype_one_of(
+                    token_embd,
+                    &[
+                        GgmlType::F16,
+                        GgmlType::Q4_0,
+                        GgmlType::Q4K,
+                        GgmlType::Q6K,
+                        GgmlType::Q8_0,
+                    ],
+                )?;
             }
         }
         check_shape(
@@ -118,7 +127,16 @@ impl<'a> ModelGraph<'a> {
                     check_dtype_one_of(out, &[GgmlType::F16, GgmlType::Q6K])?;
                 }
                 ForwardVariant::VanillaLlama => {
-                    check_dtype_one_of(out, &[GgmlType::F16, GgmlType::Q4_0, GgmlType::Q8_0])?;
+                    check_dtype_one_of(
+                        out,
+                        &[
+                            GgmlType::F16,
+                            GgmlType::Q4_0,
+                            GgmlType::Q4K,
+                            GgmlType::Q6K,
+                            GgmlType::Q8_0,
+                        ],
+                    )?;
                 }
             }
             check_shape(
@@ -313,9 +331,16 @@ fn check_linear_dtype(
 ) -> Result<(), WillametteError> {
     match variant {
         ForwardVariant::BitNetSubNorm => check_dtype(tensor, GgmlType::BitNetI2S),
-        ForwardVariant::VanillaLlama => {
-            check_dtype_one_of(tensor, &[GgmlType::F16, GgmlType::Q4_0, GgmlType::Q8_0])
-        }
+        ForwardVariant::VanillaLlama => check_dtype_one_of(
+            tensor,
+            &[
+                GgmlType::F16,
+                GgmlType::Q4_0,
+                GgmlType::Q4K,
+                GgmlType::Q6K,
+                GgmlType::Q8_0,
+            ],
+        ),
     }
 }
 
@@ -461,17 +486,19 @@ mod tests {
     }
 
     #[test]
-    fn llama_accepts_q4_0_linears_but_bitnet_does_not() {
-        let tensor = TensorView {
-            name: "blk.0.attn_q.weight".to_string(),
-            shape: vec![32, 32],
-            ggml_type: GgmlType::Q4_0,
-            offset: 0,
-            byte_len: 576,
-            data: &[],
-            scale_data: None,
-        };
-        assert!(check_linear_dtype(&tensor, ForwardVariant::VanillaLlama).is_ok());
-        assert!(check_linear_dtype(&tensor, ForwardVariant::BitNetSubNorm).is_err());
+    fn llama_accepts_quantized_linears_but_bitnet_does_not() {
+        for ggml_type in [GgmlType::Q4_0, GgmlType::Q4K, GgmlType::Q6K] {
+            let tensor = TensorView {
+                name: "blk.0.attn_q.weight".to_string(),
+                shape: vec![256, 256],
+                ggml_type,
+                offset: 0,
+                byte_len: 0,
+                data: &[],
+                scale_data: None,
+            };
+            assert!(check_linear_dtype(&tensor, ForwardVariant::VanillaLlama).is_ok());
+            assert!(check_linear_dtype(&tensor, ForwardVariant::BitNetSubNorm).is_err());
+        }
     }
 }

@@ -116,7 +116,7 @@ pub fn embedding_gather_f16(
     embedding_gather(token_embd, token_id, out)
 }
 
-/// Gather one F16, Q4_0, Q6_K, or Q8_0 embedding row into an f32 buffer.
+/// Gather one F16, Q4_0, Q4_K, Q6_K, or Q8_0 embedding row into an f32 buffer.
 pub fn embedding_gather(
     token_embd: &TensorView<'_>,
     token_id: u32,
@@ -152,6 +152,11 @@ pub fn embedding_gather(
                 .checked_mul(TensorView::Q4_0_BYTES_PER_BLOCK as usize)
         }
         GgmlType::Q4_0 => None,
+        GgmlType::Q4K if n_embd.is_multiple_of(TensorView::Q4K_ELEMENTS_PER_BLOCK as usize) => {
+            (n_embd / TensorView::Q4K_ELEMENTS_PER_BLOCK as usize)
+                .checked_mul(TensorView::Q4K_BYTES_PER_BLOCK as usize)
+        }
+        GgmlType::Q4K => None,
         GgmlType::Q6K if n_embd.is_multiple_of(TensorView::Q6K_ELEMENTS_PER_BLOCK as usize) => {
             (n_embd / TensorView::Q6K_ELEMENTS_PER_BLOCK as usize)
                 .checked_mul(TensorView::Q6K_BYTES_PER_BLOCK as usize)
@@ -164,7 +169,7 @@ pub fn embedding_gather(
         GgmlType::Q8_0 => None,
         other => {
             return Err(WillametteError::GgufParse(format!(
-                "embedding_gather: tensor {:?} is {}, expected F16, Q4_0, Q6_K, or Q8_0",
+                "embedding_gather: tensor {:?} is {}, expected F16, Q4_0, Q4_K, Q6_K, or Q8_0",
                 token_embd.name,
                 other.name()
             )));
@@ -197,6 +202,7 @@ pub fn embedding_gather(
             Ok(())
         }
         GgmlType::Q4_0 => crate::model::q4_0::dequantize_row(row, out),
+        GgmlType::Q4K => crate::model::q4_k::dequantize_row(row, out),
         GgmlType::Q6K => crate::model::q6_k::dequantize_row(row, out),
         GgmlType::Q8_0 => crate::model::q8_0::dequantize_row(row, out),
         _ => unreachable!("dtype checked above"),

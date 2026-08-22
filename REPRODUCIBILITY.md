@@ -1,6 +1,6 @@
 # Reproducibility — Project Willamette v0.14.0-mvp
 
-*Last revised 2026-08-22.*
+*Last revised 2026-08-23.*
 
 This file pins every external value that the numbers in
 [`README.md`](README.md), [`docs/REFERENCE_COMPATIBILITY.md`](docs/REFERENCE_COMPATIBILITY.md),
@@ -121,6 +121,29 @@ RUSTFLAGS='--cfg willamette_q8_scalar' cargo test --test llama_f16 pinned_smollm
 cargo test --release --test q8_simd_parity trace_smollm2_360m_q8_greedy_margins -- --ignored --exact
 RUSTFLAGS='--cfg willamette_q8_scalar' cargo test --release --test q8_simd_parity trace_smollm2_360m_q8_greedy_margins -- --ignored --exact
 ```
+
+The mixed-quant 1.7B acceptance artifact comes from
+`HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF` revision
+`2d4a76a30b4af41ecd395c35725ac11688d4cfe4`:
+
+| File | Size | SHA256 | Purpose |
+| ---- | ---: | ------ | ------- |
+| `models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf` | 1,055,609,536 | `decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33` | 1.7B-parameter instruct, 24-layer GQA, 8,192-token context, mixed Q4_K/Q6_K linears and tied lm-head |
+
+```bash
+curl -fL 'https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF/resolve/2d4a76a30b4af41ecd395c35725ac11688d4cfe4/smollm2-1.7b-instruct-q4_k_m.gguf?download=true' \
+  -o models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf
+shasum -a 256 models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf
+cargo test --release --test llama_f16 pinned_smollm2_1_7b_q4_k_m_matches_llama_cpp_golden -- --ignored --exact
+cargo test --release --test llama_f16 pinned_smollm2_1_7b_q4_k_m_runs_two_incremental_turns -- --ignored --exact
+```
+
+Use `--release` for these ignored tests: the unoptimized 1.7B forward is too
+slow to be a practical acceptance command. The artifact contains 144 Q4_K,
+25 Q6_K, and 49 F32 tensors. The pinned llama.cpp b10369 CPU binary directly
+generated `The capital of France is Paris.` from this exact artifact and the
+same system/user prompt on 2026-08-23; its macOS arm64 archive SHA256 is listed
+in the cross-runtime section below.
 
 The F16/Q4_0/Q8_0 quality comparison uses the first 1,024 contiguous transitions of
 the pinned WikiText-2 `wiki.test.raw` listed below in the Q6_K section. SmolLM's

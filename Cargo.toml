@@ -2,7 +2,7 @@
 name = "project-willamette"
 version = "0.14.0"
 edition = "2021"
-description = "Rust-native, mmap-backed CPU runtime for BitNet I2_S and classic Llama F16/Q4_0/Q8_0 GGUFs."
+description = "Rust-native, mmap-backed CPU runtime for BitNet I2_S and classic Llama F16/Q4_0/Q4_K/Q6_K/Q8_0 GGUFs."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 default-run = "project-willamette"

@@ -5,7 +5,7 @@ Human-readable output remains the default. Schema version 1 separates cached
 transformer forward from complete steady-state token generation so consumers
 cannot accidentally compare unlike metrics.
 
-The JSON path supports both BitNet I2_S and classic Llama F16/Q4_0/Q8_0
+The JSON path supports both BitNet I2_S and classic Llama F16/Q4_0/Q4_K/Q6_K/Q8_0
 graphs. `runtime.kernel` identifies the measured linear backend, for example
 `Q8_0 NEON`, `Q8_0 AVX2`, or `Q8_0 SSE2`. The detailed human benchmark remains
 BitNet-specific.

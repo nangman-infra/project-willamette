@@ -697,6 +697,11 @@ fn compute_tensor_byte_len(shape: &[u64], ggml_type: GgmlType) -> Result<Option<
                 .map(Some)
                 .map_err(|error| error.to_string());
         }
+        GgmlType::Q4K => {
+            return TensorView::q4k_expected_byte_len(shape)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
         GgmlType::Q8_0 => {
             return TensorView::q8_0_expected_byte_len(shape)
                 .map(Some)
@@ -734,7 +739,6 @@ fn compute_tensor_byte_len(shape: &[u64], ggml_type: GgmlType) -> Result<Option<
         GgmlType::Q8_1 => Some((32, 40)),
         GgmlType::Q2K => Some((256, 84)),
         GgmlType::Q3K => Some((256, 110)),
-        GgmlType::Q4K => Some((256, 144)),
         GgmlType::Q5K => Some((256, 176)),
         GgmlType::Q8K => Some((256, 292)),
 
@@ -875,6 +879,13 @@ mod tests {
         let data = build_gguf(&[("bad", &[16, 2], 2, 0)], &[0; 18]);
         let error = parse_error(&data);
         assert!(error.contains("Q4_0 row length 16"), "{error}");
+    }
+
+    #[test]
+    fn rejects_q4k_row_with_only_total_block_alignment() {
+        let data = build_gguf(&[("bad", &[128, 2], 12, 0)], &[0; 144]);
+        let error = parse_error(&data);
+        assert!(error.contains("Q4_K row length 128"), "{error}");
     }
 
     #[test]

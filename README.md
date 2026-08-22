@@ -78,12 +78,14 @@ What works **today**, on the path toward the thesis:
 | SmolLM-135M-Instruct Q8_0 | ✅ Q8_0 embedding, transformer linears, and tied lm-head with runtime NEON / AVX2 / SSE2 row-dot dispatch and scalar fallback. The pinned arithmetic golden matches llama.cpp. SIMD improves measured complete-token throughput by 2.10-3.04x across four hosts; current 120-token greedy IDs also match across HP ProBook, mbp2012, and antix1. Its first 1,024 WikiText-2 transitions regress perplexity by 0.363% versus F16. |
 | SmolLM-135M-Instruct Q4_0 | ⚠️ supported low-memory scalar path, but not recommended as the default. The pinned mixed artifact uses Q4_0 transformer linears and a Q8_0 tied embedding/lm-head. It is 87.5 MiB and reaches 0.873 tok/s at 103.9 MiB peak RSS on antix1, but is slower than Q8_0 on all four hosts and regresses 1,024-transition perplexity by 19.27% versus F16. |
 | SmolLM2-360M-Instruct Q8_0 | ✅ official 386,404,992-byte artifact loads unchanged. Explicit ChatML system/user prompt IDs and the greedy `The capital of France is Paris.` output match llama.cpp exactly. The same 120 sampled token IDs were reproduced on Apple M4, HP ProBook 430 G6, mbp2012, and the 996 MiB antix1 host. The recorded 16.77 / 5.72 / 2.93 / 0.254 tok/s product-path baseline predates the Q8_0 SIMD kernel and is retained for provenance. |
+| SmolLM2-1.7B-Instruct Q4_K_M | ✅ official 1,055,609,536-byte mixed Q4_K/Q6_K artifact loads unchanged. Strict 256-value block validation, embedding/linear/lm-head consumers, and AVX2/SSE2 Q4_K row dots are implemented with scalar fallback. The pinned ChatML Paris generation matches the 360M llama.cpp golden exactly, and incremental turns return `The capital of France is Paris.` then `Paris.`. Physical x86-host timing is not yet recorded. |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
 | Apple Silicon NEON kernel | ✅ implemented + validated (Apple M4 dev host) |
 | **x86 SSE2 kernels** | ✅ SSE2 i8 is selected on SSSE3+ x86; the pure-Rust scalar LUT is selected on SSE2-only x86 such as antix1. Both preserve verified greedy output. |
 | **Q8_0 SIMD kernels** | ✅ NEON on Apple M4, AVX2 on HP ProBook, and SSE2 on mbp2012/antix1; all measured on-device against the scalar control. |
-| Runtime CPU dispatch | ✅ BitLinear selects NEON / SSE2-i8 / SSE2-only scalar LUT / scalar; Q8_0 independently selects NEON / AVX2 / SSE2 / scalar. |
+| **Q4_K SIMD kernels** | ✅ AVX2 then SSE2 runtime dispatch on x86/x86_64 with scalar fallback; deterministic multi-block tests gate both kernels against scalar and dequantized dots. |
+| Runtime CPU dispatch | ✅ BitLinear selects NEON / SSE2-i8 / SSE2-only scalar LUT / scalar; Q8_0 independently selects NEON / AVX2 / SSE2 / scalar; Q4_K selects AVX2 / SSE2 / scalar. |
 | **Prebuilt static binaries** | ✅ the release workflow builds 6 targets — `x86_64`, `i686`, `aarch64`, `armv7` Linux musl + `aarch64`, `x86_64` macOS. See [Releases](https://github.com/nangman-infra/project-willamette/releases). |
 | Multi-core CPU parallelism | ✅ `rayon` per-row BitLinear matvec |
 | Norm-weight + scratch caching | ✅ Stage 10-A / 10-B |
@@ -92,7 +94,7 @@ What works **today**, on the path toward the thesis:
 | Synthetic GGUF builder | ✅ `willamette synth-gguf --preset {tiny\|small\|medium}` (humble-HW throughput benchmarks) |
 | Ternary weight distribution | ✅ `willamette analyze` (-1 / 0 / +1 fractions across BitLinear tensors) |
 | `willamette-prep` artifact linker / Q6_K tied embedding | ✅ explicit plan + full GGUF relocation + dry-run; standalone prep binary and compatible runtime subcommand produce the same 0.745 GiB artifact; scalar gather + runtime SSE2 lm-head on x86 |
-| Architecture graph seam | ✅ registered families declare layer tensor roles and a forward variant; BitNet and classic Llama F16/Q4_0/Q8_0 are implemented |
+| Architecture graph seam | ✅ registered families declare layer tensor roles and a forward variant; BitNet and classic Llama F16/Q4_0/Q4_K/Q6_K/Q8_0 are implemented |
 | All-in-one launcher | ✅ `scripts/willamette` (SHA verify + HF download + build + run) |
 | Tests | Default and explicitly ignored external-model suites pass on the documented validation hosts; exact counts vary by target architecture. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md). |
 | SonarQube Quality Gate | ✅ OK across the v0.x release cycle |
@@ -102,8 +104,8 @@ What does **not** work yet but is on the roadmap toward the thesis:
 
 | Property | Value |
 | -------- | ----- |
-| Model coverage beyond the implemented classic Llama F16/Q4_0/Q8_0 subset (Llama 3 / Mistral / Phi / Gemma) | ❌ scaled/partial RoPE, other linear formats, architecture-specific biases, and additional tokenizer families remain unsupported — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
-| Standard GGUF quant types beyond the narrow Llama Q4_0/Q8_0 slice (Q4_K, Q5_K, …) | ❌ BitLinear remains `I2_S`-only; tied embedding additionally supports Q6_K |
+| Model coverage beyond the implemented classic Llama subset (Llama 3 / Mistral / Phi / Gemma) | ❌ scaled/partial RoPE, other linear formats, architecture-specific biases, and additional tokenizer families remain unsupported — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](docs/PHASE_III_ARCHITECTURE_RFC.md) |
+| Standard GGUF quant types beyond F16/Q4_0/Q4_K/Q6_K/Q8_0 (Q5_K, IQ families, …) | ❌ BitLinear remains `I2_S`-only; mixed Q4_K_M is validated only on the classic Llama/SmolLM graph surface |
 | Additional `willamette-prep` transform profiles beyond the tied Q6_K embedding | ❌ architecture conversion, activation analysis, sparse tables, and target-ISA blocking not started; generic GGUF relocation mechanics are implemented |
 | BitLinear I2_S AVX2 / AVX-512 kernel | ❌ not started; the new Q8_0 AVX2 row-dot kernel is a separate, shipped path validated on HP ProBook. |
 | Additional LUT kernels | ⚠️ the project-specific scalar LUT shipped in v0.10.0-mvp for SSE2-only x86. SSSE3 `pshufb`, upstream-compatible TL1/TL2, NEON, and AVX LUT variants remain unimplemented; see [`docs/LUT_KERNEL_RFC.md`](docs/LUT_KERNEL_RFC.md). |
@@ -298,7 +300,7 @@ willamette --version
   generation, with KV cache.
 * `bench` — Times one matvec, one no-cache forward, cached transformer
   forward, lm-head projection, argmax, and their complete steady-state token
-  total. `--format json` supports BitNet and classic Llama F16/Q4_0/Q8_0 and
+  total. `--format json` supports BitNet and classic Llama F16/Q4_0/Q4_K/Q6_K/Q8_0 and
   reports the measured linear backend. The default human report remains
   BitNet-specific and also compares the sparse prototype against dense
   `attn_q`.
@@ -324,6 +326,7 @@ willamette --version
 ./willamette tui --model ./models/bitnet-b1.58-2B-4T-gguf/ggml-model-i2_s.gguf
 scripts/willamette --profile smollm-135m tui
 scripts/willamette --profile smollm2-360m tui
+scripts/willamette --profile smollm2-1.7b-q4-k-m tui
 ```
 
 The launcher verifies each profile's pinned SHA256 before starting. On the
@@ -332,7 +335,7 @@ demo first, the faster but limited 135M comparison, the historical BitNet TUI,
 the Paris golden, and llama2.c side by side. See
 [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) for deployment, preflight, live
 demo, expected timing, and recovery steps. `scripts/demo_host.sh` provides the
-portable 360M/135M/Paris menu used on HP and mbp2012.
+portable 1.7B/360M/135M/Paris menu used on HP and mbp2012.
 
 Needs a real terminal (not the Claude-Code embedded chat). Over SSH
 use `ssh -t` to force a pseudo-tty when launching one-shot:

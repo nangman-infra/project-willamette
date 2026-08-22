@@ -340,6 +340,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             });
         match ggml_type {
             GgmlType::BitNetI2S => crate::model::dispatch::active_kernel().label().to_string(),
+            GgmlType::Q4K => crate::model::q4_k::active_kernel_label().to_string(),
             GgmlType::Q8_0 => crate::model::q8_0::active_kernel_label().to_string(),
             other => format!("{} scalar", other.name()),
         }

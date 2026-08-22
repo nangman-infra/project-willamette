@@ -1,4 +1,4 @@
-//! BitNet I2_S and classic Llama F16/Q4_0/Q8_0 model graphs, forward/generation paths,
+//! BitNet I2_S and classic Llama F16/Q4_0/Q4_K/Q6_K/Q8_0 model graphs, forward/generation paths,
 //! KV cache, sampling, and runtime CPU-kernel dispatch.
 //!
 //! See [`docs/BITNET_FORWARD_PLAN.md`](../../docs/BITNET_FORWARD_PLAN.md) and
@@ -29,6 +29,9 @@ pub mod lm_head;
 pub mod multi_forward;
 pub mod primitives;
 pub mod q4_0;
+pub mod q4_k;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod q4_k_simd;
 pub mod q6_k;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod q6_k_sse2;

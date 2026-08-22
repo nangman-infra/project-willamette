@@ -55,6 +55,14 @@ revision `24b2243231d5a7b55cbd3f35a99ce2eda85c0310`:
 | `SmolLM-135M-Instruct-Q4_0.gguf` | 91,726,752 bytes | `a637fd6dcfd1b1333779ce2db780996cf4ed2a64aa0f9f6be0bb46689eb232a1` |
 | `SmolLM-135M-Instruct-Q8_0.gguf` | 144,810,912 bytes | `76520babb0daebccb6e17d2f38504ece61356a0ca958d8e8795ef4d23c23c1f0` |
 
+The mixed-quant instruct gate pins
+`HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF` revision
+`2d4a76a30b4af41ecd395c35725ac11688d4cfe4`:
+
+| File | Size | SHA256 |
+| ---- | ---: | ------ |
+| `SmolLM2-1.7B-Instruct-Q4_K_M.gguf` | 1,055,609,536 bytes | `decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33` |
+
 ## ggml_type enum — source of truth
 
 File: `3rdparty/llama.cpp/ggml/include/ggml.h` (lines 357..396 at the pinned
@@ -66,6 +74,7 @@ submodule SHA).
 | `GGML_TYPE_F16`  | `1`  | ggml.h:358 |
 | `GGML_TYPE_Q4_0` | `2`  | ggml.h:359 |
 | `GGML_TYPE_Q8_0` | `8`  | ggml.h:365 |
+| `GGML_TYPE_Q4_K` | `12` | ggml.h:369 |
 | `GGML_TYPE_Q6_K` | `14` | ggml.h:371 |
 | `GGML_TYPE_I2_S` | `36` | ggml.h:393 |
 | `GGML_TYPE_I8_S` | `37` | ggml.h:394 |
@@ -85,6 +94,14 @@ scales, and one f16 super-block scale (210 bytes total). The scalar bit and
 scale mapping is pinned by `dequantize_row_q6_K` in
 `ggml/src/ggml-quants.c:2977..3006`; the reference artifact conversion follows
 `quantize_row_q6_K_ref` at lines 2907..2975.
+
+## Q4_K layout
+
+Standard Q4_K uses `QK_K = 256` and 144-byte `block_q4_K` super-blocks: f16
+`d`, f16 `dmin`, 12 packed 6-bit scale/min bytes, and 128 nibble bytes. The
+runtime follows upstream `get_scale_min_k4` packing and reconstructs each
+weight as `d * scale * q - dmin * min`, with each 32-byte band mapping its low
+nibbles before its high nibbles.
 
 ## I2_S / TL1 / TL2 implementation candidates
 
