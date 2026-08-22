@@ -1,13 +1,11 @@
 //! Global registry of [`ModelArchitecture`] impls.
 //!
-//! Initialised lazily on first call to [`resolve`]. Today it contains
-//! exactly one entry (`BitNetArchitecture`). When Llama 2 / Phi-3 /
-//! Gemma land — see [`docs/PHASE_III_ARCHITECTURE_RFC.md`](../../../docs/PHASE_III_ARCHITECTURE_RFC.md) §
-//! 5.4 — adding them is one line in [`registry()`].
+//! Initialised lazily on first call to [`resolve`]. Supported families are
+//! registered explicitly so unknown GGUF graphs fail before inference.
 
 use std::sync::OnceLock;
 
-use super::{BitNetArchitecture, LlamaArchitecture, ModelArchitecture};
+use super::{BitNetArchitecture, LlamaArchitecture, ModelArchitecture, Qwen2Architecture};
 
 /// All architectures the runtime can read GGUFs for. One entry per
 /// *family* (same forward graph). The slice is `'static` once
@@ -15,8 +13,11 @@ use super::{BitNetArchitecture, LlamaArchitecture, ModelArchitecture};
 fn registry() -> &'static [Box<dyn ModelArchitecture>] {
     static REGISTRY: OnceLock<Vec<Box<dyn ModelArchitecture>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let v: Vec<Box<dyn ModelArchitecture>> =
-            vec![Box::new(BitNetArchitecture), Box::new(LlamaArchitecture)];
+        let v: Vec<Box<dyn ModelArchitecture>> = vec![
+            Box::new(BitNetArchitecture),
+            Box::new(LlamaArchitecture),
+            Box::new(Qwen2Architecture),
+        ];
         v
     })
 }

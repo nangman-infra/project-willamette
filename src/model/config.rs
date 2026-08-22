@@ -8,7 +8,8 @@
 //! This module does not infer values and does not invent defaults beyond a
 //! single derived `head_dim`. The set of accepted `general.architecture`
 //! strings is owned by [`crate::model::architecture::registry`] — today the
-//! BitNet family (`bitnet-b1.58`, `bitnet-25`, `bitnet`) and classic `llama`;
+//! BitNet family (`bitnet-b1.58`, `bitnet-25`, `bitnet`), classic `llama`, and
+//! pinned `qwen2`;
 //! unknown strings still return `UnsupportedArchitecture`.
 
 use std::collections::HashMap;
@@ -55,7 +56,7 @@ impl ModelConfig {
     /// `general.architecture` through the
     /// [`crate::model::architecture::registry`] — accepts any string
     /// claimed by a registered impl (today: `bitnet-b1.58`,
-    /// `bitnet-25`, `bitnet`, `llama`). Returns `UnsupportedArchitecture`
+    /// `bitnet-25`, `bitnet`, `llama`, `qwen2`). Returns `UnsupportedArchitecture`
     /// for anything else.
     pub fn from_gguf_metadata(meta: &HashMap<String, GgufValue>) -> Result<Self, WillametteError> {
         let arch_string = required_str(meta, "general.architecture")?.to_string();
@@ -386,5 +387,51 @@ mod tests {
             ModelConfig::from_llama_metadata_with_prefix("llama", "llama", &metadata),
             Err(WillametteError::GgufParse(message)) if message.contains("must be even")
         ));
+    }
+
+    #[test]
+    fn qwen2_metadata_uses_prefix_and_implied_full_rope() {
+        let mut metadata = HashMap::from([
+            (
+                "general.architecture".to_string(),
+                GgufValue::Str("qwen2".to_string()),
+            ),
+            ("qwen2.block_count".to_string(), GgufValue::Uint32(2)),
+            ("qwen2.embedding_length".to_string(), GgufValue::Uint32(8)),
+            (
+                "qwen2.feed_forward_length".to_string(),
+                GgufValue::Uint32(16),
+            ),
+            ("qwen2.context_length".to_string(), GgufValue::Uint32(32)),
+            (
+                "qwen2.attention.head_count".to_string(),
+                GgufValue::Uint32(2),
+            ),
+            (
+                "qwen2.attention.head_count_kv".to_string(),
+                GgufValue::Uint32(1),
+            ),
+            (
+                "qwen2.attention.layer_norm_rms_epsilon".to_string(),
+                GgufValue::Float32(1e-6),
+            ),
+            (
+                "qwen2.rope.freq_base".to_string(),
+                GgufValue::Float32(1_000_000.0),
+            ),
+        ]);
+        metadata.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(vec![
+                GgufValue::Str("a".to_string()),
+                GgufValue::Str("b".to_string()),
+            ]),
+        );
+
+        let config = ModelConfig::from_gguf_metadata(&metadata).expect("qwen2 config");
+        assert_eq!(config.architecture, "qwen2");
+        assert_eq!(config.head_dim, 4);
+        assert_eq!(config.rope_dimension_count, 4);
+        assert_eq!(config.vocab_size, 2);
     }
 }

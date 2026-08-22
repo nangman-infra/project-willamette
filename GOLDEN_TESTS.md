@@ -151,6 +151,15 @@ is Paris.` and `Paris.`, history contains two user/assistant pairs, and KV
 position advances from 34 to 54 tokens. Run both checks in release mode using
 the commands in [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md).
 
+### Qwen2.5-3B-Instruct Q4_K_M
+
+The pinned Qwen2.5 artifact converts a Korean maintenance note into exactly six
+ordered fields: equipment, time, symptom, action, duration, and result. The
+75-token greedy output preserves both `20분` and `시험 운전 후 소음 사라짐`,
+which the smaller profiles omitted. Willamette and llama.cpp b10369 produce the
+same text. This gate covers Qwen2 pre-tokenization, QKV projection biases, NEOX
+RoPE, mixed Q4_K/Q6_K inference, and ChatML together.
+
 Q8_0 SIMD changes reduction order and does not promise universal cross-kernel
 greedy identity. The longer sky prompt reverses the first two candidates
 between M4 NEON and scalar. `tests/q8_simd_parity.rs` therefore gates the pinned

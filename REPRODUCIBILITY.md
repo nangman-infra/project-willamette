@@ -145,6 +145,22 @@ generated `The capital of France is Paris.` from this exact artifact and the
 same system/user prompt on 2026-08-23; its macOS arm64 archive SHA256 is listed
 in the cross-runtime section below.
 
+The HP quality artifact comes from `Qwen/Qwen2.5-3B-Instruct-GGUF` revision
+`7dabda4d13d513e3e842b20f0d435c732f172cbe`. The model is distributed under
+the Qwen Research License, not the source repository's MIT/Apache-2.0 license.
+
+| File | Size | SHA256 | Purpose |
+| ---- | ---: | ------ | ------- |
+| `models/Qwen2.5-3B-Instruct-Q4_K_M.gguf` | 2,104,932,768 | `626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d` | 3.09B-parameter multilingual instruct model, 36-layer GQA, mixed Q4_K/Q6_K linears, QKV biases, Qwen2 tokenizer, and ChatML |
+
+```bash
+curl -fL 'https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/7dabda4d13d513e3e842b20f0d435c732f172cbe/qwen2.5-3b-instruct-q4_k_m.gguf?download=true' \
+  -o models/Qwen2.5-3B-Instruct-Q4_K_M.gguf
+shasum -a 256 models/Qwen2.5-3B-Instruct-Q4_K_M.gguf
+cargo test --test qwen2
+cargo test --release --test qwen2 pinned_qwen2_5_korean_report_matches_llama_cpp -- --ignored --exact
+```
+
 The F16/Q4_0/Q8_0 quality comparison uses the first 1,024 contiguous transitions of
 the pinned WikiText-2 `wiki.test.raw` listed below in the Q6_K section. SmolLM's
 metadata default adds no BOS and the command adds no implicit EOS.

@@ -1113,7 +1113,7 @@ fn cmd_logits(path: &Path, prompt: &str, top_k_n: usize, no_bos: bool) -> Result
 fn ensure_bitnet_only(graph: &ModelGraph<'_>, command: &str) -> Result<()> {
     if graph.forward_variant != ForwardVariant::BitNetSubNorm {
         anyhow::bail!(
-            "{command} currently supports I2_S BitNet models only; use run, tokenize, logits, or perplexity for Llama F16/Q4_0/Q4_K/Q6_K/Q8_0"
+            "{command} currently supports I2_S BitNet models only; use run, tokenize, logits, or perplexity for supported Llama, SmolLM, or Qwen2 GGUFs"
         );
     }
     Ok(())

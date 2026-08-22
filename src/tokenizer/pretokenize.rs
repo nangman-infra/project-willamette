@@ -40,11 +40,15 @@ static GPT2_RE_MAIN: OnceLock<Regex> = OnceLock::new();
 static SMOLLM_RE_MAIN: OnceLock<Regex> = OnceLock::new();
 static GPT2_RE_DIGITS: OnceLock<Regex> = OnceLock::new();
 static SMOLLM_RE_DIGIT: OnceLock<Regex> = OnceLock::new();
+static QWEN2_RE_LETTER: OnceLock<Regex> = OnceLock::new();
+static QWEN2_RE_NUMBER: OnceLock<Regex> = OnceLock::new();
+static QWEN2_RE_WHITESPACE: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Gpt2PreTokenizer {
     Default,
     SmolLm,
+    Qwen2,
 }
 
 fn re_punct() -> &'static Regex {
@@ -76,6 +80,21 @@ fn re_digits() -> &'static Regex {
 
 fn re_individual_digit() -> &'static Regex {
     SMOLLM_RE_DIGIT.get_or_init(|| Regex::new(r#"\p{N}"#).expect("SmolLM digit regex must compile"))
+}
+
+fn re_qwen2_letter() -> &'static Regex {
+    QWEN2_RE_LETTER
+        .get_or_init(|| Regex::new(r#"^\p{L}$"#).expect("Qwen2 letter regex must compile"))
+}
+
+fn re_qwen2_number() -> &'static Regex {
+    QWEN2_RE_NUMBER
+        .get_or_init(|| Regex::new(r#"^\p{N}$"#).expect("Qwen2 number regex must compile"))
+}
+
+fn re_qwen2_whitespace() -> &'static Regex {
+    QWEN2_RE_WHITESPACE
+        .get_or_init(|| Regex::new(r#"^\s$"#).expect("Qwen2 whitespace regex must compile"))
 }
 
 /// Split one chunk by a single regex into a vector of substring
@@ -246,10 +265,129 @@ fn split_internal_whitespace<'a>(
     }
 }
 
+#[derive(Clone, Copy)]
+struct Qwen2Char {
+    start: usize,
+    end: usize,
+    value: char,
+    letter: bool,
+    number: bool,
+    whitespace: bool,
+}
+
+/// Qwen2's ordered regex, implemented directly to preserve the
+/// `\s+(?!\S)` behavior unsupported by Rust's regex crate. This follows
+/// llama.cpp's `unicode_regex_split_custom_qwen2` branch order.
+fn qwen2_pretokenize(text: &str) -> Vec<&str> {
+    let chars = text
+        .char_indices()
+        .map(|(start, value)| {
+            let end = start + value.len_utf8();
+            let slice = &text[start..end];
+            Qwen2Char {
+                start,
+                end,
+                value,
+                letter: re_qwen2_letter().is_match(slice),
+                number: re_qwen2_number().is_match(slice),
+                whitespace: re_qwen2_whitespace().is_match(slice),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut output = Vec::new();
+    let mut pos = 0;
+
+    while pos < chars.len() {
+        let start = chars[pos].start;
+
+        if chars[pos].value == '\'' {
+            let contraction_len = qwen2_contraction_len(&chars[pos..]);
+            if contraction_len > 0 {
+                pos += contraction_len;
+                output.push(&text[start..chars[pos - 1].end]);
+                continue;
+            }
+        }
+
+        // [^\r\n\p{L}\p{N}]?\p{L}+
+        if chars[pos].value != '\r'
+            && chars[pos].value != '\n'
+            && !chars[pos].number
+            && (chars[pos].letter || chars.get(pos + 1).is_some_and(|c| c.letter))
+        {
+            pos += 1;
+            while chars.get(pos).is_some_and(|c| c.letter) {
+                pos += 1;
+            }
+            output.push(&text[start..chars[pos - 1].end]);
+            continue;
+        }
+
+        // \p{N}
+        if chars[pos].number {
+            output.push(&text[start..chars[pos].end]);
+            pos += 1;
+            continue;
+        }
+
+        //  ?[^\s\p{L}\p{N}]+[\r\n]*
+        let symbol_pos = pos + usize::from(chars[pos].value == ' ');
+        if chars
+            .get(symbol_pos)
+            .is_some_and(|c| !c.whitespace && !c.letter && !c.number)
+        {
+            pos = symbol_pos + 1;
+            while chars
+                .get(pos)
+                .is_some_and(|c| !c.whitespace && !c.letter && !c.number)
+            {
+                pos += 1;
+            }
+            while chars
+                .get(pos)
+                .is_some_and(|c| matches!(c.value, '\r' | '\n'))
+            {
+                pos += 1;
+            }
+            output.push(&text[start..chars[pos - 1].end]);
+            continue;
+        }
+
+        let whitespace_start = pos;
+        let mut last_newline_end = None;
+        while chars.get(pos).is_some_and(|c| c.whitespace) {
+            if matches!(chars[pos].value, '\r' | '\n') {
+                last_newline_end = Some(pos + 1);
+            }
+            pos += 1;
+        }
+        if let Some(end) = last_newline_end {
+            pos = end;
+        } else if pos - whitespace_start > 1 && pos < chars.len() {
+            pos -= 1;
+        } else if pos == whitespace_start {
+            pos += 1;
+        }
+        output.push(&text[start..chars[pos - 1].end]);
+    }
+
+    output
+}
+
+fn qwen2_contraction_len(chars: &[Qwen2Char]) -> usize {
+    let lower = |index: usize| chars.get(index).map(|c| c.value.to_ascii_lowercase());
+    match (lower(1), lower(2)) {
+        (Some('s' | 't' | 'm' | 'd'), _) => 2,
+        (Some('r'), Some('e')) | (Some('v'), Some('e')) | (Some('l'), Some('l')) => 3,
+        _ => 0,
+    }
+}
+
 pub(super) fn pretokenize(text: &str, kind: Gpt2PreTokenizer) -> Vec<&str> {
     match kind {
         Gpt2PreTokenizer::Default => gpt2_pretokenize(text),
         Gpt2PreTokenizer::SmolLm => smollm_pretokenize(text),
+        Gpt2PreTokenizer::Qwen2 => qwen2_pretokenize(text),
     }
 }
 
@@ -322,5 +460,29 @@ mod tests {
         assert_eq!(smollm_pretokenize("a \tb"), ["a", " ", "\t", "b"]);
         assert_eq!(smollm_pretokenize("a \t\t b"), ["a", " \t\t", " b"]);
         assert_eq!(smollm_pretokenize("a\n\t\n b"), ["a", "\n\t\n", " b"]);
+    }
+
+    #[test]
+    fn qwen2_matches_llama_cpp_boundaries() {
+        assert_eq!(
+            qwen2_pretokenize("Hello123 WORLD'S!\n  next"),
+            ["Hello", "1", "2", "3", " WORLD", "'S", "!\n", " ", " next"]
+        );
+        assert_eq!(qwen2_pretokenize("a  b"), ["a", " ", " b"]);
+        assert_eq!(qwen2_pretokenize("a \t\n  b"), ["a", " \t\n", " ", " b"]);
+    }
+
+    #[test]
+    fn qwen2_is_lossless_for_mixed_unicode() {
+        for text in [
+            "",
+            "Qwen2.5: hello, world! 12345",
+            "안녕하세요 世界 🎉",
+            "don't I'M we'll",
+            "line one\r\n\tline two  ",
+            "e\u{301} १२٣",
+        ] {
+            assert_eq!(qwen2_pretokenize(text).concat(), text, "input: {text:?}");
+        }
     }
 }

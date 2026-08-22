@@ -31,6 +31,16 @@ profile. It is not deployed to antiX:
 Physical-host latency is not yet pinned, so keep the 360M profile available as
 the known-responsive fallback.
 
+HP alone exposes the Korean-quality Qwen2.5-3B-Instruct Q4_K_M profile. It is
+not deployed to the 996 MiB antiX host or mbp2012:
+
+* Local filename: `models/Qwen2.5-3B-Instruct-Q4_K_M.gguf`
+* SHA256: `626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d`
+* HP path: `$HOME/willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf`
+* Expected dashboard kernel: `Q4_K AVX2`
+* License: Qwen Research License; keep the model artifact separate from the
+  MIT/Apache-2.0 Willamette binary
+
 ## Build And Deploy
 
 Run from the repository root on the build machine:
@@ -57,13 +67,15 @@ the HP host using its configured SSH destination:
 
 ```bash
 HP_HOST=your-hp-ssh-alias
-ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m" "$HOME/willamette-smollm2-1.7b"'
+ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m" "$HOME/willamette-smollm2-1.7b" "$HOME/willamette-qwen2.5-3b"'
 scp models/SmolLM-135M-Instruct-Q8_0.gguf \
   "${HP_HOST}:willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf"
 scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
   "${HP_HOST}:willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf"
 scp models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf \
   "${HP_HOST}:willamette-smollm2-1.7b/SmolLM2-1.7B-Instruct-Q4_K_M.gguf"
+scp models/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
+  "${HP_HOST}:willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
 scp target/x86_64-unknown-linux-musl/release/project-willamette \
   "${HP_HOST}:willamette-demo-current.new"
 ssh "${HP_HOST}" 'chmod +x "$HOME/willamette-demo-current.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current"'
@@ -126,6 +138,20 @@ for host in "${HP_HOST}" mbp2012; do
 done
 ```
 
+The shared loop above checks the portable profiles. Check HP's Qwen profile
+separately because mbp2012 intentionally does not carry it:
+
+```bash
+HP_HOST=your-hp-ssh-alias
+ssh "${HP_HOST}" '
+  cd "$HOME" &&
+  printf "%s  %s\n" \
+    "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d" \
+    "willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf" |
+  sha256sum -c -
+'
+```
+
 ## Live Demo
 
 Start the antiX menu with a real terminal:
@@ -162,8 +188,9 @@ ssh -t "${HP_HOST}" '$HOME/demo.sh'
 ssh -t mbp2012 '$HOME/demo.sh'
 ```
 
-Select menu item `1` for the 1.7B Q4_K_M TUI or item `4` for its deterministic
-Paris check. The 360M fallback remains menu items `2` and `5`.
+On HP, select menu item `1` for the Qwen2.5-3B TUI or item `5` for its
+deterministic Korean six-field report. Select item `2` on mbp2012 for the 1.7B
+TUI. The portable 1.7B and 360M golden checks remain items `6` and `7`.
 
 ## Expected Timing
 
@@ -177,8 +204,22 @@ Pinned greedy two-turn acceptance on 2026-08-22:
 The portable menu's deterministic Paris check completed in 1.771 seconds on
 HP and 3.441 seconds on mbp2012. Both generated the exact pinned sentence.
 
+The HP Qwen2.5-3B Korean report check completed in 71.14 seconds with the
+menu-default eight Rayon threads, 2,013,084 KiB maximum RSS, and 1.056 generated
+tok/s including the 164-token prefill. It emitted the exact pinned 75-token
+six-field report. Four threads took 75.35 seconds, so retain the logical-CPU
+default on this 4C/8T host.
+
+The Qwen TUI was also opened in a 120x40 SSH terminal. Its dashboard reported
+`x86_64`, eight logical/four physical cores, and the expected `Q4_K AVX2`
+kernel before accepting input.
+
 The antiX pause is expected. Explain that the second turn reuses the existing
 KV cache instead of replaying the full transcript.
+
+The antiX 360M Paris proof was rerun on 2026-08-23 and reproduced the exact
+seven-token sentence in 39.981 seconds including prompt prefill. Qwen2.5-3B is
+intentionally absent from this 996 MiB host.
 
 ## Recovery
 

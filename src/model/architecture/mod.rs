@@ -6,19 +6,20 @@
 //! seam, not a kitchen sink.
 //!
 //! Today this carries the BitNet family (`bitnet-b1.58` + `bitnet-25` +
-//! `bitnet`) and the narrow classic Llama family. Adding Phi / Gemma later
-//! means adding sibling implementations; see
+//! `bitnet`), the narrow classic Llama family, and pinned Qwen2 support.
+//! Adding Phi / Gemma later means adding sibling implementations; see
 //! [`docs/PHASE_III_ARCHITECTURE_RFC.md`](../../../docs/PHASE_III_ARCHITECTURE_RFC.md).
 //!
 //! Notable scope decisions:
 //!
-//! * [`ModelConfig`] stores the shared BitNet and classic-Llama hyperparameters.
+//! * [`ModelConfig`] stores the shared BitNet, Llama, and Qwen2 hyperparameters.
 //! * [`LayerTensorRole`] and [`ForwardVariant`] name the graph seams from
 //!   RFC steps 3 and 4. Both current variants execute; future variants must
 //!   fail with `NotImplemented` before running unsupported kernels.
 
 pub mod bitnet;
 pub mod llama;
+pub mod qwen2;
 pub mod registry;
 
 use std::collections::HashMap;
@@ -34,8 +35,11 @@ pub enum LayerTensorRole {
     AttnNorm,
     AttnSubNorm,
     AttnQ,
+    AttnQBias,
     AttnK,
+    AttnKBias,
     AttnV,
+    AttnVBias,
     AttnOutput,
     FfnNorm,
     FfnSubNorm,
@@ -45,20 +49,30 @@ pub enum LayerTensorRole {
 }
 
 impl LayerTensorRole {
-    /// GGUF tensor-name component in `blk.{layer}.{suffix}.weight`.
+    /// GGUF tensor-name component in `blk.{layer}.{suffix}.{tensor_kind}`.
     pub const fn suffix(self) -> &'static str {
         match self {
             Self::AttnNorm => "attn_norm",
             Self::AttnSubNorm => "attn_sub_norm",
             Self::AttnQ => "attn_q",
+            Self::AttnQBias => "attn_q",
             Self::AttnK => "attn_k",
+            Self::AttnKBias => "attn_k",
             Self::AttnV => "attn_v",
+            Self::AttnVBias => "attn_v",
             Self::AttnOutput => "attn_output",
             Self::FfnNorm => "ffn_norm",
             Self::FfnSubNorm => "ffn_sub_norm",
             Self::FfnGate => "ffn_gate",
             Self::FfnUp => "ffn_up",
             Self::FfnDown => "ffn_down",
+        }
+    }
+
+    pub const fn tensor_kind(self) -> &'static str {
+        match self {
+            Self::AttnQBias | Self::AttnKBias | Self::AttnVBias => "bias",
+            _ => "weight",
         }
     }
 }
@@ -70,6 +84,8 @@ pub enum ForwardVariant {
     BitNetSubNorm,
     /// Classic pre-norm Llama topology without BitNet sub-norms.
     VanillaLlama,
+    /// Qwen2 uses the vanilla topology with mandatory Q/K/V projection biases.
+    Qwen2,
 }
 
 /// One impl per architecture *family*. A family is "models whose
@@ -110,6 +126,7 @@ pub trait ModelArchitecture: Send + Sync + 'static {
 
 pub use bitnet::BitNetArchitecture;
 pub use llama::LlamaArchitecture;
+pub use qwen2::Qwen2Architecture;
 pub use registry::resolve;
 
 #[cfg(test)]
@@ -132,6 +149,13 @@ mod tests {
         let arch = resolve("bitnet-25").expect("must resolve");
         assert!(arch.architecture_strings().contains(&"bitnet-25"));
         assert_eq!(arch.metadata_prefix("bitnet-25"), "bitnet-25");
+    }
+
+    #[test]
+    fn qwen2_is_resolved_with_its_metadata_prefix() {
+        let arch = resolve("qwen2").expect("must resolve");
+        assert_eq!(arch.metadata_prefix("qwen2"), "qwen2");
+        assert_eq!(arch.forward_variant(), ForwardVariant::Qwen2);
     }
 
     /// Unknown arches stay rejected (otherwise we silently accept

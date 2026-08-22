@@ -16,6 +16,7 @@ use crate::gguf::tensor::TensorView;
 use crate::gguf::types::GgmlType;
 use crate::model::architecture::{resolve, ForwardVariant, LayerTensorRole};
 use crate::model::config::ModelConfig;
+use crate::model::linear::linear_matvec_f32;
 use crate::model::primitives::f32_tensor_to_vec;
 
 #[derive(Debug)]
@@ -27,8 +28,14 @@ pub struct LayerWeights<'a> {
     /// this directly instead of decoding the F32 view on every token.
     pub attn_norm_f32: Vec<f32>,
     pub attn_q: &'a TensorView<'a>,
+    pub attn_q_bias: Option<&'a TensorView<'a>>,
+    pub attn_q_bias_f32: Option<Vec<f32>>,
     pub attn_k: &'a TensorView<'a>,
+    pub attn_k_bias: Option<&'a TensorView<'a>>,
+    pub attn_k_bias_f32: Option<Vec<f32>>,
     pub attn_v: &'a TensorView<'a>,
+    pub attn_v_bias: Option<&'a TensorView<'a>>,
+    pub attn_v_bias_f32: Option<Vec<f32>>,
     pub attn_output: &'a TensorView<'a>,
     pub attn_sub_norm: Option<&'a TensorView<'a>>,
     /// Pre-decoded `attn_sub_norm` weights (Stage 10-A).
@@ -89,9 +96,12 @@ impl<'a> ModelGraph<'a> {
                 "duplicate tensor names in GGUF tensor directory".to_string(),
             ));
         }
-        if forward_variant == ForwardVariant::VanillaLlama {
-            reject_llama_bias_tensors(&gguf.tensors)?;
-        }
+        reject_unsupported_bias_tensors(
+            &config.architecture,
+            &gguf.tensors,
+            forward_variant,
+            config.block_count,
+        )?;
 
         // ── top-level tensors ──
         let token_embd = require_tensor(&by_name, "token_embd.weight")?;
@@ -99,7 +109,7 @@ impl<'a> ModelGraph<'a> {
             ForwardVariant::BitNetSubNorm => {
                 check_dtype_one_of(token_embd, &[GgmlType::F16, GgmlType::Q6K])?;
             }
-            ForwardVariant::VanillaLlama => {
+            ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => {
                 check_dtype_one_of(
                     token_embd,
                     &[
@@ -126,7 +136,7 @@ impl<'a> ModelGraph<'a> {
                 ForwardVariant::BitNetSubNorm => {
                     check_dtype_one_of(out, &[GgmlType::F16, GgmlType::Q6K])?;
                 }
-                ForwardVariant::VanillaLlama => {
+                ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => {
                     check_dtype_one_of(
                         out,
                         &[
@@ -145,7 +155,7 @@ impl<'a> ModelGraph<'a> {
             )?;
             let selected = match forward_variant {
                 ForwardVariant::BitNetSubNorm => token_embd,
-                ForwardVariant::VanillaLlama => *out,
+                ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => *out,
             };
             (selected, true)
         } else {
@@ -157,7 +167,7 @@ impl<'a> ModelGraph<'a> {
         for il in 0..config.block_count {
             let mut tensors = HashMap::with_capacity(architecture.layer_tensor_roles().len());
             for &role in architecture.layer_tensor_roles() {
-                let tensor = require_layer_tensor(&by_name, il, role.suffix())?;
+                let tensor = require_layer_tensor(&by_name, il, role)?;
                 validate_layer_tensor(tensor, role, &config, forward_variant)?;
                 tensors.insert(role, tensor);
             }
@@ -166,8 +176,11 @@ impl<'a> ModelGraph<'a> {
             let attn_norm = required(LayerTensorRole::AttnNorm)?;
             let attn_sub_norm = tensors.get(&LayerTensorRole::AttnSubNorm).copied();
             let attn_q = required(LayerTensorRole::AttnQ)?;
+            let attn_q_bias = tensors.get(&LayerTensorRole::AttnQBias).copied();
             let attn_k = required(LayerTensorRole::AttnK)?;
+            let attn_k_bias = tensors.get(&LayerTensorRole::AttnKBias).copied();
             let attn_v = required(LayerTensorRole::AttnV)?;
+            let attn_v_bias = tensors.get(&LayerTensorRole::AttnVBias).copied();
             let attn_output = required(LayerTensorRole::AttnOutput)?;
             let ffn_norm = required(LayerTensorRole::FfnNorm)?;
             let ffn_sub_norm = tensors.get(&LayerTensorRole::FfnSubNorm).copied();
@@ -176,6 +189,9 @@ impl<'a> ModelGraph<'a> {
             let ffn_down = required(LayerTensorRole::FfnDown)?;
 
             let attn_norm_f32 = f32_tensor_to_vec(attn_norm)?;
+            let attn_q_bias_f32 = attn_q_bias.map(f32_tensor_to_vec).transpose()?;
+            let attn_k_bias_f32 = attn_k_bias.map(f32_tensor_to_vec).transpose()?;
+            let attn_v_bias_f32 = attn_v_bias.map(f32_tensor_to_vec).transpose()?;
             let attn_sub_norm_f32 = attn_sub_norm.map(f32_tensor_to_vec).transpose()?;
             let ffn_norm_f32 = f32_tensor_to_vec(ffn_norm)?;
             let ffn_sub_norm_f32 = ffn_sub_norm.map(f32_tensor_to_vec).transpose()?;
@@ -185,8 +201,14 @@ impl<'a> ModelGraph<'a> {
                 attn_norm,
                 attn_norm_f32,
                 attn_q,
+                attn_q_bias,
+                attn_q_bias_f32,
                 attn_k,
+                attn_k_bias,
+                attn_k_bias_f32,
                 attn_v,
+                attn_v_bias,
+                attn_v_bias_f32,
                 attn_output,
                 attn_sub_norm,
                 attn_sub_norm_f32,
@@ -222,6 +244,44 @@ impl<'a> ModelGraph<'a> {
     }
 }
 
+impl LayerWeights<'_> {
+    /// Compute Q/K/V and apply architecture-provided projection biases.
+    pub fn project_qkv(
+        &self,
+        input: &[f32],
+        q: &mut [f32],
+        k: &mut [f32],
+        v: &mut [f32],
+    ) -> Result<(), WillametteError> {
+        linear_matvec_f32(self.attn_q, input, q)?;
+        add_projection_bias(q, self.attn_q_bias_f32.as_deref())?;
+        linear_matvec_f32(self.attn_k, input, k)?;
+        add_projection_bias(k, self.attn_k_bias_f32.as_deref())?;
+        linear_matvec_f32(self.attn_v, input, v)?;
+        add_projection_bias(v, self.attn_v_bias_f32.as_deref())
+    }
+}
+
+fn add_projection_bias(
+    projection: &mut [f32],
+    bias: Option<&[f32]>,
+) -> Result<(), WillametteError> {
+    let Some(bias) = bias else {
+        return Ok(());
+    };
+    if projection.len() != bias.len() {
+        return Err(WillametteError::GgufParse(format!(
+            "projection length {} does not match bias length {}",
+            projection.len(),
+            bias.len()
+        )));
+    }
+    for (value, bias) in projection.iter_mut().zip(bias) {
+        *value += bias;
+    }
+    Ok(())
+}
+
 fn require_role<'a>(
     tensors: &HashMap<LayerTensorRole, &'a TensorView<'a>>,
     layer: u32,
@@ -241,8 +301,8 @@ fn validate_role_contract(
     variant: ForwardVariant,
 ) -> Result<(), WillametteError> {
     use LayerTensorRole::{
-        AttnK, AttnNorm, AttnOutput, AttnQ, AttnSubNorm, AttnV, FfnDown, FfnGate, FfnNorm,
-        FfnSubNorm, FfnUp,
+        AttnK, AttnKBias, AttnNorm, AttnOutput, AttnQ, AttnQBias, AttnSubNorm, AttnV, AttnVBias,
+        FfnDown, FfnGate, FfnNorm, FfnSubNorm, FfnUp,
     };
     for (index, role) in roles.iter().enumerate() {
         if roles[..index].contains(role) {
@@ -267,15 +327,40 @@ fn validate_role_contract(
             "architecture {architecture:?} uses BitNetSubNorm without both sub-norm tensor roles"
         )));
     }
+    if variant == ForwardVariant::Qwen2
+        && [AttnQBias, AttnKBias, AttnVBias]
+            .iter()
+            .any(|role| !roles.contains(role))
+    {
+        return Err(WillametteError::NotImplemented(format!(
+            "architecture {architecture:?} uses Qwen2 without all Q/K/V bias tensor roles"
+        )));
+    }
     Ok(())
 }
 
-fn reject_llama_bias_tensors(tensors: &[TensorView<'_>]) -> Result<(), WillametteError> {
-    if let Some(tensor) = tensors.iter().find(|tensor| tensor.name.ends_with(".bias")) {
-        return Err(WillametteError::NotImplemented(format!(
-            "Llama bias tensor {:?} is not supported",
-            tensor.name
-        )));
+fn reject_unsupported_bias_tensors(
+    architecture: &str,
+    tensors: &[TensorView<'_>],
+    variant: ForwardVariant,
+    block_count: u32,
+) -> Result<(), WillametteError> {
+    for tensor in tensors
+        .iter()
+        .filter(|tensor| tensor.name.ends_with(".bias"))
+    {
+        let supported = variant == ForwardVariant::Qwen2
+            && (0..block_count).any(|layer| {
+                ["attn_q", "attn_k", "attn_v"]
+                    .iter()
+                    .any(|projection| tensor.name == format!("blk.{layer}.{projection}.bias"))
+            });
+        if !supported {
+            return Err(WillametteError::NotImplemented(format!(
+                "architecture {architecture:?} bias tensor {:?} is not supported",
+                tensor.name
+            )));
+        }
     }
     Ok(())
 }
@@ -287,8 +372,8 @@ fn validate_layer_tensor(
     variant: ForwardVariant,
 ) -> Result<(), WillametteError> {
     use LayerTensorRole::{
-        AttnK, AttnNorm, AttnOutput, AttnQ, AttnSubNorm, AttnV, FfnDown, FfnGate, FfnNorm,
-        FfnSubNorm, FfnUp,
+        AttnK, AttnKBias, AttnNorm, AttnOutput, AttnQ, AttnQBias, AttnSubNorm, AttnV, AttnVBias,
+        FfnDown, FfnGate, FfnNorm, FfnSubNorm, FfnUp,
     };
     let n_embd = config.embedding_length as u64;
     let n_ff = config.feed_forward_length as u64;
@@ -309,6 +394,14 @@ fn validate_layer_tensor(
         AttnK | AttnV => {
             check_linear_dtype(tensor, variant)?;
             check_shape(tensor, &[n_embd, kv_dim])
+        }
+        AttnQBias => {
+            check_dtype(tensor, GgmlType::F32)?;
+            check_shape(tensor, &[n_embd])
+        }
+        AttnKBias | AttnVBias => {
+            check_dtype(tensor, GgmlType::F32)?;
+            check_shape(tensor, &[kv_dim])
         }
         AttnOutput => {
             check_linear_dtype(tensor, variant)?;
@@ -331,7 +424,7 @@ fn check_linear_dtype(
 ) -> Result<(), WillametteError> {
     match variant {
         ForwardVariant::BitNetSubNorm => check_dtype(tensor, GgmlType::BitNetI2S),
-        ForwardVariant::VanillaLlama => check_dtype_one_of(
+        ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => check_dtype_one_of(
             tensor,
             &[
                 GgmlType::F16,
@@ -359,9 +452,9 @@ fn require_tensor<'a>(
 fn require_layer_tensor<'a>(
     by_name: &HashMap<&str, &'a TensorView<'a>>,
     layer: u32,
-    suffix: &str,
+    role: LayerTensorRole,
 ) -> Result<&'a TensorView<'a>, WillametteError> {
-    let name = format!("blk.{}.{}.weight", layer, suffix);
+    let name = format!("blk.{}.{}.{}", layer, role.suffix(), role.tensor_kind());
     by_name
         .get(name.as_str())
         .copied()
@@ -469,6 +562,21 @@ mod tests {
     }
 
     #[test]
+    fn qwen2_contract_requires_all_qkv_biases() {
+        let roles = resolve("qwen2")
+            .unwrap()
+            .layer_tensor_roles()
+            .iter()
+            .copied()
+            .filter(|role| *role != LayerTensorRole::AttnVBias)
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            validate_role_contract("qwen2", &roles, ForwardVariant::Qwen2),
+            Err(WillametteError::NotImplemented(_))
+        ));
+    }
+
+    #[test]
     fn llama_bias_tensors_are_rejected() {
         let tensor = TensorView {
             name: "blk.0.attn_q.bias".to_string(),
@@ -480,9 +588,86 @@ mod tests {
             scale_data: None,
         };
         assert!(matches!(
-            reject_llama_bias_tensors(&[tensor]),
+            reject_unsupported_bias_tensors("llama", &[tensor], ForwardVariant::VanillaLlama, 1),
             Err(WillametteError::NotImplemented(_))
         ));
+    }
+
+    #[test]
+    fn qwen2_rejects_non_qkv_biases() {
+        let tensor = TensorView {
+            name: "blk.0.attn_output.bias".to_string(),
+            shape: vec![4],
+            ggml_type: GgmlType::F32,
+            offset: 0,
+            byte_len: 0,
+            data: &[],
+            scale_data: None,
+        };
+        assert!(matches!(
+            reject_unsupported_bias_tensors("qwen2", &[tensor], ForwardVariant::Qwen2, 1),
+            Err(WillametteError::NotImplemented(_))
+        ));
+    }
+
+    #[test]
+    fn projection_bias_is_added_and_length_checked() {
+        let mut projection = [1.0, 2.0];
+        add_projection_bias(&mut projection, Some(&[0.25, -0.5])).unwrap();
+        assert_eq!(projection, [1.25, 1.5]);
+        assert!(add_projection_bias(&mut projection, Some(&[1.0])).is_err());
+    }
+
+    #[test]
+    fn qwen2_bias_requires_f32_and_projection_shape() {
+        let config = ModelConfig {
+            architecture: "qwen2".to_string(),
+            block_count: 1,
+            embedding_length: 4,
+            feed_forward_length: 8,
+            context_length: 16,
+            head_count: 2,
+            head_count_kv: 1,
+            head_dim: 2,
+            kv_dim: 2,
+            layer_norm_rms_epsilon: 1e-6,
+            rope_dimension_count: 2,
+            rope_freq_base: 10_000.0,
+            vocab_size: 4,
+        };
+        let wrong_dtype = TensorView {
+            name: "blk.0.attn_q.bias".to_string(),
+            shape: vec![4],
+            ggml_type: GgmlType::F16,
+            offset: 0,
+            byte_len: 0,
+            data: &[],
+            scale_data: None,
+        };
+        let wrong_shape = TensorView {
+            name: "blk.0.attn_k.bias".to_string(),
+            shape: vec![4],
+            ggml_type: GgmlType::F32,
+            offset: 0,
+            byte_len: 0,
+            data: &[],
+            scale_data: None,
+        };
+
+        assert!(validate_layer_tensor(
+            &wrong_dtype,
+            LayerTensorRole::AttnQBias,
+            &config,
+            ForwardVariant::Qwen2,
+        )
+        .is_err());
+        assert!(validate_layer_tensor(
+            &wrong_shape,
+            LayerTensorRole::AttnKBias,
+            &config,
+            ForwardVariant::Qwen2,
+        )
+        .is_err());
     }
 
     #[test]

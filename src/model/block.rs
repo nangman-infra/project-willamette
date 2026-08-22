@@ -116,7 +116,9 @@ pub fn transformer_block_forward_position_zero_variant(
         ForwardVariant::BitNetSubNorm => {
             transformer_block_forward_position_zero(x, layer, config, output)
         }
-        ForwardVariant::VanillaLlama => llama_block_forward_position_zero(x, layer, config, output),
+        ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => {
+            llama_block_forward_position_zero(x, layer, config, output)
+        }
     }
 }
 
@@ -145,9 +147,7 @@ fn llama_block_forward_position_zero(
     let mut q = vec![0.0; n_embd];
     let mut k = vec![0.0; kv_dim];
     let mut v = vec![0.0; kv_dim];
-    linear_matvec_f32(layer.attn_q, &normed, &mut q)?;
-    linear_matvec_f32(layer.attn_k, &normed, &mut k)?;
-    linear_matvec_f32(layer.attn_v, &normed, &mut v)?;
+    layer.project_qkv(&normed, &mut q, &mut k, &mut v)?;
     // Both RoPE layouts are identity at position zero.
     let shape =
         AttentionShape::from_config(config.head_count, config.head_count_kv, config.head_dim)?;

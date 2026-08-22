@@ -107,9 +107,7 @@ pub fn multi_token_forward(
             let mut q = vec![0.0_f32; n_embd];
             let mut k = vec![0.0_f32; kv_dim];
             let mut v = vec![0.0_f32; kv_dim];
-            linear_matvec_f32(layer.attn_q, &x_norms[t], &mut q)?;
-            linear_matvec_f32(layer.attn_k, &x_norms[t], &mut k)?;
-            linear_matvec_f32(layer.attn_v, &x_norms[t], &mut v)?;
+            layer.project_qkv(&x_norms[t], &mut q, &mut k, &mut v)?;
             apply_rope_multi_head(
                 &mut q,
                 cfg.head_count,
@@ -174,7 +172,7 @@ pub fn multi_token_forward(
                     rms_norm_f32(&attn_outs[t], weights, eps, &mut sub_normed)?;
                     &sub_normed
                 }
-                ForwardVariant::VanillaLlama => &attn_outs[t],
+                ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &attn_outs[t],
             };
             let mut wo_out = vec![0.0_f32; n_embd];
             linear_matvec_f32(layer.attn_output, projection_input, &mut wo_out)?;
@@ -203,7 +201,7 @@ pub fn multi_token_forward(
             linear_matvec_f32(layer.ffn_up, &x_norm, &mut up)?;
             match graph.forward_variant {
                 ForwardVariant::BitNetSubNorm => relu_square(&mut gate),
-                ForwardVariant::VanillaLlama => silu(&mut gate),
+                ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => silu(&mut gate),
             }
             let mut fused = vec![0.0_f32; n_ff];
             elementwise_mul(&gate, &up, &mut fused)?;
@@ -218,7 +216,7 @@ pub fn multi_token_forward(
                     rms_norm_f32(&fused, weights, eps, &mut fused_norm)?;
                     &fused_norm
                 }
-                ForwardVariant::VanillaLlama => &fused,
+                ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &fused,
             };
             let mut down = vec![0.0_f32; n_embd];
             linear_matvec_f32(layer.ffn_down, down_input, &mut down)?;
@@ -246,7 +244,7 @@ pub fn multi_token_forward(
 
 fn rope_type(variant: ForwardVariant) -> RopeType {
     match variant {
-        ForwardVariant::BitNetSubNorm => RopeType::Neox,
+        ForwardVariant::BitNetSubNorm | ForwardVariant::Qwen2 => RopeType::Neox,
         ForwardVariant::VanillaLlama => RopeType::Norm,
     }
 }

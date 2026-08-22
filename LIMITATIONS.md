@@ -17,6 +17,7 @@ the following narrow, source-pinned model surfaces:
 | `SmolLM-135M-Instruct` acceptance artifacts | F16, Q4_0, or Q8_0 transformer linears; F16/Q4_0/Q8_0 embedding and tied lm-head; F32 RMSNorm | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_SMOLLM` |
 | `SmolLM2-360M-Instruct` acceptance artifact | Q8_0 transformer linears, embedding, and tied lm-head; F32 RMSNorm | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_SMOLLM` and incremental multi-turn ChatML encoding |
 | `SmolLM2-1.7B-Instruct` acceptance artifact | Mixed Q4_K/Q6_K transformer linears, embedding, and tied lm-head; F32 RMSNorm | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_SMOLLM` and incremental multi-turn ChatML encoding |
+| `Qwen2.5-3B-Instruct` acceptance artifact | Mixed Q4_K/Q6_K transformer linears, tied lm-head, F32 RMSNorm and Q/K/V biases | `gpt2` BPE with `LLAMA_VOCAB_PRE_TYPE_QWEN2` and incremental ChatML encoding |
 
 Anything outside this combination returns a typed error
 (`UnsupportedArchitecture`, `UnsupportedTensorType`,
@@ -24,7 +25,7 @@ Anything outside this combination returns a typed error
 
 ### Not supported
 
-* **Architectures outside the BitNet family and classic Llama subset.** Willamette accepts the
+* **Architectures outside the BitNet family, classic Llama subset, and pinned Qwen2 subset.** Willamette accepts the
   BitNet family (`bitnet-b1.58`, `bitnet-25`, `bitnet`) through the
   `ModelArchitecture` registry (see `src/model/architecture/`).
   `bitnet-25` was end-to-end verified on antix1 against

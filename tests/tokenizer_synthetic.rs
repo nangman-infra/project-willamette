@@ -173,6 +173,44 @@ fn smollm_allows_its_intentionally_incomplete_byte_vocab() {
 }
 
 #[test]
+fn qwen2_metadata_selects_individual_digits_and_leading_space_words() {
+    let mut tokens = gpt2_byte_unicode_vocab();
+    tokens.push("12".to_string());
+    tokens.push("Ġh".to_string());
+    let metadata = HashMap::from([
+        (
+            "tokenizer.ggml.model".to_string(),
+            GgufValue::Str("gpt2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.pre".to_string(),
+            GgufValue::Str("qwen2".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            GgufValue::Array(tokens.into_iter().map(GgufValue::Str).collect()),
+        ),
+        (
+            "tokenizer.ggml.merges".to_string(),
+            GgufValue::Array(vec![
+                GgufValue::Str("1 2".to_string()),
+                GgufValue::Str("Ġ h".to_string()),
+            ]),
+        ),
+    ]);
+    let tokenizer = Tokenizer::from_gguf_metadata(&metadata).expect("Qwen2 tokenizer");
+
+    let ids = tokenizer
+        .encode("12 hello", EncodeOptions::none())
+        .expect("encode Qwen2 text");
+    assert_eq!(ids[0], tokenizer.token_id("1").unwrap());
+    assert_eq!(ids[1], tokenizer.token_id("2").unwrap());
+    assert_eq!(ids[2], tokenizer.token_id("Ġh").unwrap());
+    assert!(!ids.contains(&tokenizer.token_id("12").unwrap()));
+    assert_eq!(tokenizer.decode(&ids).unwrap(), "12 hello");
+}
+
+#[test]
 fn gpt2_special_text_parts_preserve_bpe_boundaries() {
     let mut tokens = gpt2_byte_unicode_vocab();
     tokens.push("ab".to_string());

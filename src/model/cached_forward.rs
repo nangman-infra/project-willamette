@@ -262,7 +262,9 @@ pub fn forward_with_cache_progress_into<F: FnMut(u32)>(
 
 fn ensure_supported_variant(variant: ForwardVariant) -> Result<(), WillametteError> {
     match variant {
-        ForwardVariant::BitNetSubNorm | ForwardVariant::VanillaLlama => Ok(()),
+        ForwardVariant::BitNetSubNorm | ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => {
+            Ok(())
+        }
     }
 }
 
@@ -320,9 +322,12 @@ fn forward_one_layer(
     });
 
     time_stage!("matvec_qkv", {
-        linear_matvec_f32(layer.attn_q, &workspace.x_norm, &mut workspace.q)?;
-        linear_matvec_f32(layer.attn_k, &workspace.x_norm, &mut workspace.k)?;
-        linear_matvec_f32(layer.attn_v, &workspace.x_norm, &mut workspace.v)?;
+        layer.project_qkv(
+            &workspace.x_norm,
+            &mut workspace.q,
+            &mut workspace.k,
+            &mut workspace.v,
+        )?;
     });
 
     time_stage!("rope", {
@@ -387,7 +392,7 @@ fn forward_one_layer(
             });
             &workspace.sub_normed
         }
-        ForwardVariant::VanillaLlama => &workspace.attn_out,
+        ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &workspace.attn_out,
     };
     time_stage!("matvec_attn_output", {
         linear_matvec_f32(
@@ -463,7 +468,7 @@ fn apply_ffn_block(
     time_stage!("ffn_relu2_emul", {
         match ctx.variant {
             ForwardVariant::BitNetSubNorm => relu_square(&mut workspace.gate),
-            ForwardVariant::VanillaLlama => silu(&mut workspace.gate),
+            ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => silu(&mut workspace.gate),
         }
         elementwise_mul(&workspace.gate, &workspace.up, &mut workspace.fused)?;
     });
@@ -483,7 +488,7 @@ fn apply_ffn_block(
             });
             &workspace.fused_norm
         }
-        ForwardVariant::VanillaLlama => &workspace.fused,
+        ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &workspace.fused,
     };
     time_stage!("matvec_ffn_down", {
         linear_matvec_f32(layer.ffn_down, down_input, &mut workspace.down)?;
@@ -498,7 +503,7 @@ fn apply_ffn_block(
 
 fn rope_type(variant: ForwardVariant) -> RopeType {
     match variant {
-        ForwardVariant::BitNetSubNorm => RopeType::Neox,
+        ForwardVariant::BitNetSubNorm | ForwardVariant::Qwen2 => RopeType::Neox,
         ForwardVariant::VanillaLlama => RopeType::Norm,
     }
 }

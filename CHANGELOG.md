@@ -24,6 +24,10 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ### Added
 
+* The runtime now supports the pinned Qwen2.5-3B-Instruct Q4_K_M artifact,
+  including `qwen2` metadata, F32 Q/K/V projection biases, NEOX RoPE, Qwen2
+  GPT-2 pre-tokenization, and ChatML. The HP menu exposes it as the Korean
+  quality profile while antiX remains on SmolLM2-360M.
 * `scripts/demo_host.sh` provides the same pinned SmolLM TUI and Paris-golden
   menu on the HP ProBook and mbp2012 x86_64 Linux demo hosts.
 * Classic Llama now accepts canonical Q4_K and Q6_K rows across embedding,
@@ -35,9 +39,16 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ### Validated
 
+* Qwen2.5-3B produced the complete pinned six-field Korean maintenance report
+  under both llama.cpp b10369 and Willamette greedy decoding, preserving the
+  duration and post-test result omitted by the smaller profiles. The deployed
+  HP ProBook completed it in 71.14 seconds with eight threads at 2,013,084 KiB
+  maximum RSS, 5.6% faster than the four-thread run. Its TUI selected Q4_K AVX2.
 * The portable menu launched the 360M TUI successfully with Q8_0/AVX2 on HP
   and Q8_0/SSE2 on mbp2012. Its Paris golden completed in 1.771 and 3.441
   seconds respectively with the exact pinned response.
+* The unchanged antiX 360M profile was rerun after the HP expansion and still
+  generated the exact seven-token Paris response on its SSE2-era Pentium M.
 * The pinned 1.7B Q4_K_M artifact generated the exact seven-token Paris golden
   and completed two incremental turns with context positions 34 to 54. On the
   M4 build host, the x86_64 AVX2 binary under Rosetta reduced the prompt-inclusive

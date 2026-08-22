@@ -97,6 +97,10 @@ enum ChatTemplate {
     ChatMl { stop_id: u32 },
 }
 
+fn uses_chatml(architecture: &str) -> bool {
+    matches!(architecture, "llama" | "qwen2")
+}
+
 /// Text-level stop sequences for the chat loop.
 ///
 /// BitNet b1.58 2B-4T is a *base* model — never SFT'd, never trained
@@ -284,7 +288,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         }
         let n_layers = graph.layers.len();
         let kv_dim = graph.config.kv_dim as usize;
-        let chat_template = if graph.config.architecture == "llama" {
+        let chat_template = if uses_chatml(&graph.config.architecture) {
             let (_, stop_id) = tokenizer.chatml_marker_ids()?;
             ChatTemplate::ChatMl { stop_id }
         } else {
@@ -826,8 +830,15 @@ fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
 mod stop_sequence_tests {
     use super::{
         find_chat_stop_sequence, floor_char_boundary, is_emoji_char, strip_emoji_chars,
-        truncate_at_chat_stop_sequence,
+        truncate_at_chat_stop_sequence, uses_chatml,
     };
+
+    #[test]
+    fn instruct_architectures_use_chatml() {
+        assert!(uses_chatml("llama"));
+        assert!(uses_chatml("qwen2"));
+        assert!(!uses_chatml("bitnet-b1.58"));
+    }
 
     #[test]
     fn no_stop_in_clean_text() {

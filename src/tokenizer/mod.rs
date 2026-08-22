@@ -2,7 +2,7 @@
 //!
 //! ## Stage 2 scope
 //!
-//! Supports `tokenizer.ggml.model = "gpt2"` and classic Llama
+//! Supports `tokenizer.ggml.model = "gpt2"` (including Qwen2) and classic Llama
 //! SentencePiece BPE. All vocabulary data and special-token IDs come from
 //! GGUF metadata; no model vocabulary is compiled into the runtime.
 //!
@@ -476,10 +476,11 @@ fn load_gpt2_backend(
         None => Gpt2PreTokenizer::Default,
         Some(GgufValue::Str(value)) if value == "default" => Gpt2PreTokenizer::Default,
         Some(GgufValue::Str(value)) if value == "smollm" => Gpt2PreTokenizer::SmolLm,
+        Some(GgufValue::Str(value)) if value == "qwen2" => Gpt2PreTokenizer::Qwen2,
         Some(GgufValue::Str(value)) => {
             return Err(WillametteError::UnsupportedTokenizer(format!(
-                "unsupported tokenizer.ggml.pre {value:?} for gpt2; supported: default, smollm"
-            )))
+            "unsupported tokenizer.ggml.pre {value:?} for gpt2; supported: default, smollm, qwen2"
+        )))
         }
         Some(_) => {
             return Err(WillametteError::UnsupportedTokenizer(
