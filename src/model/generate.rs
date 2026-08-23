@@ -12,14 +12,48 @@
 //! No sampling, no temperature, no repetition penalty in this module —
 //! pure greedy argmax. Sampling lives in Stage 5-D.
 
+use std::time::{Duration, Instant};
+
 use crate::error::WillametteError;
-use crate::model::cached_forward::{forward_with_cache_into, ForwardWorkspace};
+use crate::model::cached_forward::{
+    forward_with_cache_into, prefill_with_cache_into, ForwardWorkspace, PrefillWorkspace,
+};
 use crate::model::forward::forward_single_token_position_zero;
 use crate::model::graph::ModelGraph;
 use crate::model::kv_cache::KVCache;
 use crate::model::lm_head::{argmax, compute_logits_from_graph};
 use crate::model::multi_forward::multi_token_forward;
 use crate::model::sampler::Sampler;
+
+/// Inference work split between processing the prompt and producing output.
+///
+/// `decode_tokens` counts accepted output tokens. A sampled EOS or custom stop
+/// token is not returned and is therefore not included. Callback execution
+/// time is excluded from both durations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GenerationStats {
+    pub prefill_tokens: usize,
+    pub prefill_duration: Duration,
+    pub decode_tokens: usize,
+    pub decode_duration: Duration,
+}
+
+impl GenerationStats {
+    pub fn total_tokens(&self) -> usize {
+        self.prefill_tokens + self.decode_tokens
+    }
+
+    pub fn total_duration(&self) -> Duration {
+        self.prefill_duration + self.decode_duration
+    }
+}
+
+/// Generated token ids together with phase-specific inference statistics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationResult {
+    pub generated_tokens: Vec<u32>,
+    pub stats: GenerationStats,
+}
 
 /// Run one greedy decode step from a single token at position 0:
 ///
@@ -144,20 +178,19 @@ where
     let n_layers = graph.layers.len();
     let mut cache = KVCache::try_new(n_layers, kv_dim, max_seq_len)?;
     let mut workspace = ForwardWorkspace::new(graph);
+    let mut prefill_workspace = PrefillWorkspace::new(graph);
 
-    // Prefill: process every prompt token in order. Retain only the
-    // final hidden — that's what predicts the first new token.
+    // Layer-major prefill retains only the final hidden, which predicts the
+    // first new token.
     let mut last_hidden: Vec<f32> = Vec::new();
-    for (i, &tid) in prompt_ids.iter().enumerate() {
-        forward_with_cache_into(
-            graph,
-            &mut cache,
-            &mut workspace,
-            tid,
-            i as u32,
-            &mut last_hidden,
-        )?;
-    }
+    prefill_with_cache_into(
+        graph,
+        &mut cache,
+        &mut prefill_workspace,
+        prompt_ids,
+        0,
+        &mut last_hidden,
+    )?;
 
     let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
     let mut next_pos = prompt_ids.len() as u32;
@@ -191,6 +224,10 @@ where
 /// Generate with a user-supplied `Sampler` (temperature / top-k /
 /// top-p / repetition penalty). Defaults to greedy when the sampler
 /// has no knobs set. Stops on `eos_id` OR on any id in `stop_ids`.
+///
+/// The callback runs once for each accepted output token, after sampling and
+/// stop-token checks but before that token is observed by the sampler or
+/// forwarded to predict the following token.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_with_cache_and_sampler<F>(
     graph: &ModelGraph<'_>,
@@ -200,8 +237,41 @@ pub fn generate_with_cache_and_sampler<F>(
     stop_ids: &[u32],
     max_seq_len: usize,
     sampler: &mut Sampler,
-    mut tick: F,
+    tick: F,
 ) -> Result<Vec<u32>, WillametteError>
+where
+    F: FnMut(usize, usize, u32),
+{
+    generate_with_cache_and_sampler_with_stats(
+        graph,
+        prompt_ids,
+        max_new_tokens,
+        eos_id,
+        stop_ids,
+        max_seq_len,
+        sampler,
+        tick,
+    )
+    .map(|result| result.generated_tokens)
+}
+
+/// Stats-returning companion to [`generate_with_cache_and_sampler`].
+///
+/// Prefill time covers forwarding all prompt tokens. Decode time covers
+/// logits, sampling, sampler observation, and generated-token forwards. The
+/// callback has the same timing semantics as the legacy API, but time spent in
+/// it is excluded from the phase durations.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_with_cache_and_sampler_with_stats<F>(
+    graph: &ModelGraph<'_>,
+    prompt_ids: &[u32],
+    max_new_tokens: usize,
+    eos_id: Option<u32>,
+    stop_ids: &[u32],
+    max_seq_len: usize,
+    sampler: &mut Sampler,
+    mut tick: F,
+) -> Result<GenerationResult, WillametteError>
 where
     F: FnMut(usize, usize, u32),
 {
@@ -236,30 +306,35 @@ where
     let n_layers = graph.layers.len();
     let mut cache = KVCache::try_new(n_layers, kv_dim, max_seq_len)?;
     let mut workspace = ForwardWorkspace::new(graph);
+    let mut prefill_workspace = PrefillWorkspace::new(graph);
 
     let mut last_hidden: Vec<f32> = Vec::new();
-    for (i, &tid) in prompt_ids.iter().enumerate() {
-        forward_with_cache_into(
-            graph,
-            &mut cache,
-            &mut workspace,
-            tid,
-            i as u32,
-            &mut last_hidden,
-        )?;
-    }
+    let prefill_start = Instant::now();
+    prefill_with_cache_into(
+        graph,
+        &mut cache,
+        &mut prefill_workspace,
+        prompt_ids,
+        0,
+        &mut last_hidden,
+    )?;
+    let prefill_duration = prefill_start.elapsed();
 
     let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
     let mut next_pos = prompt_ids.len() as u32;
+    let mut decode_duration = Duration::ZERO;
 
     for step in 0..max_new_tokens {
+        let decode_start = Instant::now();
         let logits = compute_logits_from_graph(&last_hidden, graph)?;
         let next = sampler.sample(&logits)?;
+        decode_duration += decode_start.elapsed();
         if Some(next) == eos_id || stop_ids.contains(&next) {
             break;
         }
         tick(step, next_pos as usize, next);
         generated.push(next);
+        let decode_start = Instant::now();
         sampler.observe(next);
         if step + 1 < max_new_tokens {
             forward_with_cache_into(
@@ -272,8 +347,17 @@ where
             )?;
             next_pos += 1;
         }
+        decode_duration += decode_start.elapsed();
     }
-    Ok(generated)
+    Ok(GenerationResult {
+        stats: GenerationStats {
+            prefill_tokens: prompt_ids.len(),
+            prefill_duration,
+            decode_tokens: generated.len(),
+            decode_duration,
+        },
+        generated_tokens: generated,
+    })
 }
 
 fn validate_generation_budget(

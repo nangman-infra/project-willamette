@@ -65,7 +65,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use super::dashboard::DashboardState;
-use super::engine::WorkerProgress;
+use super::engine::{GenerationPhase, GenerationStats, WorkerProgress};
 use super::input_editor::InputEditor;
 use super::sysmon::{snapshot_now, spawn_sysmon, SysSnapshot};
 use super::ChatEngine;
@@ -81,7 +81,7 @@ enum UserCmd {
 
 enum TokenEvent {
     Chunk(String),
-    Done { secs: f64, chars: usize },
+    Done { stats: GenerationStats },
     Failed(String),
     StateChanged { token_position: u32 },
 }
@@ -145,6 +145,8 @@ struct UiState {
     progress: Arc<WorkerProgress>,
     /// When the current turn started (for elapsed / tok/s computation).
     turn_start: Option<Instant>,
+    phase: GenerationPhase,
+    phase_start: Option<Instant>,
     /// Wrapped-line offset on the chat pane, measured from the top.
     /// Larger value = viewport shifted further down. ratatui's
     /// `Paragraph::scroll((n, 0))` uses the same convention: "skip
@@ -185,6 +187,8 @@ impl UiState {
             dashboard,
             progress,
             turn_start: None,
+            phase: GenerationPhase::Idle,
+            phase_start: None,
             scroll_offset: 0,
             follow_bottom: true,
             overlay: None,
@@ -322,6 +326,10 @@ fn initial_dashboard_state(
         current_layer: None,
         turn_tokens_emitted: 0,
         turn_tokens_cap: 0,
+        phase: GenerationPhase::Idle,
+        prompt_tokens_completed: 0,
+        prompt_tokens_total: 0,
+        phase_tok_per_sec: 0.0,
         turn_elapsed_secs: 0.0,
         turn_tok_per_sec: 0.0,
         generating: false,
@@ -340,20 +348,17 @@ fn worker_loop<'g, 'a>(
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             UserCmd::Send(text) => {
-                let start = Instant::now();
                 let tx = evt_tx.clone();
-                let result = engine.send_user_message(&text, max_new_tokens, |chunk| {
+                let result = engine.send_user_message_with_stats(&text, max_new_tokens, |chunk| {
                     let _ = tx.send(TokenEvent::Chunk(chunk.to_string()));
                 });
-                let secs = start.elapsed().as_secs_f64();
                 let _ = evt_tx.send(TokenEvent::StateChanged {
                     token_position: engine.token_position(),
                 });
                 match result {
                     Ok(response) => {
                         let _ = evt_tx.send(TokenEvent::Done {
-                            secs,
-                            chars: response.chars().count(),
+                            stats: response.stats,
                         });
                     }
                     Err(e) => {
@@ -442,10 +447,18 @@ fn dispatch_event(ui: &mut UiState, evt: Event, cmd_tx: &Sender<UserCmd>) -> Res
 
 fn refresh_dashboard_live_fields(ui: &mut UiState) {
     let p = &ui.progress;
+    let phase = p.phase();
+    if phase != ui.phase {
+        ui.phase = phase;
+        ui.phase_start = (phase != GenerationPhase::Idle).then(Instant::now);
+    }
     let layer = p.current_layer.load(Ordering::Relaxed);
     ui.dashboard.current_layer = if layer == u32::MAX { None } else { Some(layer) };
     ui.dashboard.turn_tokens_emitted = p.tokens_emitted.load(Ordering::Relaxed);
     ui.dashboard.turn_tokens_cap = p.tokens_cap.load(Ordering::Relaxed);
+    ui.dashboard.phase = phase;
+    ui.dashboard.prompt_tokens_completed = p.prompt_tokens_completed.load(Ordering::Relaxed);
+    ui.dashboard.prompt_tokens_total = p.prompt_tokens_total.load(Ordering::Relaxed);
     ui.dashboard.kv_cache_bytes = p.kv_cache_bytes.load(Ordering::Relaxed);
     ui.dashboard.token_position = ui.token_position;
     ui.dashboard.generating = ui.generating;
@@ -453,12 +466,26 @@ fn refresh_dashboard_live_fields(ui: &mut UiState) {
     if let Some(start) = ui.turn_start {
         let elapsed = start.elapsed().as_secs_f64();
         ui.dashboard.turn_elapsed_secs = elapsed;
-        if elapsed > 0.05 && ui.dashboard.turn_tokens_emitted > 0 {
-            ui.dashboard.turn_tok_per_sec = ui.dashboard.turn_tokens_emitted as f64 / elapsed;
+        let phase_elapsed = ui
+            .phase_start
+            .map_or(elapsed, |start| start.elapsed().as_secs_f64());
+        let phase_tokens = match phase {
+            GenerationPhase::Prefill => ui.dashboard.prompt_tokens_completed,
+            GenerationPhase::Decode => ui.dashboard.turn_tokens_emitted,
+            GenerationPhase::Idle => 0,
+        };
+        ui.dashboard.phase_tok_per_sec = if phase_elapsed > 0.05 && phase_tokens > 0 {
+            phase_tokens as f64 / phase_elapsed
+        } else {
+            0.0
+        };
+        if phase == GenerationPhase::Decode {
+            ui.dashboard.turn_tok_per_sec = ui.dashboard.phase_tok_per_sec;
         }
     } else {
         ui.dashboard.turn_elapsed_secs = 0.0;
         ui.dashboard.turn_tok_per_sec = 0.0;
+        ui.dashboard.phase_tok_per_sec = 0.0;
     }
 }
 
@@ -475,7 +502,7 @@ fn drain_token_events(ui: &mut UiState, evt_rx: &Receiver<TokenEvent>) -> bool {
 fn apply_token_event(ui: &mut UiState, evt: TokenEvent) {
     match evt {
         TokenEvent::Chunk(c) => ui.streaming.push_str(&c),
-        TokenEvent::Done { secs, chars } => finish_bot_turn(ui, secs, chars),
+        TokenEvent::Done { stats } => finish_bot_turn(ui, stats),
         TokenEvent::Failed(msg) => fail_bot_turn(ui, msg),
         TokenEvent::StateChanged { token_position } => ui.token_position = token_position,
     }
@@ -486,19 +513,42 @@ fn apply_token_event(ui: &mut UiState, evt: TokenEvent) {
     // the right max, and that info isn't available until render time.
 }
 
-fn finish_bot_turn(ui: &mut UiState, secs: f64, chars: usize) {
+fn finish_bot_turn(ui: &mut UiState, stats: GenerationStats) {
     let resp = std::mem::take(&mut ui.streaming);
-    if !resp.is_empty() {
-        ui.last_bot_text = Some(resp.clone());
+    if stats.cancelled && stats.generated_tokens == 0 {
+        if matches!(ui.chat_log.last(), Some(msg) if msg.role == Role::User) {
+            ui.chat_log.pop();
+        }
+    } else {
+        if !resp.is_empty() {
+            ui.last_bot_text = Some(resp.clone());
+        }
+        ui.chat_log.push(DisplayMsg {
+            role: Role::Bot,
+            content: resp,
+        });
     }
-    ui.chat_log.push(DisplayMsg {
-        role: Role::Bot,
-        content: resp,
-    });
     ui.generating = false;
     ui.turn_start = None;
-    let cps = if secs > 0.0 { chars as f64 / secs } else { 0.0 };
-    ui.status = format!("idle · last turn {:.1}s ({:.1} chars/s)", secs, cps);
+    ui.phase = GenerationPhase::Idle;
+    ui.phase_start = None;
+    let prefill_rate = stats
+        .prefill_tokens_per_sec()
+        .map(|rate| format!("{:.1} prompt tok/s", rate));
+    let decode_rate = stats
+        .decode_tokens_per_sec()
+        .map(|rate| format!("{:.1} decode tok/s", rate));
+    let rates = [prefill_rate, decode_rate]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let state = if stats.cancelled { "cancelled" } else { "idle" };
+    ui.status = if rates.is_empty() {
+        state.to_string()
+    } else {
+        format!("{} · {}", state, rates)
+    };
 }
 
 fn fail_bot_turn(ui: &mut UiState, msg: String) {
@@ -511,6 +561,8 @@ fn fail_bot_turn(ui: &mut UiState, msg: String) {
     }
     ui.generating = false;
     ui.turn_start = None;
+    ui.phase = GenerationPhase::Idle;
+    ui.phase_start = None;
     ui.status = format!("error: {}", msg);
 }
 
@@ -1238,6 +1290,7 @@ fn append_message_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn levenshtein_distance() {
@@ -1259,5 +1312,83 @@ mod tests {
         assert_eq!(base64_simple::encode(b"fo"), "Zm8=");
         assert_eq!(base64_simple::encode(b"foo"), "Zm9v");
         assert_eq!(base64_simple::encode(b"foob"), "Zm9vYg==");
+    }
+
+    #[test]
+    fn completed_status_reports_phase_rates() {
+        let progress = Arc::new(WorkerProgress::new());
+        let mut ui = UiState::new(256, initial_test_dashboard(), progress, None, Vec::new());
+        ui.generating = true;
+        finish_bot_turn(
+            &mut ui,
+            GenerationStats {
+                prompt_tokens: 20,
+                generated_tokens: 10,
+                prefill_duration: Duration::from_secs(2),
+                decode_duration: Duration::from_secs(4),
+                cancelled: false,
+            },
+        );
+
+        assert!(ui.status.contains("10.0 prompt tok/s"));
+        assert!(ui.status.contains("2.5 decode tok/s"));
+    }
+
+    #[test]
+    fn zero_token_cancellation_removes_uncommitted_user_turn() {
+        let progress = Arc::new(WorkerProgress::new());
+        let mut ui = UiState::new(256, initial_test_dashboard(), progress, None, Vec::new());
+        ui.generating = true;
+        ui.chat_log.push(DisplayMsg {
+            role: Role::User,
+            content: "cancel me".to_string(),
+        });
+
+        finish_bot_turn(
+            &mut ui,
+            GenerationStats {
+                prompt_tokens: 0,
+                generated_tokens: 0,
+                prefill_duration: Duration::from_millis(1),
+                decode_duration: Duration::ZERO,
+                cancelled: true,
+            },
+        );
+
+        assert!(ui.chat_log.is_empty());
+        assert_eq!(ui.status, "cancelled");
+    }
+
+    fn initial_test_dashboard() -> DashboardState {
+        DashboardState {
+            model_path: String::new(),
+            architecture: String::new(),
+            n_layers: 1,
+            n_embd: 1,
+            vocab_size: 1,
+            model_file_bytes: 0,
+            quant_label: String::new(),
+            active_kernel: String::new(),
+            kernel_features: Vec::new(),
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 0.0,
+            repetition_penalty: 1.0,
+            seed: 0,
+            system_prompt: None,
+            token_position: 0,
+            max_seq_len: 256,
+            current_layer: None,
+            turn_tokens_emitted: 0,
+            turn_tokens_cap: 0,
+            phase: GenerationPhase::Idle,
+            prompt_tokens_completed: 0,
+            prompt_tokens_total: 0,
+            phase_tok_per_sec: 0.0,
+            turn_elapsed_secs: 0.0,
+            turn_tok_per_sec: 0.0,
+            generating: false,
+            kv_cache_bytes: 0,
+        }
     }
 }

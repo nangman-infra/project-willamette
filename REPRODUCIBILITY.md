@@ -1,4 +1,4 @@
-# Reproducibility — Project Willamette v0.14.0-mvp
+# Reproducibility — Project Willamette v0.15.0-mvp
 
 *Last revised 2026-08-23.*
 
@@ -148,6 +148,9 @@ in the cross-runtime section below.
 The HP quality artifact comes from `Qwen/Qwen2.5-3B-Instruct-GGUF` revision
 `7dabda4d13d513e3e842b20f0d435c732f172cbe`. The model is distributed under
 the Qwen Research License, not the source repository's MIT/Apache-2.0 license.
+Willamette does not bundle this artifact: operators must obtain it separately,
+review and accept its terms, and keep the model license/provenance with any
+redistributed model copy.
 
 | File | Size | SHA256 | Purpose |
 | ---- | ---: | ------ | ------- |

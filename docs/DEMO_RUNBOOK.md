@@ -204,11 +204,18 @@ Pinned greedy two-turn acceptance on 2026-08-22:
 The portable menu's deterministic Paris check completed in 1.771 seconds on
 HP and 3.441 seconds on mbp2012. Both generated the exact pinned sentence.
 
-The HP Qwen2.5-3B Korean report check completed in 71.14 seconds with the
-menu-default eight Rayon threads, 2,013,084 KiB maximum RSS, and 1.056 generated
-tok/s including the 164-token prefill. It emitted the exact pinned 75-token
-six-field report. Four threads took 75.35 seconds, so retain the logical-CPU
-default on this 4C/8T host.
+Before batched prefill, the HP Qwen2.5-3B Korean report check completed in 71.14
+seconds with the menu-default eight Rayon threads and 2,013,084 KiB maximum RSS.
+The v0.15.0 layer-major/tiled-Q4_K build emitted the same pinned 75 token IDs in
+51.58 seconds: 25.31 seconds for 164-token prefill and 26.26 seconds for decode,
+with 2,039,504 KiB maximum RSS. This is a 27.5% wall-time reduction, but it does
+not meet the experimental 40-second target. Four threads on the old path took
+75.35 seconds, so retain the logical-CPU default on this 4C/8T host.
+
+The expanded HP quality pass also completed a factual one-sentence summary and
+four context-dependent turns ending at token position 158. The strict table
+line-count and missing-field checks failed; these are documented acceptance
+limits, not demo claims.
 
 The Qwen TUI was also opened in a 120x40 SSH terminal. Its dashboard reported
 `x86_64`, eight logical/four physical cores, and the expected `Q4_K AVX2`

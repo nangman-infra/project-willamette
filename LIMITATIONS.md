@@ -1,6 +1,6 @@
-# Limitations — Project Willamette v0.14.0-mvp
+# Limitations — Project Willamette v0.15.0-mvp
 
-*Last revised 2026-08-23 (mixed Q4_K_M support).*
+*Last revised 2026-08-23 (Qwen batched prefill and quality evaluation).*
 
 This document is the honest counter-balance to [`README.md`](README.md).
 Read this **before** treating the project as a general LLM runtime.
@@ -93,10 +93,11 @@ each table's host, thread count, model, and metric boundary are authoritative.
 | **Q6_K tied embedding** | Supported by scalar gather, the `embedding-q6-k` artifact-linker profile, and runtime SSE2 lm-head dot products on x86/i686. The linker can relocate a transformed tensor from any physical slot and recomputes alignment, but this remains the only production transform profile. The 0.745 GiB artifact plus SSE2 reaches 0.24 tok/s on antix1 and 2.31 tok/s on mbp2012. A 1,024-transition WikiText-2 prefix measured 14.273354 perplexity versus F16 14.266282 (+0.0496%); same-host scalar/SSE2 output matches on the reference prompts. |
 | **Llama Q8_0 path** | Row-local 32-element/34-byte block validation, scalar embedding gather, and SIMD-dispatched transformer/lm-head row dots are implemented. NEON, AVX2, and SSE2 improve complete-token profiles by 2.10-3.04x over the same-host scalar control across M4, HP ProBook, mbp2012, and antix1. The pinned greedy golden and SIMD-vs-scalar multi-block tolerance pass; broader quality evaluation remains limited to the documented prompts and one 1,024-transition WikiText-2 prefix (+0.363% perplexity versus F16). |
 | **Llama Q4_0 scalar path** | Row-local 32-element/18-byte validation and scalar embedding/matvec/lm-head consumers are implemented. The pinned mixed Q4_0/Q8_0 SmolLM artifact is 66.1% smaller than F16 and uses 103.9 MiB RSS on antix1. It is slower than Q8_0 on all four hosts and regresses bounded perplexity by 19.27%, so it is a low-memory option rather than the recommended default. |
-| **Llama Q4_K_M path** | Canonical 256-element/144-byte Q4_K and 256-element/210-byte Q6_K rows are validated and supported across embedding, transformer linears, and tied lm-head. Q4_K uses AVX2/SSE2 on x86; Q6_K uses SSE2. The pinned 1.7B Paris and two-turn goldens pass. Physical HP/mbp2012 performance and broader quality evaluation remain pending. |
+| **Llama Q4_K_M path** | Canonical 256-element/144-byte Q4_K and 256-element/210-byte Q6_K rows are validated and supported across embedding, transformer linears, and tied lm-head. Q4_K uses AVX2/SSE2 on x86; Q6_K uses SSE2. The pinned 1.7B Paris and two-turn goldens pass. HP Korean comparison showed a response truncated at the common 50-token cap; broader quality evaluation remains pending. |
 | bitnet.cpp same-machine comparison on sub-AVX2 hosts | bitnet.cpp's x86 production CPU path (both the default `ggml-bitnet-mad` scalar fallback and the `BITNET_X86_TL2` LUT path) **effectively assumes AVX2**. On Ivy Bridge (no AVX2): the default build crashes with `SIGILL`, the `GGML_AVX2=OFF` build emits garbage (`!!!!!`), and the LUT build fails to compile. Willamette's hand-written SSE2 i8 kernel produces byte-identical Stage 5-E output on the same machine — see `docs/BENCHMARKS.md` 2026-05-30 § "bitnet.cpp head-to-head". The reference comparison in `docs/REFERENCE_COMPATIBILITY.md` therefore stays on AVX2-capable hosts. |
 | GPU (CUDA / Metal / Vulkan / ROCm) | not implemented (out of scope by thesis). |
-| Batched / multi-token-per-step decoding | the multi-token path exists for prompt prefill, but per-step decode is single-token. |
+| Batched / multi-token-per-step decoding | Prompt prefill is layer-major and batches Q4_K projections with tiled AVX2/SSE2 row dots. Per-step decode remains single-token. |
+| ARMv7 acceptance | `armv7-unknown-linux-musleabihf` remains a release build target and compiles in CI. No physical ARMv7 device was available for this release, so runtime, memory, and instruction-dispatch acceptance remain unverified on hardware. |
 | KV cache memory | **per-token absmax i8** since v0.9.0 — 3.97× smaller than the prior f32 layout (37.7 KB/token vs 150 KB/token on BitNet 2B). 2026-05-30 long-context measurement on antix1 (800-token greedy): VmHWM growth was **0.45 KB/token** (Vec::with_capacity pre-commits + Linux page allocator's lazy commit behaviour swallow the per-token cost). The practical chat-length ceiling on antix1 is the `max_seq_len` startup argument + the model's own 4 096-position cap, not a runtime KV cliff. See [`docs/KV_CACHE_QUANT.md`](docs/KV_CACHE_QUANT.md) § "Measured long-context behaviour". Lives in normal heap memory; no swap / eviction. |
 
 For BitLinear I2_S on x86/x86_64, Willamette uses SSE2 i8 on SSSE3+ hosts and
@@ -144,6 +145,11 @@ AVX2 and SSE2. On M4, scalar and NEON retain the same two leading first-step
 candidates but reverse their order; the external-model diagnostic gates that
 bounded candidate/logit/margin envelope. Greedy parity is therefore a
 prompt-specific acceptance gate, not a universal cross-kernel promise.
+
+The Qwen quality profile is not a general structured-data guarantee. The pinned
+six-field report, one-sentence summary, and four-turn recall pass, but the
+expanded suite also records a strict line-count failure and a missing-field
+detection failure. See [`GOLDEN_TESTS.md`](GOLDEN_TESTS.md).
 
 ## 4. Error surfaces
 

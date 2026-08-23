@@ -1,6 +1,6 @@
 [package]
 name = "project-willamette"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 description = "Rust-native, mmap-backed CPU runtime for pinned BitNet, Llama, SmolLM, and Qwen2 GGUFs."
 license = "MIT OR Apache-2.0"

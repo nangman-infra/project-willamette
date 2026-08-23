@@ -37,7 +37,7 @@
 
 use crate::error::WillametteError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct LayerKV {
     k_quant: Vec<i8>,
     k_scales: Vec<f32>,
@@ -45,7 +45,7 @@ struct LayerKV {
     v_scales: Vec<f32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KVCache {
     pub n_layers: usize,
     pub kv_dim: usize,
@@ -134,6 +134,56 @@ impl KVCache {
         KVCacheCheckpoint {
             position: self.position(),
         }
+    }
+
+    /// Validate the complete cache shape and capacity before a multi-token
+    /// append. Layer-major prefill temporarily advances one layer at a time,
+    /// so this check must run before any layer is mutated.
+    pub(crate) fn validate_append(
+        &self,
+        n_layers: usize,
+        kv_dim: usize,
+        append_count: usize,
+    ) -> Result<usize, WillametteError> {
+        if self.n_layers != n_layers || self.layers.len() != n_layers {
+            return Err(WillametteError::GgufParse(format!(
+                "KVCache: cache layers {} != model layers {}",
+                self.n_layers, n_layers
+            )));
+        }
+        if self.kv_dim != kv_dim {
+            return Err(WillametteError::GgufParse(format!(
+                "KVCache: cache kv_dim {} != model kv_dim {}",
+                self.kv_dim, kv_dim
+            )));
+        }
+
+        let position = self.position();
+        let quant_len = position.checked_mul(kv_dim).ok_or_else(|| {
+            WillametteError::GgufParse("KVCache: stored dimensions overflow usize".to_string())
+        })?;
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            if layer.k_scales.len() != position
+                || layer.v_scales.len() != position
+                || layer.k_quant.len() != quant_len
+                || layer.v_quant.len() != quant_len
+            {
+                return Err(WillametteError::GgufParse(format!(
+                    "KVCache: layer {} is not synchronized at position {}",
+                    layer_idx, position
+                )));
+            }
+        }
+        let end = position.checked_add(append_count).ok_or_else(|| {
+            WillametteError::GgufParse("KVCache: append position overflows usize".to_string())
+        })?;
+        if end > self.max_seq_len {
+            return Err(WillametteError::GgufParse(format!(
+                "KVCache: append through position {} exceeds max_seq_len {}",
+                end, self.max_seq_len
+            )));
+        }
+        Ok(position)
     }
 
     /// Discard entries appended after `checkpoint`, including partial

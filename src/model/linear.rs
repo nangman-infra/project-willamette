@@ -24,6 +24,111 @@ pub fn linear_matvec_f32(
     }
 }
 
+/// Applies a linear weight to token-major inputs `[token][in_dim]` and writes
+/// token-major outputs `[token][out_dim]`.
+pub fn linear_batched_f32(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), WillametteError> {
+    match weight.ggml_type {
+        GgmlType::Q4K => q4_k_batched_f32(weight, input, output),
+        GgmlType::BitNetI2S | GgmlType::F16 | GgmlType::Q4_0 | GgmlType::Q6K | GgmlType::Q8_0 => {
+            let (in_dim, out_dim, _) = batched_dimensions(weight, input, output)?;
+            for (input_token, output_token) in input
+                .chunks_exact(in_dim)
+                .zip(output.chunks_exact_mut(out_dim))
+            {
+                linear_matvec_f32(weight, input_token, output_token)?;
+            }
+            Ok(())
+        }
+        other => Err(WillametteError::UnsupportedTensorType(other.to_raw())),
+    }
+}
+
+fn batched_dimensions(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &[f32],
+) -> Result<(usize, usize, usize), WillametteError> {
+    if weight.shape.len() != 2 {
+        return Err(WillametteError::GgufParse(format!(
+            "batched linear {:?}: expected 2 dimensions, got {:?}",
+            weight.name, weight.shape
+        )));
+    }
+    let in_dim = usize::try_from(weight.shape[0])
+        .map_err(|_| WillametteError::GgufParse("batched input dimension overflow".to_string()))?;
+    let out_dim = usize::try_from(weight.shape[1])
+        .map_err(|_| WillametteError::GgufParse("batched output dimension overflow".to_string()))?;
+    if in_dim == 0 || out_dim == 0 {
+        return Err(WillametteError::GgufParse(format!(
+            "batched linear {:?}: dimensions must be nonzero",
+            weight.name
+        )));
+    }
+    if input.is_empty() || !input.len().is_multiple_of(in_dim) {
+        return Err(WillametteError::GgufParse(format!(
+            "batched linear {:?}: input length {} is not a positive multiple of {in_dim}",
+            weight.name,
+            input.len()
+        )));
+    }
+    let tokens = input.len() / in_dim;
+    let expected_output = tokens.checked_mul(out_dim).ok_or_else(|| {
+        WillametteError::GgufParse("batched linear output size overflow".to_string())
+    })?;
+    if output.len() != expected_output {
+        return Err(WillametteError::GgufParse(format!(
+            "batched linear {:?}: output length {} != {tokens} * {out_dim}",
+            weight.name,
+            output.len()
+        )));
+    }
+    Ok((in_dim, out_dim, tokens))
+}
+
+fn q4_k_batched_f32(
+    weight: &TensorView<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), WillametteError> {
+    let (in_dim, out_dim, tokens) = batched_dimensions(weight, input, output)?;
+    let row_bytes = usize::try_from(TensorView::q4k_expected_byte_len(&[weight.shape[0]])?)
+        .map_err(|_| WillametteError::GgufParse("Q4_K row size overflow".to_string()))?;
+    let expected = row_bytes
+        .checked_mul(out_dim)
+        .ok_or_else(|| WillametteError::GgufParse("Q4_K tensor size overflow".to_string()))?;
+    if weight.data.len() != expected {
+        return Err(WillametteError::GgufParse(format!(
+            "Q4_K linear {:?}: data length {} != expected {}",
+            weight.name,
+            weight.data.len(),
+            expected
+        )));
+    }
+
+    let mut rows = vec![0.0; output.len()];
+    rows.par_chunks_mut(tokens)
+        .enumerate()
+        .try_for_each(|(row, values)| {
+            crate::model::q4_k::dot_rows(
+                &weight.data[row * row_bytes..(row + 1) * row_bytes],
+                input,
+                in_dim,
+                values,
+            )
+        })?;
+
+    for (row, values) in rows.chunks_exact(tokens).enumerate() {
+        for (token, &value) in values.iter().enumerate() {
+            output[token * out_dim + row] = value;
+        }
+    }
+    Ok(())
+}
+
 pub fn q4_k_matvec_f32(
     weight: &TensorView<'_>,
     input: &[f32],
@@ -326,6 +431,16 @@ mod tests {
     }
 
     #[test]
+    fn f16_batched_fallback_is_token_major() {
+        let weight = tensor(&[1.0, 2.0, 3.0, -1.0, 0.5, 4.0], vec![3, 2]);
+        let input = [2.0, -1.0, 0.5, -3.0, 2.0, 1.0, 0.25, 4.0, -2.0];
+        let mut output = [0.0; 6];
+        linear_batched_f32(&weight, &input, &mut output).unwrap();
+
+        assert_eq!(output, [1.5, -0.5, 4.0, 8.0, 2.25, -6.25]);
+    }
+
+    #[test]
     fn q8_0_rectangular_matvec_matches_hand_result() {
         let mut bytes = Vec::new();
         for (scale, quant) in [(0.5, 2i8), (0.25, -4i8)] {
@@ -392,6 +507,83 @@ mod tests {
         let mut output = [0.0; 2];
         q4_k_matvec_f32(&tensor, &[1.0; 256], &mut output).unwrap();
         assert_eq!(output, [512.0, 1_024.0]);
+    }
+
+    #[test]
+    fn q4_k_batched_matches_repeated_matvec_exactly() {
+        let mut bytes = q4_k_constant_block(2);
+        bytes.extend(q4_k_constant_block(4));
+        bytes.extend(q4_k_constant_block(7));
+        let tensor = TensorView {
+            name: "q4_k.batch.weight".to_string(),
+            shape: vec![256, 3],
+            ggml_type: GgmlType::Q4K,
+            offset: 0,
+            byte_len: bytes.len() as u64,
+            data: &bytes,
+            scale_data: None,
+        };
+
+        for tokens in [1, 2, 5, 8, 9, 32] {
+            let input = (0..tokens * 256)
+                .map(|index| {
+                    let token = index / 256;
+                    let column = index % 256;
+                    (column as f32 * 0.03125).sin() + token as f32 * 0.125 - 0.5
+                })
+                .collect::<Vec<_>>();
+            let mut expected = vec![0.0; tokens * 3];
+            for (input_token, output_token) in
+                input.chunks_exact(256).zip(expected.chunks_exact_mut(3))
+            {
+                linear_matvec_f32(&tensor, input_token, output_token).unwrap();
+            }
+            let mut actual = vec![f32::NAN; tokens * 3];
+            linear_batched_f32(&tensor, &input, &mut actual).unwrap();
+
+            assert_eq!(actual, expected, "token count {tokens}");
+        }
+    }
+
+    #[test]
+    fn batched_linear_rejects_malformed_inputs_without_writing_output() {
+        let bytes = q4_k_constant_block(2);
+        let valid = TensorView {
+            name: "q4_k.invalid.weight".to_string(),
+            shape: vec![256, 1],
+            ggml_type: GgmlType::Q4K,
+            offset: 0,
+            byte_len: bytes.len() as u64,
+            data: &bytes,
+            scale_data: None,
+        };
+
+        for (input, output_len) in [(vec![], 0), (vec![0.0; 255], 1), (vec![0.0; 256], 2)] {
+            let mut output = vec![17.0; output_len];
+            assert!(linear_batched_f32(&valid, &input, &mut output).is_err());
+            assert!(output.iter().all(|&value| value == 17.0));
+        }
+
+        let bad_shape = TensorView {
+            name: valid.name.clone(),
+            shape: vec![256],
+            ggml_type: valid.ggml_type,
+            offset: valid.offset,
+            byte_len: valid.byte_len,
+            data: valid.data,
+            scale_data: valid.scale_data,
+        };
+        let mut output = [17.0];
+        assert!(linear_batched_f32(&bad_shape, &[0.0; 256], &mut output).is_err());
+        assert_eq!(output, [17.0]);
+
+        let bad_data = TensorView {
+            data: &bytes[..143],
+            byte_len: 143,
+            ..valid
+        };
+        assert!(linear_batched_f32(&bad_data, &[0.0; 256], &mut output).is_err());
+        assert_eq!(output, [17.0]);
     }
 
     fn q6_k_constant_block(scale: u8) -> Vec<u8> {

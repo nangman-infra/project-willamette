@@ -1,6 +1,6 @@
 //! Project Willamette CLI.
 //!
-//! v0.14.0 exposes GGUF inspection and analysis, tokenization, inference,
+//! v0.15.0 exposes GGUF inspection and analysis, tokenization, inference,
 //! logits/bench tooling, interactive chat/TUI modes, and synthetic benchmark
 //! model generation.
 
@@ -17,7 +17,7 @@ use project_willamette::model::architecture::ForwardVariant;
 use project_willamette::model::bitlinear::bitlinear_i2s_matvec_f32;
 use project_willamette::model::cached_forward::{forward_with_cache_into, ForwardWorkspace};
 use project_willamette::model::forward::forward_single_token_position_zero;
-use project_willamette::model::generate::generate_with_cache_and_sampler;
+use project_willamette::model::generate::generate_with_cache_and_sampler_with_stats;
 use project_willamette::model::kv_cache::KVCache;
 use project_willamette::model::linear::linear_matvec_f32;
 use project_willamette::model::lm_head::{argmax, compute_logits_from_graph, cross_entropy, top_k};
@@ -651,8 +651,7 @@ fn cmd_run(
     // waits for the next token.
     let mut pending: Vec<u8> = Vec::new();
     let mut printed_up_to: usize = 0;
-    let generation_start = std::time::Instant::now();
-    let generated = generate_with_cache_and_sampler(
+    let result = generate_with_cache_and_sampler_with_stats(
         &graph,
         &prompt_ids,
         max_new_tokens,
@@ -681,7 +680,8 @@ fn cmd_run(
         },
     )
     .map_err(|e| anyhow::anyhow!("generation failed: {}", e))?;
-    let generation_secs = generation_start.elapsed().as_secs_f64();
+    let generated = result.generated_tokens;
+    let stats = result.stats;
     // Flush any leftover incomplete suffix as U+FFFD so the user sees
     // it was there (rather than silently dropping it).
     if printed_up_to < pending.len() {
@@ -703,16 +703,34 @@ fn cmd_run(
         format!("{}{}", prompt, generated_text)
     };
     println!("Full text:        {:?}", full_text);
-    println!("Inference time:   {:.3} s", generation_secs);
     println!(
-        "Throughput:       {:.3} generated tokens/s (prefill included)",
-        if generation_secs > 0.0 {
-            generated.len() as f64 / generation_secs
-        } else {
-            0.0
-        }
+        "Prefill:          {} token(s), {:.3} s, {:.3} tokens/s",
+        stats.prefill_tokens,
+        stats.prefill_duration.as_secs_f64(),
+        tokens_per_second(stats.prefill_tokens, stats.prefill_duration)
+    );
+    println!(
+        "Decode:           {} token(s), {:.3} s, {:.3} tokens/s",
+        stats.decode_tokens,
+        stats.decode_duration.as_secs_f64(),
+        tokens_per_second(stats.decode_tokens, stats.decode_duration)
+    );
+    println!(
+        "Total:            {} token(s), {:.3} s, {:.3} tokens/s",
+        stats.total_tokens(),
+        stats.total_duration().as_secs_f64(),
+        tokens_per_second(stats.total_tokens(), stats.total_duration())
     );
     Ok(())
+}
+
+fn tokens_per_second(tokens: usize, duration: std::time::Duration) -> f64 {
+    let seconds = duration.as_secs_f64();
+    if seconds > 0.0 {
+        tokens as f64 / seconds
+    } else {
+        0.0
+    }
 }
 
 fn encode_run_prompt(
@@ -851,31 +869,33 @@ fn run_one_chat_turn(
     use std::io::Write;
     print!("Bot: ");
     std::io::stdout().flush().ok();
-    let turn_start = std::time::Instant::now();
-    let result = engine.send_user_message(user_text, max_new_tokens, |chunk| {
+    let result = engine.send_user_message_with_stats(user_text, max_new_tokens, |chunk| {
         print!("{}", chunk);
         std::io::stdout().flush().ok();
     });
-    let turn_ms = turn_start.elapsed().as_secs_f64() * 1000.0;
     println!();
-    report_turn_outcome(engine, result, turn_ms);
+    report_turn_outcome(engine, result);
     println!();
     Ok(())
 }
 
 fn report_turn_outcome(
     engine: &ChatEngine<'_, '_>,
-    result: Result<String, project_willamette::error::WillametteError>,
-    turn_ms: f64,
+    result: Result<
+        project_willamette::chat::engine::ChatResponse,
+        project_willamette::error::WillametteError,
+    >,
 ) {
     match result {
         Ok(response) => {
-            let toks = response.chars().count() as f64;
-            let tps = toks / (turn_ms / 1000.0).max(1e-6);
             println!(
-                "      [turn took {:.1} s  ~{:.1} chars/s  ctx {}/{} tokens]",
-                turn_ms / 1000.0,
-                tps,
+                "      [prefill {} tok/{:.1}s ({:.2} tok/s)  decode {} tok/{:.1}s ({:.2} tok/s)  ctx {}/{}]",
+                response.stats.prompt_tokens,
+                response.stats.prefill_duration.as_secs_f64(),
+                response.stats.prefill_tokens_per_sec().unwrap_or(0.0),
+                response.stats.generated_tokens,
+                response.stats.decode_duration.as_secs_f64(),
+                response.stats.decode_tokens_per_sec().unwrap_or(0.0),
                 engine.token_position(),
                 engine.max_seq_len()
             );

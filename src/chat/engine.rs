@@ -7,11 +7,13 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::error::WillametteError;
 use crate::gguf::types::GgmlType;
 use crate::model::cached_forward::{
-    forward_with_cache_into, forward_with_cache_progress_into, ForwardWorkspace,
+    forward_with_cache_into, forward_with_cache_progress_into, prefill_with_cache_progress_into,
+    ForwardWorkspace, PrefillWorkspace,
 };
 use crate::model::graph::ModelGraph;
 use crate::model::kv_cache::KVCache;
@@ -23,10 +25,65 @@ use crate::tokenizer::{EncodeOptions, Tokenizer};
 /// TUI (UI thread). High-frequency updates (layer-by-layer, token-by-
 /// token) flow through these atomics rather than the `mpsc` channel
 /// so the UI can poll at its own redraw cadence without flooding.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum GenerationPhase {
+    #[default]
+    Idle = 0,
+    Prefill = 1,
+    Decode = 2,
+}
+
+impl GenerationPhase {
+    fn from_u32(value: u32) -> Self {
+        match value {
+            1 => Self::Prefill,
+            2 => Self::Decode,
+            _ => Self::Idle,
+        }
+    }
+}
+
+/// Per-turn timing and token counts returned by the stats API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GenerationStats {
+    pub prompt_tokens: usize,
+    pub generated_tokens: usize,
+    pub prefill_duration: Duration,
+    pub decode_duration: Duration,
+    pub cancelled: bool,
+}
+
+impl GenerationStats {
+    pub fn prefill_tokens_per_sec(&self) -> Option<f64> {
+        rate(self.prompt_tokens, self.prefill_duration)
+    }
+
+    pub fn decode_tokens_per_sec(&self) -> Option<f64> {
+        rate(self.generated_tokens, self.decode_duration)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatResponse {
+    pub text: String,
+    pub stats: GenerationStats,
+}
+
+fn rate(tokens: usize, duration: Duration) -> Option<f64> {
+    (tokens > 0 && !duration.is_zero()).then(|| tokens as f64 / duration.as_secs_f64())
+}
+
+#[derive(Debug)]
 pub struct WorkerProgress {
+    /// Current [`GenerationPhase`], stored as its `u32` discriminant.
+    pub phase: AtomicU32,
     /// 0..n_layers while inside a forward, or `u32::MAX` when idle.
     pub current_layer: AtomicU32,
+    /// Prompt tokens successfully prefilled in the current turn.
+    pub prompt_tokens_completed: AtomicU32,
+    /// Prompt tokens to prefill in the current turn.
+    pub prompt_tokens_total: AtomicU32,
     /// Tokens emitted in the *current* turn (resets per turn).
     pub tokens_emitted: AtomicU32,
     /// Cap for the current turn (= max_new_tokens). 0 when idle.
@@ -43,7 +100,10 @@ pub struct WorkerProgress {
 impl WorkerProgress {
     pub fn new() -> Self {
         Self {
+            phase: AtomicU32::new(GenerationPhase::Idle as u32),
             current_layer: AtomicU32::new(u32::MAX),
+            prompt_tokens_completed: AtomicU32::new(0),
+            prompt_tokens_total: AtomicU32::new(0),
             tokens_emitted: AtomicU32::new(0),
             tokens_cap: AtomicU32::new(0),
             turn_start_nanos: AtomicU64::new(0),
@@ -54,7 +114,15 @@ impl WorkerProgress {
 
     /// Reset for the start of a new turn.
     pub fn begin_turn(&self, cap: u32) {
+        self.begin_turn_with_prompt(0, cap);
+    }
+
+    /// Reset for a new turn and publish its prompt-token total.
+    pub fn begin_turn_with_prompt(&self, prompt_total: u32, cap: u32) {
         self.current_layer.store(u32::MAX, Ordering::Relaxed);
+        self.prompt_tokens_completed.store(0, Ordering::Relaxed);
+        self.prompt_tokens_total
+            .store(prompt_total, Ordering::Relaxed);
         self.tokens_emitted.store(0, Ordering::Relaxed);
         self.tokens_cap.store(cap, Ordering::Relaxed);
         self.cancel_requested.store(false, Ordering::Relaxed);
@@ -63,12 +131,32 @@ impl WorkerProgress {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         self.turn_start_nanos.store(now_nanos, Ordering::Relaxed);
+        self.phase
+            .store(GenerationPhase::Prefill as u32, Ordering::Release);
+    }
+
+    pub fn phase(&self) -> GenerationPhase {
+        GenerationPhase::from_u32(self.phase.load(Ordering::Acquire))
+    }
+
+    fn begin_decode(&self) {
+        self.current_layer.store(u32::MAX, Ordering::Relaxed);
+        self.phase
+            .store(GenerationPhase::Decode as u32, Ordering::Release);
     }
 
     /// Mark the worker as idle (turn finished or aborted).
     pub fn end_turn(&self) {
         self.current_layer.store(u32::MAX, Ordering::Relaxed);
         self.turn_start_nanos.store(0, Ordering::Relaxed);
+        self.phase
+            .store(GenerationPhase::Idle as u32, Ordering::Release);
+    }
+}
+
+impl Default for WorkerProgress {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -90,6 +178,9 @@ pub struct ChatMessage {
 /// model inherits the same tokenizer (see `inspect.log`). Stop on it
 /// in addition to the configured EOS.
 const LLAMA3_EOT_ID: u32 = 128009;
+
+/// Bounds cancellation latency while retaining most layer-major prefill gains.
+const PREFILL_CHUNK_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatTemplate {
@@ -229,6 +320,7 @@ pub struct ChatEngine<'g, 'a> {
     tokenizer: Tokenizer,
     cache: KVCache,
     forward_workspace: ForwardWorkspace,
+    prefill_workspace: PrefillWorkspace,
     sampler: Sampler,
     history: Vec<ChatMessage>,
     /// Token position the NEXT prefill / generation step will write at.
@@ -299,6 +391,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             tokenizer,
             cache: KVCache::try_new(n_layers, kv_dim, max_seq_len)?,
             forward_workspace: ForwardWorkspace::new(graph),
+            prefill_workspace: PrefillWorkspace::new(graph),
             sampler: Sampler::new(sampling),
             history: Vec::new(),
             next_pos: 0,
@@ -423,8 +516,22 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         &mut self,
         user_text: &str,
         max_new_tokens: usize,
-        mut tick: F,
+        tick: F,
     ) -> Result<String, WillametteError>
+    where
+        F: FnMut(&str),
+    {
+        self.send_user_message_with_stats(user_text, max_new_tokens, tick)
+            .map(|response| response.text)
+    }
+
+    /// Stats-returning companion to [`Self::send_user_message`].
+    pub fn send_user_message_with_stats<F>(
+        &mut self,
+        user_text: &str,
+        max_new_tokens: usize,
+        mut tick: F,
+    ) -> Result<ChatResponse, WillametteError>
     where
         F: FnMut(&str),
     {
@@ -461,16 +568,41 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         }
 
         if let Some(p) = &self.progress {
-            p.begin_turn(max_new_tokens as u32);
+            p.begin_turn_with_prompt(prompt_tokens.len() as u32, max_new_tokens as u32);
         }
 
         let cache_checkpoint = self.cache.checkpoint();
         let sampler_checkpoint = self.sampler.checkpoint();
         let next_pos_checkpoint = self.next_pos;
         let history_len = self.history.len();
-        let result = match self.prefill_prompt_tokens(&prompt_tokens) {
-            Ok(last_hidden) => {
-                self.stream_assistant_response(last_hidden, max_new_tokens, &mut tick)
+        let prefill_start = Instant::now();
+        let prefill = self.prefill_prompt_tokens(&prompt_tokens);
+        let prefill_duration = prefill_start.elapsed();
+        let mut stats = GenerationStats {
+            prompt_tokens: self.progress.as_ref().map_or(prompt_tokens.len(), |p| {
+                p.prompt_tokens_completed.load(Ordering::Relaxed) as usize
+            }),
+            prefill_duration,
+            ..GenerationStats::default()
+        };
+        let result = match prefill {
+            Ok(Some(last_hidden)) => {
+                if let Some(p) = &self.progress {
+                    p.begin_decode();
+                }
+                let decode_start = Instant::now();
+                let result = self.stream_assistant_response(
+                    last_hidden,
+                    max_new_tokens,
+                    &mut tick,
+                    &mut stats,
+                );
+                stats.decode_duration = decode_start.elapsed();
+                result
+            }
+            Ok(None) => {
+                stats.cancelled = true;
+                Ok(String::new())
             }
             Err(error) => Err(StreamFailure {
                 error,
@@ -508,6 +640,18 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             }
         };
 
+        if stats.cancelled && stats.generated_tokens == 0 {
+            self.cache.rollback(cache_checkpoint);
+            self.sampler.rollback(sampler_checkpoint);
+            self.next_pos = next_pos_checkpoint;
+            self.history.truncate(history_len);
+            self.update_kv_cache_estimate();
+            return Ok(ChatResponse {
+                text: response_text,
+                stats,
+            });
+        }
+
         self.history.push(ChatMessage {
             role: Role::User,
             content: user_text.to_string(),
@@ -516,7 +660,10 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
             role: Role::Assistant,
             content: response_text.clone(),
         });
-        Ok(response_text)
+        Ok(ChatResponse {
+            text: response_text,
+            stats,
+        })
     }
 
     /// Build the text fragment + encode options for this turn.
@@ -568,15 +715,38 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
     fn prefill_prompt_tokens(
         &mut self,
         prompt_tokens: &[u32],
-    ) -> Result<Vec<f32>, WillametteError> {
+    ) -> Result<Option<Vec<f32>>, WillametteError> {
         let mut last_hidden = Vec::new();
-        for (i, &tid) in prompt_tokens.iter().enumerate() {
-            let pos = self.next_pos + i as u32;
-            self.forward_with_optional_progress(tid, pos, &mut last_hidden)?;
-            self.sampler.observe(tid);
+        for (chunk_idx, chunk) in prompt_tokens.chunks(PREFILL_CHUNK_SIZE).enumerate() {
+            if self.cancel_requested() {
+                return Ok(None);
+            }
+            let offset = chunk_idx * PREFILL_CHUNK_SIZE;
+            let pos = self.next_pos + offset as u32;
+            let progress = self.progress.clone();
+            prefill_with_cache_progress_into(
+                self.graph,
+                &mut self.cache,
+                &mut self.prefill_workspace,
+                chunk,
+                pos,
+                &mut last_hidden,
+                |layer_idx| {
+                    if let Some(progress) = &progress {
+                        progress.current_layer.store(layer_idx, Ordering::Relaxed);
+                    }
+                },
+            )?;
+            for &tid in chunk {
+                self.sampler.observe(tid);
+            }
+            if let Some(p) = &self.progress {
+                p.prompt_tokens_completed
+                    .fetch_add(chunk.len() as u32, Ordering::Relaxed);
+            }
         }
         self.next_pos += prompt_tokens.len() as u32;
-        Ok(last_hidden)
+        Ok(Some(last_hidden))
     }
 
     /// Forward a single token while updating the optional
@@ -635,6 +805,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
         mut last_hidden: Vec<f32>,
         max_new_tokens: usize,
         tick: &mut F,
+        stats: &mut GenerationStats,
     ) -> Result<String, StreamFailure>
     where
         F: FnMut(&str),
@@ -646,6 +817,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
 
         for _step in 0..max_new_tokens {
             if self.cancel_requested() {
+                stats.cancelled = true;
                 break;
             }
 
@@ -695,6 +867,7 @@ impl<'g, 'a> ChatEngine<'g, 'a> {
                 }
             }
             self.next_pos += 1;
+            stats.generated_tokens += 1;
             self.note_token_emitted();
             self.update_kv_cache_estimate();
 
@@ -1059,8 +1232,9 @@ mod transaction_tests {
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    use super::{ChatEngine, WorkerProgress};
+    use super::{ChatEngine, GenerationPhase, WorkerProgress};
     use crate::gguf::reader::{GgufFile, GgufValue};
     use crate::model::graph::ModelGraph;
     use crate::model::sampler::{SamplerCheckpoint, SamplingParams};
@@ -1149,11 +1323,38 @@ mod transaction_tests {
         let mut graph = ModelGraph::from_gguf(&gguf).unwrap();
         graph.layers[1].index = 99;
         let mut engine = ChatEngine::new(&graph, tokenizer(), SamplingParams::greedy(), 256);
+        let progress = Arc::new(WorkerProgress::new());
+        engine.set_worker_progress(progress.clone());
         let sampler_checkpoint = engine.sampler.checkpoint();
 
         assert!(engine.send_user_message("hello", 1, |_| {}).is_err());
 
         assert_turn_state_unchanged(&engine, sampler_checkpoint);
+        assert_eq!(progress.phase(), GenerationPhase::Idle);
+        assert_eq!(progress.prompt_tokens_completed.load(Ordering::Relaxed), 0);
+        assert!(progress.prompt_tokens_total.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn worker_progress_phase_lifecycle_resets_turn_counts() {
+        let progress = WorkerProgress::new();
+        progress.begin_turn_with_prompt(8, 13);
+        assert_eq!(progress.phase(), GenerationPhase::Prefill);
+        assert_eq!(progress.prompt_tokens_total.load(Ordering::Relaxed), 8);
+        assert_eq!(progress.tokens_cap.load(Ordering::Relaxed), 13);
+
+        progress.prompt_tokens_completed.store(8, Ordering::Relaxed);
+        progress.begin_decode();
+        assert_eq!(progress.phase(), GenerationPhase::Decode);
+        progress.end_turn();
+        assert_eq!(progress.phase(), GenerationPhase::Idle);
+        assert_eq!(progress.current_layer.load(Ordering::Relaxed), u32::MAX);
+
+        progress.begin_turn(5);
+        assert_eq!(progress.phase(), GenerationPhase::Prefill);
+        assert_eq!(progress.prompt_tokens_total.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.tokens_cap.load(Ordering::Relaxed), 5);
+        assert_eq!(progress.prompt_tokens_completed.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1171,5 +1372,84 @@ mod transaction_tests {
         assert_turn_state_unchanged(&engine, sampler_checkpoint);
         assert_eq!(progress.turn_start_nanos.load(Ordering::Relaxed), 0);
         assert_eq!(progress.kv_cache_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.phase(), GenerationPhase::Idle);
+        assert!(progress.prompt_tokens_completed.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            progress.prompt_tokens_completed.load(Ordering::Relaxed),
+            progress.prompt_tokens_total.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn stats_report_prefill_and_decode_counts_and_end_idle() {
+        let bytes = model_bytes();
+        let gguf = GgufFile::parse(&bytes).unwrap();
+        let graph = ModelGraph::from_gguf(&gguf).unwrap();
+        let mut engine = ChatEngine::new(&graph, tokenizer(), SamplingParams::greedy(), 256);
+        let progress = Arc::new(WorkerProgress::new());
+        engine.set_worker_progress(progress.clone());
+
+        let response = engine
+            .send_user_message_with_stats("hello", 2, |_| {})
+            .unwrap();
+
+        let prompt_total = progress.prompt_tokens_total.load(Ordering::Relaxed);
+        assert!(prompt_total > 0);
+        assert_eq!(response.stats.prompt_tokens, prompt_total as usize);
+        assert_eq!(response.stats.generated_tokens, 2);
+        assert!(!response.stats.cancelled);
+        assert!(!response.stats.prefill_duration.is_zero());
+        assert!(!response.stats.decode_duration.is_zero());
+        assert_eq!(progress.phase(), GenerationPhase::Idle);
+        assert_eq!(
+            progress.prompt_tokens_completed.load(Ordering::Relaxed),
+            prompt_total
+        );
+        assert_eq!(progress.tokens_emitted.load(Ordering::Relaxed), 2);
+        assert_eq!(engine.history.len(), 2);
+    }
+
+    #[test]
+    fn prefill_cancellation_rolls_back_entire_turn() {
+        let bytes = model_bytes();
+        let gguf = GgufFile::parse(&bytes).unwrap();
+        let graph = ModelGraph::from_gguf(&gguf).unwrap();
+        let mut engine = ChatEngine::new(&graph, tokenizer(), SamplingParams::greedy(), 256);
+        let progress = Arc::new(WorkerProgress::new());
+        engine.set_worker_progress(progress.clone());
+        let sampler_checkpoint = engine.sampler.checkpoint();
+
+        std::thread::scope(|scope| {
+            let observer = progress.clone();
+            scope.spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while observer.prompt_tokens_total.load(Ordering::Relaxed) == 0
+                    && Instant::now() < deadline
+                {
+                    std::hint::spin_loop();
+                }
+                if observer.prompt_tokens_total.load(Ordering::Relaxed) > 0 {
+                    observer.cancel_requested.store(true, Ordering::Relaxed);
+                }
+            });
+            let response = engine
+                .send_user_message_with_stats(&"x".repeat(180), 1, |_| {})
+                .unwrap();
+            assert!(response.stats.cancelled);
+            assert_eq!(response.stats.generated_tokens, 0);
+            assert!(
+                response.stats.prompt_tokens
+                    < progress.prompt_tokens_total.load(Ordering::Relaxed) as usize
+            );
+            assert!(response.text.is_empty());
+        });
+
+        assert_turn_state_unchanged(&engine, sampler_checkpoint);
+        assert_eq!(progress.phase(), GenerationPhase::Idle);
+        assert_eq!(progress.tokens_emitted.load(Ordering::Relaxed), 0);
+        assert!(
+            progress.prompt_tokens_completed.load(Ordering::Relaxed)
+                < progress.prompt_tokens_total.load(Ordering::Relaxed)
+        );
     }
 }

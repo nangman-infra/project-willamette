@@ -19,6 +19,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::engine::GenerationPhase;
 use super::sysmon::SysSnapshot;
 
 /// Engine-side info that the dashboard renders alongside system stats.
@@ -64,6 +65,10 @@ pub struct DashboardState {
     pub turn_tokens_emitted: u32,
     /// Cap for this turn (max_new_tokens). 0 when idle.
     pub turn_tokens_cap: u32,
+    pub phase: GenerationPhase,
+    pub prompt_tokens_completed: u32,
+    pub prompt_tokens_total: u32,
+    pub phase_tok_per_sec: f64,
     /// Seconds since the in-flight turn started. 0.0 when idle.
     pub turn_elapsed_secs: f64,
     /// Rolling-average tok/s for the in-flight turn. 0.0 when idle
@@ -188,23 +193,47 @@ impl DashboardState {
             lines.push(Line::from(""));
             return;
         }
+        push_kv(
+            lines,
+            "phase",
+            match self.phase {
+                GenerationPhase::Prefill => "prefill",
+                GenerationPhase::Decode => "decode",
+                GenerationPhase::Idle => "starting",
+            },
+        );
         let layer_text = self
             .current_layer
             .map(|l| format!("{:>2} / {}", l + 1, self.n_layers))
             .unwrap_or_else(|| "(starting…)".to_string());
         push_kv(lines, "layer", layer_text);
-        push_kv(lines, "tok/s", format!("{:.2}", self.turn_tok_per_sec));
-        push_kv(
-            lines,
-            "tokens",
-            format!("{} / {}", self.turn_tokens_emitted, self.turn_tokens_cap),
-        );
+        push_kv(lines, "tok/s", format!("{:.2}", self.phase_tok_per_sec));
+        match self.phase {
+            GenerationPhase::Prefill => push_kv(
+                lines,
+                "prompt",
+                format!(
+                    "{} / {}",
+                    self.prompt_tokens_completed, self.prompt_tokens_total
+                ),
+            ),
+            _ => push_kv(
+                lines,
+                "decode",
+                format!("{} / {}", self.turn_tokens_emitted, self.turn_tokens_cap),
+            ),
+        }
         push_kv(lines, "elapsed", format!("{:.1} s", self.turn_elapsed_secs));
-        let remaining = self
-            .turn_tokens_cap
-            .saturating_sub(self.turn_tokens_emitted);
-        if self.turn_tok_per_sec > 0.0 && remaining > 0 {
-            let eta = remaining as f64 / self.turn_tok_per_sec;
+        let remaining = match self.phase {
+            GenerationPhase::Prefill => self
+                .prompt_tokens_total
+                .saturating_sub(self.prompt_tokens_completed),
+            _ => self
+                .turn_tokens_cap
+                .saturating_sub(self.turn_tokens_emitted),
+        };
+        if self.phase_tok_per_sec > 0.0 && remaining > 0 {
+            let eta = remaining as f64 / self.phase_tok_per_sec;
             push_kv(lines, "eta", format!("~{:.0} s", eta));
         }
         lines.push(Line::from(Span::styled(
@@ -385,6 +414,10 @@ mod tests {
             current_layer: Some(17),
             turn_tokens_emitted: 23,
             turn_tokens_cap: 256,
+            phase: GenerationPhase::Decode,
+            prompt_tokens_completed: 12,
+            prompt_tokens_total: 12,
+            phase_tok_per_sec: 7.81,
             turn_elapsed_secs: 2.9,
             turn_tok_per_sec: 7.81,
             generating: true,
@@ -480,6 +513,24 @@ mod tests {
         assert!(joined.contains("eta"));
         // (256 - 23) / 7.81 ≈ 29.8 sec
         assert!(joined.contains("~30 s") || joined.contains("~29 s"));
+    }
+
+    #[test]
+    fn prefill_state_shows_prompt_progress_not_decode_progress() {
+        let mut state = sample_state();
+        state.phase = GenerationPhase::Prefill;
+        state.prompt_tokens_completed = 7;
+        state.prompt_tokens_total = 12;
+        let lines = state.render_lines(&sample_snap(), 40);
+        let joined = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(joined.contains("prefill"));
+        assert!(joined.contains("7 / 12"));
+        assert!(!joined.contains("23 / 256"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ BitNet-specific.
   "schema_version": 1,
   "runtime": {
     "name": "willamette",
-    "version": "0.14.0",
+    "version": "0.15.0",
     "target_arch": "x86_64",
     "kernel": "x86_64 SSE2 (i8)"
   },

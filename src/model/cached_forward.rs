@@ -29,7 +29,7 @@ use crate::model::attention::{apply_rope_multi_head, softmax_inplace};
 use crate::model::ffn::{elementwise_mul, relu_square, silu};
 use crate::model::graph::{LayerWeights, ModelGraph};
 use crate::model::kv_cache::KVCache;
-use crate::model::linear::linear_matvec_f32;
+use crate::model::linear::{linear_batched_f32, linear_matvec_f32};
 use crate::model::primitives::{
     attention_scale, embedding_gather, kv_head_for_q_head, rms_norm_f32, AttentionShape, RopeType,
 };
@@ -76,6 +76,70 @@ pub struct ForwardWorkspace {
     fused: Vec<f32>,
     fused_norm: Vec<f32>,
     down: Vec<f32>,
+}
+
+/// Reusable buffers for layer-major cached prompt prefill.
+///
+/// Projection inputs and outputs are token-major across the complete chunk.
+/// Dequantized layer-cache and attention-score scratch are shared through the
+/// embedded single-token workspace.
+pub struct PrefillWorkspace {
+    token: ForwardWorkspace,
+    hidden: Vec<f32>,
+    x_norm: Vec<f32>,
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    attn_out: Vec<f32>,
+    gate: Vec<f32>,
+    up: Vec<f32>,
+    fused: Vec<f32>,
+}
+
+impl PrefillWorkspace {
+    pub fn new(graph: &ModelGraph<'_>) -> Self {
+        Self {
+            token: ForwardWorkspace::new(graph),
+            hidden: Vec::new(),
+            x_norm: Vec::new(),
+            q: Vec::new(),
+            k: Vec::new(),
+            v: Vec::new(),
+            attn_out: Vec::new(),
+            gate: Vec::new(),
+            up: Vec::new(),
+            fused: Vec::new(),
+        }
+    }
+
+    fn prepare(&mut self, ctx: &LayerCtx, token_count: usize) -> Result<(), WillametteError> {
+        let embd_len = checked_token_buffer_len(token_count, ctx.n_embd, "embedding")?;
+        let kv_len = checked_token_buffer_len(token_count, ctx.kv_dim, "KV")?;
+        let ffn_len = checked_token_buffer_len(token_count, ctx.n_ff, "FFN")?;
+        self.hidden.resize(embd_len, 0.0);
+        self.x_norm.resize(embd_len, 0.0);
+        self.q.resize(embd_len, 0.0);
+        self.k.resize(kv_len, 0.0);
+        self.v.resize(kv_len, 0.0);
+        self.attn_out.resize(embd_len, 0.0);
+        self.gate.resize(ffn_len, 0.0);
+        self.up.resize(ffn_len, 0.0);
+        self.fused.resize(ffn_len, 0.0);
+        self.token.prepare(ctx);
+        Ok(())
+    }
+}
+
+fn checked_token_buffer_len(
+    token_count: usize,
+    width: usize,
+    name: &str,
+) -> Result<usize, WillametteError> {
+    token_count.checked_mul(width).ok_or_else(|| {
+        WillametteError::GgufParse(format!(
+            "prefill_with_cache: token-major {name} buffer size overflow"
+        ))
+    })
 }
 
 impl ForwardWorkspace {
@@ -172,6 +236,261 @@ pub fn forward_with_cache_into(
     forward_with_cache_progress_into(graph, cache, workspace, token_id, position, output, |_| {})
 }
 
+/// Layer-major cached forward for a non-empty token chunk.
+///
+/// Unlike repeatedly calling [`forward_with_cache`], each transformer layer's
+/// cache is dequantized once after all K/V entries for the chunk are appended.
+/// The returned hidden state is for the final token in `token_ids`.
+pub fn prefill_with_cache(
+    graph: &ModelGraph<'_>,
+    cache: &mut KVCache,
+    token_ids: &[u32],
+    start_position: u32,
+) -> Result<Vec<f32>, WillametteError> {
+    let mut workspace = PrefillWorkspace::new(graph);
+    let mut output = Vec::new();
+    prefill_with_cache_into(
+        graph,
+        cache,
+        &mut workspace,
+        token_ids,
+        start_position,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+/// Allocation-reusing variant of [`prefill_with_cache`].
+///
+/// All inputs and cache capacity are validated before mutation. Any later
+/// failure rolls every layer back to its entry position and clears `output`.
+pub fn prefill_with_cache_into(
+    graph: &ModelGraph<'_>,
+    cache: &mut KVCache,
+    workspace: &mut PrefillWorkspace,
+    token_ids: &[u32],
+    start_position: u32,
+    output: &mut Vec<f32>,
+) -> Result<(), WillametteError> {
+    prefill_with_cache_progress_into(
+        graph,
+        cache,
+        workspace,
+        token_ids,
+        start_position,
+        output,
+        |_| {},
+    )
+}
+
+/// Layer-progress variant of [`prefill_with_cache_into`].
+///
+/// `on_layer` runs after every transformer block for the complete chunk.
+pub fn prefill_with_cache_progress_into<F: FnMut(u32)>(
+    graph: &ModelGraph<'_>,
+    cache: &mut KVCache,
+    workspace: &mut PrefillWorkspace,
+    token_ids: &[u32],
+    start_position: u32,
+    output: &mut Vec<f32>,
+    mut on_layer: F,
+) -> Result<(), WillametteError> {
+    output.clear();
+    let ctx = build_layer_ctx(graph)?;
+    let prefix = validate_prefill_inputs(graph, cache, token_ids, start_position, &ctx)?;
+    let checkpoint = cache.checkpoint();
+
+    let result = (|| {
+        workspace.prepare(&ctx, token_ids.len())?;
+        for (token_idx, &token_id) in token_ids.iter().enumerate() {
+            let hidden = token_slice_mut(&mut workspace.hidden, token_idx, ctx.n_embd);
+            time_stage!("embedding", {
+                embedding_gather(graph.token_embd, token_id, hidden)?;
+            });
+        }
+
+        for layer in &graph.layers {
+            for token_idx in 0..token_ids.len() {
+                time_stage!("attn_norm", {
+                    rms_norm_f32(
+                        token_slice(&workspace.hidden, token_idx, ctx.n_embd),
+                        &layer.attn_norm_f32,
+                        ctx.eps,
+                        token_slice_mut(&mut workspace.x_norm, token_idx, ctx.n_embd),
+                    )?;
+                });
+            }
+            time_stage!("matvec_qkv", {
+                layer.project_qkv_batched(
+                    &workspace.x_norm,
+                    &mut workspace.q,
+                    &mut workspace.k,
+                    &mut workspace.v,
+                )?;
+            });
+            for token_idx in 0..token_ids.len() {
+                let position = start_position + token_idx as u32;
+                let q = token_slice_mut(&mut workspace.q, token_idx, ctx.n_embd);
+                let k = token_slice_mut(&mut workspace.k, token_idx, ctx.kv_dim);
+                time_stage!("rope", {
+                    apply_rope_multi_head(
+                        q,
+                        ctx.n_heads as u32,
+                        ctx.head_dim,
+                        ctx.n_rot,
+                        position,
+                        ctx.freq_base,
+                        rope_type(ctx.variant),
+                    )?;
+                    apply_rope_multi_head(
+                        k,
+                        ctx.n_heads_kv,
+                        ctx.head_dim,
+                        ctx.n_rot,
+                        position,
+                        ctx.freq_base,
+                        rope_type(ctx.variant),
+                    )?;
+                });
+                time_stage!("kv_append", {
+                    cache.append(
+                        layer.index as usize,
+                        k,
+                        token_slice(&workspace.v, token_idx, ctx.kv_dim),
+                    )?;
+                });
+            }
+
+            time_stage!("kv_read_into", {
+                cache.read_into(
+                    layer.index as usize,
+                    &mut workspace.token.scratch_k,
+                    &mut workspace.token.scratch_v,
+                )?;
+            });
+            for token_idx in 0..token_ids.len() {
+                time_stage!("attn_softmax_v", {
+                    scaled_dot_product_attention_into(
+                        token_slice(&workspace.q, token_idx, ctx.n_embd),
+                        &workspace.token.scratch_k,
+                        &workspace.token.scratch_v,
+                        prefix + token_idx + 1,
+                        &ctx,
+                        token_slice_mut(&mut workspace.attn_out, token_idx, ctx.n_embd),
+                        &mut workspace.token.scores,
+                    );
+                });
+                if ctx.variant == ForwardVariant::BitNetSubNorm {
+                    time_stage!("attn_sub_norm", {
+                        rms_norm_f32(
+                            token_slice(&workspace.attn_out, token_idx, ctx.n_embd),
+                            layer.attn_sub_norm_f32.as_deref().ok_or_else(|| {
+                                WillametteError::GgufParse(
+                                    "BitNet layer is missing attn_sub_norm".to_string(),
+                                )
+                            })?,
+                            ctx.eps,
+                            token_slice_mut(&mut workspace.x_norm, token_idx, ctx.n_embd),
+                        )?;
+                    });
+                }
+            }
+            let attn_projection_input = match ctx.variant {
+                ForwardVariant::BitNetSubNorm => &workspace.x_norm,
+                ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &workspace.attn_out,
+            };
+            time_stage!("matvec_attn_output", {
+                linear_batched_f32(layer.attn_output, attn_projection_input, &mut workspace.q)?;
+            });
+            for token_idx in 0..token_ids.len() {
+                time_stage!("residual_attn", {
+                    let hidden = token_slice_mut(&mut workspace.hidden, token_idx, ctx.n_embd);
+                    let projected = token_slice(&workspace.q, token_idx, ctx.n_embd);
+                    for d in 0..ctx.n_embd {
+                        hidden[d] += projected[d];
+                    }
+                });
+                time_stage!("ffn_norm", {
+                    rms_norm_f32(
+                        token_slice(&workspace.hidden, token_idx, ctx.n_embd),
+                        &layer.ffn_norm_f32,
+                        ctx.eps,
+                        token_slice_mut(&mut workspace.x_norm, token_idx, ctx.n_embd),
+                    )?;
+                });
+            }
+            time_stage!("matvec_ffn_gate_up", {
+                linear_batched_f32(layer.ffn_gate, &workspace.x_norm, &mut workspace.gate)?;
+                linear_batched_f32(layer.ffn_up, &workspace.x_norm, &mut workspace.up)?;
+            });
+            for token_idx in 0..token_ids.len() {
+                time_stage!("ffn_relu2_emul", {
+                    let gate = token_slice_mut(&mut workspace.gate, token_idx, ctx.n_ff);
+                    match ctx.variant {
+                        ForwardVariant::BitNetSubNorm => relu_square(gate),
+                        ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => silu(gate),
+                    }
+                    elementwise_mul(
+                        gate,
+                        token_slice(&workspace.up, token_idx, ctx.n_ff),
+                        token_slice_mut(&mut workspace.fused, token_idx, ctx.n_ff),
+                    )?;
+                });
+                if ctx.variant == ForwardVariant::BitNetSubNorm {
+                    time_stage!("ffn_sub_norm", {
+                        rms_norm_f32(
+                            token_slice(&workspace.fused, token_idx, ctx.n_ff),
+                            layer.ffn_sub_norm_f32.as_deref().ok_or_else(|| {
+                                WillametteError::GgufParse(
+                                    "BitNet layer is missing ffn_sub_norm".to_string(),
+                                )
+                            })?,
+                            ctx.eps,
+                            token_slice_mut(&mut workspace.gate, token_idx, ctx.n_ff),
+                        )?;
+                    });
+                }
+            }
+            let down_input = match ctx.variant {
+                ForwardVariant::BitNetSubNorm => &workspace.gate,
+                ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &workspace.fused,
+            };
+            time_stage!("matvec_ffn_down", {
+                linear_batched_f32(layer.ffn_down, down_input, &mut workspace.q)?;
+            });
+            for token_idx in 0..token_ids.len() {
+                time_stage!("residual_ffn", {
+                    let hidden = token_slice_mut(&mut workspace.hidden, token_idx, ctx.n_embd);
+                    let down = token_slice(&workspace.q, token_idx, ctx.n_embd);
+                    for d in 0..ctx.n_embd {
+                        hidden[d] += down[d];
+                    }
+                });
+                time_stage!("check_finite", {
+                    check_finite_hidden(
+                        token_slice(&workspace.hidden, token_idx, ctx.n_embd),
+                        layer.index,
+                    )?;
+                });
+            }
+            on_layer(layer.index);
+        }
+
+        output.resize(ctx.n_embd, 0.0);
+        let final_hidden = token_slice(&workspace.hidden, token_ids.len() - 1, ctx.n_embd);
+        time_stage!("output_norm", {
+            rms_norm_f32(final_hidden, &graph.output_norm_f32, ctx.eps, output)?;
+        });
+        check_finite_output(output)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        cache.rollback(checkpoint);
+        output.clear();
+    }
+    result
+}
+
 /// Same as [`forward_with_cache`] but calls `on_layer(layer_idx)`
 /// after each transformer block finishes. Used by the TUI to update
 /// the layer-progress indicator in the dashboard. The overhead is
@@ -216,21 +535,7 @@ pub fn forward_with_cache_progress_into<F: FnMut(u32)>(
         output.clear();
         return Err(error);
     }
-    let cfg = &graph.config;
-    let ctx = LayerCtx {
-        n_embd: cfg.embedding_length as usize,
-        variant: graph.forward_variant,
-        kv_dim: cfg.kv_dim as usize,
-        n_ff: cfg.feed_forward_length as usize,
-        head_dim: cfg.head_dim as usize,
-        n_rot: cfg.rope_dimension_count as usize,
-        freq_base: cfg.rope_freq_base,
-        eps: cfg.layer_norm_rms_epsilon,
-        n_heads: cfg.head_count as usize,
-        n_heads_kv: cfg.head_count_kv,
-        shape: AttentionShape::from_config(cfg.head_count, cfg.head_count_kv, cfg.head_dim)?,
-        scale: attention_scale(cfg.head_dim as usize),
-    };
+    let ctx = build_layer_ctx(graph)?;
 
     validate_cache_inputs(graph, cache, token_id, position, ctx.kv_dim)?;
     let checkpoint = cache.checkpoint();
@@ -258,6 +563,25 @@ pub fn forward_with_cache_progress_into<F: FnMut(u32)>(
         output.clear();
     }
     result
+}
+
+fn build_layer_ctx(graph: &ModelGraph<'_>) -> Result<LayerCtx, WillametteError> {
+    ensure_supported_variant(graph.forward_variant)?;
+    let cfg = &graph.config;
+    Ok(LayerCtx {
+        n_embd: cfg.embedding_length as usize,
+        variant: graph.forward_variant,
+        kv_dim: cfg.kv_dim as usize,
+        n_ff: cfg.feed_forward_length as usize,
+        head_dim: cfg.head_dim as usize,
+        n_rot: cfg.rope_dimension_count as usize,
+        freq_base: cfg.rope_freq_base,
+        eps: cfg.layer_norm_rms_epsilon,
+        n_heads: cfg.head_count as usize,
+        n_heads_kv: cfg.head_count_kv,
+        shape: AttentionShape::from_config(cfg.head_count, cfg.head_count_kv, cfg.head_dim)?,
+        scale: attention_scale(cfg.head_dim as usize),
+    })
 }
 
 fn ensure_supported_variant(variant: ForwardVariant) -> Result<(), WillametteError> {
@@ -304,8 +628,102 @@ fn validate_cache_inputs(
     Ok(())
 }
 
+fn validate_prefill_inputs(
+    graph: &ModelGraph<'_>,
+    cache: &KVCache,
+    token_ids: &[u32],
+    start_position: u32,
+    ctx: &LayerCtx,
+) -> Result<usize, WillametteError> {
+    if token_ids.is_empty() {
+        return Err(WillametteError::GgufParse(
+            "prefill_with_cache: token chunk must not be empty".to_string(),
+        ));
+    }
+    let prefix = cache.validate_append(graph.layers.len(), ctx.kv_dim, token_ids.len())?;
+    if prefix != start_position as usize {
+        return Err(WillametteError::GgufParse(format!(
+            "prefill_with_cache: cache.position()={} != start_position={}",
+            prefix, start_position
+        )));
+    }
+    let last_offset = u32::try_from(token_ids.len() - 1).map_err(|_| {
+        WillametteError::GgufParse("prefill_with_cache: token chunk is too large".to_string())
+    })?;
+    start_position.checked_add(last_offset).ok_or_else(|| {
+        WillametteError::GgufParse("prefill_with_cache: position overflows u32".to_string())
+    })?;
+    for &token_id in token_ids {
+        if token_id >= graph.config.vocab_size {
+            return Err(WillametteError::GgufParse(format!(
+                "prefill_with_cache: token_id {} out of vocab range {}",
+                token_id, graph.config.vocab_size
+            )));
+        }
+    }
+    if graph.output_norm_f32.len() != ctx.n_embd {
+        return Err(WillametteError::GgufParse(format!(
+            "prefill_with_cache: output norm length {} != embedding length {}",
+            graph.output_norm_f32.len(),
+            ctx.n_embd
+        )));
+    }
+    for (expected_idx, layer) in graph.layers.iter().enumerate() {
+        if layer.index as usize != expected_idx {
+            return Err(WillametteError::GgufParse(format!(
+                "prefill_with_cache: layer index {} != expected {}",
+                layer.index, expected_idx
+            )));
+        }
+        if layer.attn_norm_f32.len() != ctx.n_embd || layer.ffn_norm_f32.len() != ctx.n_embd {
+            return Err(WillametteError::GgufParse(format!(
+                "prefill_with_cache: layer {} norm dimensions are invalid",
+                layer.index
+            )));
+        }
+        if ctx.variant == ForwardVariant::BitNetSubNorm
+            && (layer.attn_sub_norm_f32.as_deref().map_or(0, <[f32]>::len) != ctx.n_embd
+                || layer.ffn_sub_norm_f32.as_deref().map_or(0, <[f32]>::len) != ctx.n_ff)
+        {
+            return Err(WillametteError::GgufParse(format!(
+                "prefill_with_cache: BitNet layer {} sub-norm dimensions are invalid",
+                layer.index
+            )));
+        }
+    }
+    Ok(prefix)
+}
+
+fn token_slice(values: &[f32], token_idx: usize, width: usize) -> &[f32] {
+    &values[token_idx * width..(token_idx + 1) * width]
+}
+
+fn token_slice_mut(values: &mut [f32], token_idx: usize, width: usize) -> &mut [f32] {
+    &mut values[token_idx * width..(token_idx + 1) * width]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn forward_one_layer(
+    layer: &LayerWeights<'_>,
+    cache: &mut KVCache,
+    workspace: &mut ForwardWorkspace,
+    ctx: &LayerCtx,
+    position: u32,
+) -> Result<(), WillametteError> {
+    project_qkv_and_append(layer, cache, workspace, ctx, position)?;
+    let layer_idx = layer.index as usize;
+    time_stage!("kv_read_into", {
+        cache.read_into(
+            layer_idx,
+            &mut workspace.scratch_k,
+            &mut workspace.scratch_v,
+        )?;
+    });
+    let n_past = workspace.scratch_k.len() / ctx.kv_dim;
+    finish_one_layer(layer, workspace, ctx, n_past)
+}
+
+fn project_qkv_and_append(
     layer: &LayerWeights<'_>,
     cache: &mut KVCache,
     workspace: &mut ForwardWorkspace,
@@ -355,15 +773,15 @@ fn forward_one_layer(
     time_stage!("kv_append", {
         cache.append(layer_idx, &workspace.k, &workspace.v)?;
     });
-    time_stage!("kv_read_into", {
-        cache.read_into(
-            layer_idx,
-            &mut workspace.scratch_k,
-            &mut workspace.scratch_v,
-        )?;
-    });
-    let n_past = workspace.scratch_k.len() / ctx.kv_dim;
+    Ok(())
+}
 
+fn finish_one_layer(
+    layer: &LayerWeights<'_>,
+    workspace: &mut ForwardWorkspace,
+    ctx: &LayerCtx,
+    n_past: usize,
+) -> Result<(), WillametteError> {
     time_stage!("attn_softmax_v", {
         scaled_dot_product_attention_into(
             &workspace.q,
@@ -516,6 +934,15 @@ fn check_finite_hidden(hidden: &[f32], layer_idx: u32) -> Result<(), WillametteE
                 layer_idx
             )));
         }
+    }
+    Ok(())
+}
+
+fn check_finite_output(output: &[f32]) -> Result<(), WillametteError> {
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err(WillametteError::GgufParse(
+            "prefill_with_cache: non-finite final hidden".to_string(),
+        ));
     }
     Ok(())
 }

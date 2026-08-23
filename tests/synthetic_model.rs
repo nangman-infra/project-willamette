@@ -39,11 +39,13 @@ use project_willamette::gguf::reader::{GgufFile, GGUF_MAGIC};
 use project_willamette::gguf::types::GgmlType;
 use project_willamette::model::architecture::ForwardVariant;
 use project_willamette::model::cached_forward::{
-    forward_with_cache, forward_with_cache_into, forward_with_cache_progress, ForwardWorkspace,
+    forward_with_cache, forward_with_cache_into, forward_with_cache_progress,
+    prefill_with_cache_into, ForwardWorkspace, PrefillWorkspace,
 };
 use project_willamette::model::forward::forward_single_token_position_zero;
 use project_willamette::model::generate::{
-    generate_with_cache_and_sampler, greedy_generate_with_cache,
+    generate_with_cache_and_sampler, generate_with_cache_and_sampler_with_stats,
+    greedy_generate_with_cache,
 };
 use project_willamette::model::kv_cache::KVCache;
 use project_willamette::model::multi_forward::multi_token_forward;
@@ -100,6 +102,7 @@ const F16_ONE_LE: [u8; 2] = [0x00, 0x3C];
 /// into one byte. Code `01` decodes to ternary 0 (see
 /// `src/model/bitlinear.rs::ternary_from_code`).
 const I2S_ALL_ZERO_CODE_BYTE: u8 = 0x55;
+const I2S_ALL_NEG_ONE_CODE_BYTE: u8 = 0x00;
 
 fn f32_tensor_bytes_all_ones(n_elements: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(n_elements * 4);
@@ -119,10 +122,10 @@ fn f16_tensor_bytes_all_ones(n_elements: usize) -> Vec<u8> {
 
 /// Build the packed I2_S bytes plus the 32-byte trailing scale block.
 /// `in_dim` must be a positive multiple of 128 (QK_I2_S).
-fn i2s_tensor_with_scale(in_dim: usize, out_dim: usize) -> Vec<u8> {
+fn i2s_tensor_with_scale(in_dim: usize, out_dim: usize, code_byte: u8) -> Vec<u8> {
     assert!(in_dim > 0 && in_dim.is_multiple_of(128));
     let packed_size = (in_dim / 4) * out_dim;
-    let mut out = vec![I2S_ALL_ZERO_CODE_BYTE; packed_size];
+    let mut out = vec![code_byte; packed_size];
     // 32-byte trailing scale block: 4 bytes f32 scale + 28 bytes zero.
     out.write_f32::<LittleEndian>(1.0).unwrap();
     out.extend_from_slice(&[0u8; 28]);
@@ -157,12 +160,12 @@ impl TensorDesc {
         }
     }
 
-    fn bitlinear(name: impl Into<String>, in_dim: u32, out_dim: u32) -> Self {
+    fn bitlinear(name: impl Into<String>, in_dim: u32, out_dim: u32, code_byte: u8) -> Self {
         Self {
             name: name.into(),
             shape: vec![in_dim as u64, out_dim as u64],
             ggml_type: GgmlType::BitNetI2S,
-            data: i2s_tensor_with_scale(in_dim as usize, out_dim as usize),
+            data: i2s_tensor_with_scale(in_dim as usize, out_dim as usize, code_byte),
         }
     }
 }
@@ -170,6 +173,10 @@ impl TensorDesc {
 // ── full GGUF builder ────────────────────────────────────────────────
 
 fn build_synthetic_bitnet_gguf() -> Vec<u8> {
+    build_synthetic_bitnet_gguf_with_code(I2S_ALL_ZERO_CODE_BYTE)
+}
+
+fn build_synthetic_bitnet_gguf_with_code(code_byte: u8) -> Vec<u8> {
     // 1) Tensor list. Order matters only insofar as offsets are computed
     //    sequentially; the GGUF spec doesn't impose a particular order.
     let mut tensors: Vec<TensorDesc> = Vec::new();
@@ -192,22 +199,26 @@ fn build_synthetic_bitnet_gguf() -> Vec<u8> {
             format!("blk.{}.attn_q.weight", il),
             N_EMBD,
             HEAD_DIM * HEAD_COUNT,
+            code_byte,
         ));
         let kv_dim = HEAD_DIM * HEAD_COUNT_KV;
         tensors.push(TensorDesc::bitlinear(
             format!("blk.{}.attn_k.weight", il),
             N_EMBD,
             kv_dim,
+            code_byte,
         ));
         tensors.push(TensorDesc::bitlinear(
             format!("blk.{}.attn_v.weight", il),
             N_EMBD,
             kv_dim,
+            code_byte,
         ));
         tensors.push(TensorDesc::bitlinear(
             format!("blk.{}.attn_output.weight", il),
             HEAD_DIM * HEAD_COUNT,
             N_EMBD,
+            code_byte,
         ));
         tensors.push(TensorDesc::f32_norm(
             format!("blk.{}.ffn_norm.weight", il),
@@ -221,16 +232,19 @@ fn build_synthetic_bitnet_gguf() -> Vec<u8> {
             format!("blk.{}.ffn_gate.weight", il),
             N_EMBD,
             N_FF,
+            code_byte,
         ));
         tensors.push(TensorDesc::bitlinear(
             format!("blk.{}.ffn_up.weight", il),
             N_EMBD,
             N_FF,
+            code_byte,
         ));
         tensors.push(TensorDesc::bitlinear(
             format!("blk.{}.ffn_down.weight", il),
             N_FF,
             N_EMBD,
+            code_byte,
         ));
     }
 
@@ -447,6 +461,125 @@ fn synthetic_workspace_path_matches_wrapper_and_reuses_output() {
 }
 
 #[test]
+fn synthetic_layer_major_prefill_exactly_matches_sequential_cache() {
+    let buf = build_synthetic_bitnet_gguf_with_code(I2S_ALL_NEG_ONE_CODE_BYTE);
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    let tokens = [0_u32, 1, 2, 3, 1, 0, 2];
+    let cases = [
+        (0_usize, 1_usize),
+        (0, 2),
+        (0, 3),
+        (0, tokens.len()),
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (2, tokens.len() - 2),
+    ];
+    let mut workspace = PrefillWorkspace::new(&graph);
+    let mut actual_hidden = Vec::new();
+
+    for (prefix, chunk_len) in cases {
+        let end = prefix + chunk_len;
+        let mut expected_cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 16);
+        let mut expected_hidden = Vec::new();
+        for (position, &token) in tokens[..end].iter().enumerate() {
+            expected_hidden =
+                forward_with_cache(&graph, &mut expected_cache, token, position as u32)
+                    .expect("sequential cached forward");
+        }
+
+        let mut actual_cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 16);
+        for (position, &token) in tokens[..prefix].iter().enumerate() {
+            forward_with_cache(&graph, &mut actual_cache, token, position as u32)
+                .expect("prefix forward");
+        }
+        prefill_with_cache_into(
+            &graph,
+            &mut actual_cache,
+            &mut workspace,
+            &tokens[prefix..end],
+            prefix as u32,
+            &mut actual_hidden,
+        )
+        .expect("layer-major prefill");
+
+        assert_eq!(
+            actual_hidden, expected_hidden,
+            "case ({prefix}, {chunk_len})"
+        );
+        assert_eq!(actual_cache, expected_cache, "case ({prefix}, {chunk_len})");
+        for layer in 0..N_LAYERS as usize {
+            let mut expected_k = Vec::new();
+            let mut expected_v = Vec::new();
+            let mut actual_k = Vec::new();
+            let mut actual_v = Vec::new();
+            expected_cache
+                .read_into(layer, &mut expected_k, &mut expected_v)
+                .unwrap();
+            actual_cache
+                .read_into(layer, &mut actual_k, &mut actual_v)
+                .unwrap();
+            assert_eq!(actual_k, expected_k, "dequantized K layer {layer}");
+            assert_eq!(actual_v, expected_v, "dequantized V layer {layer}");
+        }
+    }
+}
+
+#[test]
+fn synthetic_prefill_prevalidation_leaves_prefix_unchanged() {
+    let buf = build_synthetic_bitnet_gguf_with_code(I2S_ALL_NEG_ONE_CODE_BYTE);
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    let mut cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 8);
+    forward_with_cache(&graph, &mut cache, 0, 0).expect("prefix forward");
+    let before = cache.clone();
+    let mut workspace = PrefillWorkspace::new(&graph);
+    let mut output = vec![42.0];
+
+    let error = prefill_with_cache_into(
+        &graph,
+        &mut cache,
+        &mut workspace,
+        &[1, VOCAB_SIZE, 2],
+        1,
+        &mut output,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("out of vocab range"));
+    assert_eq!(cache, before);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn synthetic_prefill_runtime_error_rolls_back_every_layer() {
+    let buf = build_synthetic_bitnet_gguf_with_code(I2S_ALL_NEG_ONE_CODE_BYTE);
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let mut graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    let mut cache = KVCache::new(N_LAYERS as usize, HEAD_DIM as usize, 8);
+    forward_with_cache(&graph, &mut cache, 0, 0).expect("prefix forward");
+    let before = cache.clone();
+    graph.output_norm_f32[0] = f32::NAN;
+    let mut workspace = PrefillWorkspace::new(&graph);
+    let mut output = vec![42.0];
+
+    let error = prefill_with_cache_into(
+        &graph,
+        &mut cache,
+        &mut workspace,
+        &[1, 2, 3],
+        1,
+        &mut output,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("non-finite final hidden"));
+    assert_eq!(cache, before);
+    assert!(output.is_empty());
+}
+
+#[test]
 fn synthetic_progress_wrapper_reports_each_layer() {
     let buf = build_synthetic_bitnet_gguf();
     let gguf = GgufFile::parse(&buf).expect("parse");
@@ -532,6 +665,76 @@ fn synthetic_eos_does_not_reach_tick_callback() {
     })
     .expect("generate");
     assert!(generated.is_empty());
+
+    let mut sampler = Sampler::new(SamplingParams::greedy());
+    let result = generate_with_cache_and_sampler_with_stats(
+        &graph,
+        &[0],
+        1,
+        Some(0),
+        &[],
+        2,
+        &mut sampler,
+        |_, _, _| panic!("EOS token must not reach the stats callback"),
+    )
+    .expect("generate with stats");
+    assert!(result.generated_tokens.is_empty());
+    assert_eq!(result.stats.prefill_tokens, 1);
+    assert_eq!(result.stats.decode_tokens, 0);
+}
+
+#[test]
+fn synthetic_generation_stats_match_legacy_output_and_exact_counts() {
+    let buf = build_synthetic_bitnet_gguf();
+    let gguf = GgufFile::parse(&buf).expect("parse");
+    let graph = ModelGraph::from_gguf(&gguf).expect("graph");
+    let prompt = [0, 1];
+    let mut legacy_sampler = Sampler::new(SamplingParams::greedy());
+    let legacy = generate_with_cache_and_sampler(
+        &graph,
+        &prompt,
+        3,
+        None,
+        &[],
+        4,
+        &mut legacy_sampler,
+        |_, _, _| {},
+    )
+    .expect("legacy generate");
+
+    let mut sampler = Sampler::new(SamplingParams::greedy());
+    let mut callbacks = Vec::new();
+    let result = generate_with_cache_and_sampler_with_stats(
+        &graph,
+        &prompt,
+        3,
+        None,
+        &[],
+        4,
+        &mut sampler,
+        |step, position, token| callbacks.push((step, position, token)),
+    )
+    .expect("generate with stats");
+
+    assert_eq!(result.generated_tokens, legacy);
+    assert_eq!(result.stats.prefill_tokens, prompt.len());
+    assert_eq!(result.stats.decode_tokens, result.generated_tokens.len());
+    assert_eq!(result.stats.decode_tokens, 3);
+    assert_eq!(result.stats.total_tokens(), prompt.len() + 3);
+    assert_eq!(
+        result.stats.total_duration(),
+        result.stats.prefill_duration + result.stats.decode_duration
+    );
+    assert_eq!(callbacks.len(), result.stats.decode_tokens);
+    assert_eq!(
+        callbacks,
+        result
+            .generated_tokens
+            .iter()
+            .enumerate()
+            .map(|(step, &token)| (step, prompt.len() + step, token))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -541,10 +744,18 @@ fn synthetic_custom_stop_does_not_reach_tick_callback() {
     let graph = ModelGraph::from_gguf(&gguf).expect("graph");
     let mut sampler = Sampler::new(SamplingParams::greedy());
 
-    let generated =
-        generate_with_cache_and_sampler(&graph, &[0], 1, None, &[0], 2, &mut sampler, |_, _, _| {
-            panic!("custom stop token must not reach the tick callback")
-        })
-        .expect("generate");
-    assert!(generated.is_empty());
+    let result = generate_with_cache_and_sampler_with_stats(
+        &graph,
+        &[0],
+        1,
+        None,
+        &[0],
+        2,
+        &mut sampler,
+        |_, _, _| panic!("custom stop token must not reach the tick callback"),
+    )
+    .expect("generate");
+    assert!(result.generated_tokens.is_empty());
+    assert_eq!(result.stats.prefill_tokens, 1);
+    assert_eq!(result.stats.decode_tokens, 0);
 }

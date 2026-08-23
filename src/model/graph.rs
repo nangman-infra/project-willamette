@@ -16,7 +16,7 @@ use crate::gguf::tensor::TensorView;
 use crate::gguf::types::GgmlType;
 use crate::model::architecture::{resolve, ForwardVariant, LayerTensorRole};
 use crate::model::config::ModelConfig;
-use crate::model::linear::linear_matvec_f32;
+use crate::model::linear::{linear_batched_f32, linear_matvec_f32};
 use crate::model::primitives::f32_tensor_to_vec;
 
 #[derive(Debug)]
@@ -260,6 +260,22 @@ impl LayerWeights<'_> {
         linear_matvec_f32(self.attn_v, input, v)?;
         add_projection_bias(v, self.attn_v_bias_f32.as_deref())
     }
+
+    /// Compute token-major Q/K/V and apply each projection bias once per token.
+    pub fn project_qkv_batched(
+        &self,
+        input: &[f32],
+        q: &mut [f32],
+        k: &mut [f32],
+        v: &mut [f32],
+    ) -> Result<(), WillametteError> {
+        linear_batched_f32(self.attn_q, input, q)?;
+        add_projection_bias_batched(q, self.attn_q_bias_f32.as_deref())?;
+        linear_batched_f32(self.attn_k, input, k)?;
+        add_projection_bias_batched(k, self.attn_k_bias_f32.as_deref())?;
+        linear_batched_f32(self.attn_v, input, v)?;
+        add_projection_bias_batched(v, self.attn_v_bias_f32.as_deref())
+    }
 }
 
 fn add_projection_bias(
@@ -278,6 +294,26 @@ fn add_projection_bias(
     }
     for (value, bias) in projection.iter_mut().zip(bias) {
         *value += bias;
+    }
+    Ok(())
+}
+
+fn add_projection_bias_batched(
+    projection: &mut [f32],
+    bias: Option<&[f32]>,
+) -> Result<(), WillametteError> {
+    let Some(bias) = bias else {
+        return Ok(());
+    };
+    if bias.is_empty() || !projection.len().is_multiple_of(bias.len()) {
+        return Err(WillametteError::GgufParse(format!(
+            "batched projection length {} is not a positive multiple of bias length {}",
+            projection.len(),
+            bias.len()
+        )));
+    }
+    for row in projection.chunks_exact_mut(bias.len()) {
+        add_projection_bias(row, Some(bias))?;
     }
     Ok(())
 }
@@ -616,6 +652,74 @@ mod tests {
         add_projection_bias(&mut projection, Some(&[0.25, -0.5])).unwrap();
         assert_eq!(projection, [1.25, 1.5]);
         assert!(add_projection_bias(&mut projection, Some(&[1.0])).is_err());
+    }
+
+    #[test]
+    fn batched_qkv_bias_matches_repeated_projection_exactly() {
+        use half::f16;
+
+        let bytes = [1.0_f32, -2.0, 0.5, 3.0]
+            .into_iter()
+            .flat_map(|value| f16::from_f32(value).to_bits().to_le_bytes())
+            .collect::<Vec<_>>();
+        let weight = TensorView {
+            name: "test.weight".to_string(),
+            shape: vec![2, 2],
+            ggml_type: GgmlType::F16,
+            offset: 0,
+            byte_len: bytes.len() as u64,
+            data: &bytes,
+            scale_data: None,
+        };
+        let layer = LayerWeights {
+            index: 0,
+            attn_norm: &weight,
+            attn_norm_f32: vec![],
+            attn_q: &weight,
+            attn_q_bias: None,
+            attn_q_bias_f32: Some(vec![0.25, -0.5]),
+            attn_k: &weight,
+            attn_k_bias: None,
+            attn_k_bias_f32: Some(vec![-1.0, 2.0]),
+            attn_v: &weight,
+            attn_v_bias: None,
+            attn_v_bias_f32: Some(vec![4.0, -3.0]),
+            attn_output: &weight,
+            attn_sub_norm: None,
+            attn_sub_norm_f32: None,
+            ffn_norm: &weight,
+            ffn_norm_f32: vec![],
+            ffn_gate: &weight,
+            ffn_up: &weight,
+            ffn_down: &weight,
+            ffn_sub_norm: None,
+            ffn_sub_norm_f32: None,
+        };
+        let input = [2.0, -1.0, -0.5, 4.0, 3.0, 0.25];
+        let mut expected_q = vec![0.0; 6];
+        let mut expected_k = vec![0.0; 6];
+        let mut expected_v = vec![0.0; 6];
+        for token in 0..3 {
+            layer
+                .project_qkv(
+                    &input[token * 2..token * 2 + 2],
+                    &mut expected_q[token * 2..token * 2 + 2],
+                    &mut expected_k[token * 2..token * 2 + 2],
+                    &mut expected_v[token * 2..token * 2 + 2],
+                )
+                .unwrap();
+        }
+
+        let mut actual_q = vec![0.0; 6];
+        let mut actual_k = vec![0.0; 6];
+        let mut actual_v = vec![0.0; 6];
+        layer
+            .project_qkv_batched(&input, &mut actual_q, &mut actual_k, &mut actual_v)
+            .unwrap();
+
+        assert_eq!(actual_q, expected_q);
+        assert_eq!(actual_k, expected_k);
+        assert_eq!(actual_v, expected_v);
     }
 
     #[test]

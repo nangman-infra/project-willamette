@@ -1,4 +1,4 @@
-# Golden Tests — Project Willamette v0.14.0-mvp
+# Golden Tests — Project Willamette v0.15.0-mvp
 
 *Last revised 2026-08-23.*
 
@@ -159,6 +159,22 @@ ordered fields: equipment, time, symptom, action, duration, and result. The
 which the smaller profiles omitted. Willamette and llama.cpp b10369 produce the
 same text. This gate covers Qwen2 pre-tokenization, QKV projection biases, NEOX
 RoPE, mixed Q4_K/Q6_K inference, and ChatML together.
+
+The 2026-08-23 HP quality expansion uses greedy decoding and records both
+passes and failures rather than treating one golden as general quality proof:
+
+| Check | Result |
+| ----- | ------ |
+| One-sentence incident summary | Pass. Preserved server A, `09:10`, `95%`, log deletion, and `62%` in one complete sentence. |
+| Structured table | Partial. All five values were correct, but the model emitted a Markdown separator and therefore produced three lines instead of the requested two. |
+| Missing-field detection | Fail. It repeated the supplied record instead of returning only `시각,담당자`. |
+| Four-turn context recall | Pass. Recalled `펌프 P-204`, then `14:20`, and finally returned `펌프 P-204, 14:20`; context advanced to 158 tokens without an error. |
+
+SmolLM2-1.7B was run on the same Korean summary prompt. At the common 50-token
+cap its byte-oriented Korean output ended mid-codepoint before the remediation
+and final percentage, while Qwen reached a coherent but truncated clause and
+completed the full answer when raised to 80 tokens. This is a bounded prompt
+comparison, not a general model ranking.
 
 Q8_0 SIMD changes reduction order and does not promise universal cross-kernel
 greedy identity. The longer sky prompt reverses the first two candidates

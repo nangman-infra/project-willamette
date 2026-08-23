@@ -5,9 +5,9 @@ use crate::gguf::tensor::TensorView;
 use half::f16;
 
 fn validate_row(row: &[u8], values: usize) -> Result<(), WillametteError> {
-    if !values.is_multiple_of(TensorView::Q4K_ELEMENTS_PER_BLOCK as usize) {
+    if values == 0 || !values.is_multiple_of(TensorView::Q4K_ELEMENTS_PER_BLOCK as usize) {
         return Err(WillametteError::GgufParse(format!(
-            "Q4_K value count {values} is not a multiple of {}",
+            "Q4_K value count {values} is not a positive multiple of {}",
             TensorView::Q4K_ELEMENTS_PER_BLOCK
         )));
     }
@@ -88,10 +88,59 @@ pub fn dequantize_row(row: &[u8], output: &mut [f32]) -> Result<(), WillametteEr
 
 pub fn dot_row(row: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     validate_row(row, input.len())?;
+    validate_super_scales(row)?;
+
+    dot_row_validated(row, input)
+}
+
+pub(crate) fn dot_rows(
+    row: &[u8],
+    inputs: &[f32],
+    input_dim: usize,
+    outputs: &mut [f32],
+) -> Result<(), WillametteError> {
+    validate_row(row, input_dim)?;
+    let expected = input_dim.checked_mul(outputs.len()).ok_or_else(|| {
+        WillametteError::GgufParse("Q4_K batched input size overflow".to_string())
+    })?;
+    if inputs.len() != expected {
+        return Err(WillametteError::GgufParse(format!(
+            "Q4_K batched input length {} != expected {expected}",
+            inputs.len()
+        )));
+    }
+    if outputs.is_empty() {
+        return Err(WillametteError::GgufParse(
+            "Q4_K batched token count must be positive".to_string(),
+        ));
+    }
+    validate_super_scales(row)?;
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        super::q4_k_simd::dot_rows_avx2_validated(row, inputs, input_dim, outputs);
+        return Ok(());
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("sse2") {
+        super::q4_k_simd::dot_rows_sse2_validated(row, inputs, input_dim, outputs);
+        return Ok(());
+    }
+
+    for (input, output) in inputs.chunks_exact(input_dim).zip(outputs) {
+        *output = dot_row_scalar(row, input)?;
+    }
+    Ok(())
+}
+
+fn validate_super_scales(row: &[u8]) -> Result<(), WillametteError> {
     for block in row.chunks_exact(TensorView::Q4K_BYTES_PER_BLOCK as usize) {
         block_super_scales(block)?;
     }
+    Ok(())
+}
 
+fn dot_row_validated(row: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     if std::arch::is_x86_feature_detected!("avx2") {
         return Ok(super::q4_k_simd::dot_row_avx2_validated(row, input));
@@ -278,6 +327,41 @@ mod tests {
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_batched_simd_exact(
+        label: &str,
+        single: fn(&[u8], &[f32]) -> f32,
+        kernel: fn(&[u8], &[f32], usize, &mut [f32]),
+    ) {
+        let (row, base_input, _) = parity_fixture(3);
+        let input_dim = base_input.len();
+
+        for tokens in [1, 2, 5, 8, 9, 32] {
+            let inputs = (0..tokens)
+                .flat_map(|token| {
+                    base_input.iter().enumerate().map(move |(index, &value)| {
+                        value * (1.0 + token as f32 * 0.03125)
+                            + ((index + token * 7) % 11) as f32 * 0.0078125
+                    })
+                })
+                .collect::<Vec<_>>();
+            let expected = inputs
+                .chunks_exact(input_dim)
+                .map(|input| single(&row, input))
+                .collect::<Vec<_>>();
+            let mut actual = vec![f32::NAN; tokens];
+            kernel(&row, &inputs, input_dim, &mut actual);
+
+            for (token, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{label} token count {tokens}, token {token}: {actual} != {expected}"
+                );
+            }
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
     fn sse2_dot_matches_scalar_and_dequantized_with_cancellation() {
         if !std::arch::is_x86_feature_detected!("sse2") {
@@ -299,6 +383,32 @@ mod tests {
         assert_simd_parity("AVX2", simd, scalar, dequantized, sum_abs);
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn sse2_batched_dot_matches_repeated_single_row_exactly() {
+        if !std::arch::is_x86_feature_detected!("sse2") {
+            return;
+        }
+        assert_batched_simd_exact(
+            "SSE2",
+            super::super::q4_k_simd::dot_row_sse2_validated,
+            super::super::q4_k_simd::dot_rows_sse2_validated,
+        );
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn avx2_batched_dot_matches_repeated_single_row_exactly() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        assert_batched_simd_exact(
+            "AVX2",
+            super::super::q4_k_simd::dot_row_avx2_validated,
+            super::super::q4_k_simd::dot_rows_avx2_validated,
+        );
+    }
+
     #[test]
     fn rejects_malformed_rows_and_non_finite_super_scales() {
         assert!(dot_row(&[0; 144], &[0.0; 128]).is_err());
@@ -313,5 +423,16 @@ mod tests {
                 assert!(dequantize_row(&block, &mut [0.0; 256]).is_err());
             }
         }
+    }
+
+    #[test]
+    fn batched_dot_rejects_inconsistent_token_storage() {
+        let row = pinned_block(1.0, 0.5);
+        let mut output = [0.0; 2];
+        assert!(dot_rows(&row, &[0.0; 256], 256, &mut output).is_err());
+        assert!(dot_rows(&row[..143], &[0.0; 512], 256, &mut output).is_err());
+        assert!(dot_rows(&[], &[], 0, &mut output).is_err());
+        assert!(dot_rows(&row, &[], 256, &mut []).is_err());
+        assert_eq!(output, [0.0; 2]);
     }
 }
