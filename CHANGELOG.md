@@ -24,6 +24,9 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ### Added
 
+* `scripts/demo.sh` replaces the separate antiX and x86_64 host launchers while
+  preserving each architecture's existing menu, thread defaults, and legacy
+  llama2.c entry.
 * The HP demo menu and its `validate-release` command now download and verify a
   published x86_64 archive against the pinned Qwen 75-token golden.
 

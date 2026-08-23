@@ -58,7 +58,7 @@ scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
   antix1:willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf
 scp target/i686-unknown-linux-musl/release/project-willamette \
   antix1:willamette-demo-current.new
-scp scripts/demo_antix.sh antix1:demo.sh.new
+scp scripts/demo.sh antix1:demo.sh.new
 ssh antix1 'chmod +x "$HOME/willamette-demo-current.new" "$HOME/demo.sh.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current" && mv "$HOME/demo.sh.new" "$HOME/demo.sh"'
 ```
 
@@ -92,13 +92,13 @@ scp target/x86_64-unknown-linux-musl/release/project-willamette \
 ssh mbp2012 'chmod +x "$HOME/willamette-demo-current.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current"'
 ```
 
-Install the portable menu on HP and mbp2012:
+Install the same architecture-aware menu on HP and mbp2012:
 
 ```bash
 HP_HOST=your-hp-ssh-alias
-scp scripts/demo_host.sh "${HP_HOST}:demo.sh.new"
+scp scripts/demo.sh "${HP_HOST}:demo.sh.new"
 ssh "${HP_HOST}" 'chmod +x "$HOME/demo.sh.new" && mv "$HOME/demo.sh.new" "$HOME/demo.sh"'
-scp scripts/demo_host.sh mbp2012:demo.sh.new
+scp scripts/demo.sh mbp2012:demo.sh.new
 ssh mbp2012 'chmod +x "$HOME/demo.sh.new" && mv "$HOME/demo.sh.new" "$HOME/demo.sh"'
 ```
 

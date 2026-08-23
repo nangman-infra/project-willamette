@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
-# Portable Project Willamette SmolLM demo launcher for x86_64 Linux hosts.
+# Unified Project Willamette demo launcher for i686 and x86_64 Linux hosts.
 
 set -euo pipefail
 
+ARCH="$(uname -m)"
+LLAMA_DIR="${LLAMA_DIR:-$HOME/llama2.c}"
+LLAMA_BIN="${LLAMA_BIN:-$LLAMA_DIR/run}"
+LLAMA_MODEL="${LLAMA_MODEL:-$LLAMA_DIR/stories110M.bin}"
 WILLAMETTE_BIN="${WILLAMETTE_BIN:-$HOME/willamette-demo-current}"
 SMOLLM_135M="${SMOLLM_135M:-$HOME/willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf}"
 SMOLLM2_360M="${SMOLLM2_360M:-$HOME/willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf}"
 SMOLLM2_1_7B="${SMOLLM2_1_7B:-$HOME/willamette-smollm2-1.7b/SmolLM2-1.7B-Instruct-Q4_K_M.gguf}"
 QWEN2_5_3B="${QWEN2_5_3B:-$HOME/willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf}"
-THREADS="${RAYON_NUM_THREADS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')}"
+BITNET_MODEL="${BITNET_MODEL:-$HOME/models/ggml-model-i2_s.gguf}"
+if [[ "$ARCH" == "i686" || "$ARCH" == "i386" ]]; then
+    DEFAULT_THREADS=1
+else
+    DEFAULT_THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
+fi
+THREADS="${RAYON_NUM_THREADS:-$DEFAULT_THREADS}"
 
 require() {
     if [[ ! -e "$1" ]]; then
@@ -18,7 +28,7 @@ require() {
     fi
 }
 
-show_menu() {
+show_host_menu() {
     local host_name
     host_name="$(uname -n)"
     clear 2>/dev/null || true
@@ -41,13 +51,33 @@ show_menu() {
 EOF
 }
 
+show_antix_menu() {
+    local host_name
+    host_name="$(uname -n)"
+    clear 2>/dev/null || true
+    cat <<EOF
+========================================================
+  Project Willamette demo on ${host_name} (${ARCH})
+========================================================
+
+  1) SmolLM2-360M Q8_0 TUI - recommended quality demo
+  2) SmolLM-135M Q8_0 TUI  - faster, limited-quality comparison
+  3) BitNet b1.58 2B TUI   - historical 2B CPU demonstration
+  4) 360M Paris golden     - deterministic one-shot check
+  5) llama2.c stories110M  - side-by-side legacy runtime
+
+  q) quit
+
+EOF
+}
+
 run_tui() {
     local model="$1"
     local label="$2"
     local max_seq_len="${3:-1024}"
     local max_new_tokens="${4:-96}"
     local system_prompt="${5:-You are a concise and accurate local assistant.}"
-    require "$WILLAMETTE_BIN" "install a Q4_K-enabled Willamette binary"
+    require "$WILLAMETTE_BIN" "install the current Willamette demo binary"
     require "$model" "copy the pinned GGUF to this host"
     if [[ "${TERM:-dumb}" == "dumb" || -z "${TERM:-}" ]]; then
         echo "warning: the TUI needs a real terminal; connect with ssh -t"
@@ -86,6 +116,13 @@ run_korean_report_golden() {
         --system "You are a concise and accurate local assistant." \
         --max-new-tokens 100 \
         --temperature 0
+}
+
+run_llama2c() {
+    require "$LLAMA_BIN" "build llama2.c first"
+    require "$LLAMA_MODEL" "download stories110M.bin first"
+    cd "$LLAMA_DIR"
+    exec "$LLAMA_BIN" "$LLAMA_MODEL" -t 0.0 -n 100
 }
 
 validate_release_artifact() (
@@ -175,18 +212,31 @@ elif [[ $# -gt 0 ]]; then
     exit 2
 fi
 
-show_menu
-read -r -p "Pick [1/2/3/4/5/6/7/8/q]: " choice
-
-case "$choice" in
-    1) run_tui "$QWEN2_5_3B" "Qwen2.5-3B Q4_K_M" 32768 8192 "You are an accurate and thorough local assistant. Complete every answer fully without stopping mid-sentence." ;;
-    2) run_tui "$SMOLLM2_1_7B" "SmolLM2-1.7B Q4_K_M" ;;
-    3) run_tui "$SMOLLM2_360M" "SmolLM2-360M Q8_0" ;;
-    4) run_tui "$SMOLLM_135M" "SmolLM-135M Q8_0" ;;
-    5) run_korean_report_golden ;;
-    6) run_paris_golden "$SMOLLM2_1_7B" ;;
-    7) run_paris_golden "$SMOLLM2_360M" ;;
-    8) validate_release_artifact v0.15.1-mvp ;;
-    q|Q) echo "bye" ;;
-    *) echo "unknown choice: $choice" >&2; exit 1 ;;
-esac
+if [[ "$ARCH" == "i686" || "$ARCH" == "i386" ]]; then
+    show_antix_menu
+    read -r -p "Pick [1/2/3/4/5/q]: " choice
+    case "$choice" in
+        1) run_tui "$SMOLLM2_360M" "SmolLM2-360M Q8_0" ;;
+        2) run_tui "$SMOLLM_135M" "SmolLM-135M Q8_0" ;;
+        3) run_tui "$BITNET_MODEL" "BitNet b1.58 2B" ;;
+        4) run_paris_golden "$SMOLLM2_360M" ;;
+        5) run_llama2c ;;
+        q|Q) echo "bye" ;;
+        *) echo "unknown choice: $choice" >&2; exit 1 ;;
+    esac
+else
+    show_host_menu
+    read -r -p "Pick [1/2/3/4/5/6/7/8/q]: " choice
+    case "$choice" in
+        1) run_tui "$QWEN2_5_3B" "Qwen2.5-3B Q4_K_M" 32768 8192 "You are an accurate and thorough local assistant. Complete every answer fully without stopping mid-sentence." ;;
+        2) run_tui "$SMOLLM2_1_7B" "SmolLM2-1.7B Q4_K_M" ;;
+        3) run_tui "$SMOLLM2_360M" "SmolLM2-360M Q8_0" ;;
+        4) run_tui "$SMOLLM_135M" "SmolLM-135M Q8_0" ;;
+        5) run_korean_report_golden ;;
+        6) run_paris_golden "$SMOLLM2_1_7B" ;;
+        7) run_paris_golden "$SMOLLM2_360M" ;;
+        8) validate_release_artifact v0.15.1-mvp ;;
+        q|Q) echo "bye" ;;
+        *) echo "unknown choice: $choice" >&2; exit 1 ;;
+    esac
+fi

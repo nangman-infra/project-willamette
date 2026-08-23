@@ -330,13 +330,14 @@ scripts/willamette --profile smollm2-360m tui
 scripts/willamette --profile smollm2-1.7b-q4-k-m tui
 ```
 
-The launcher verifies each profile's pinned SHA256 before starting. On the
-Pentium-M antiX demo host, `scripts/demo_antix.sh` presents the 360M quality
-demo first, the faster but limited 135M comparison, the historical BitNet TUI,
-the Paris golden, and llama2.c side by side. See
+The launcher verifies each profile's pinned SHA256 before starting. The unified
+`scripts/demo.sh` selects the antiX i686 menu or the HP/mbp2012 x86_64 menu from
+the host architecture. On Pentium-M antiX it presents the 360M quality demo
+first, the faster but limited 135M comparison, the historical BitNet TUI, the
+Paris golden, and llama2.c side by side. See
 [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) for deployment, preflight, live
-demo, expected timing, and recovery steps. `scripts/demo_host.sh` provides the
-portable 1.7B/360M/135M/Paris menu used on HP and mbp2012.
+demo, expected timing, and recovery steps. The same script provides the
+Qwen/1.7B/360M/135M/golden menu used on HP and mbp2012.
 
 Needs a real terminal (not the Claude-Code embedded chat). Over SSH
 use `ssh -t` to force a pseudo-tty when launching one-shot:
