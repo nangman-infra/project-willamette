@@ -12,6 +12,7 @@ SMOLLM_135M="${SMOLLM_135M:-$HOME/willamette-smollm-135m/SmolLM-135M-Instruct-Q8
 SMOLLM2_360M="${SMOLLM2_360M:-$HOME/willamette-smollm2-360m/SmolLM2-360M-Instruct-Q8_0.gguf}"
 SMOLLM2_1_7B="${SMOLLM2_1_7B:-$HOME/willamette-smollm2-1.7b/SmolLM2-1.7B-Instruct-Q4_K_M.gguf}"
 QWEN2_5_3B="${QWEN2_5_3B:-$HOME/willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf}"
+QWEN2_5_7B="${QWEN2_5_7B:-$HOME/willamette-qwen2.5-7b/Qwen2.5-7B-Instruct-Q4_K_M.gguf}"
 BITNET_MODEL="${BITNET_MODEL:-$HOME/models/ggml-model-i2_s.gguf}"
 if [[ "$ARCH" == "i686" || "$ARCH" == "i386" ]]; then
     DEFAULT_THREADS=1
@@ -45,10 +46,11 @@ show_host_menu() {
   6) 1.7B Paris golden       - Q4_K_M deterministic check
   7) 360M Paris golden       - Q8_0 deterministic check
   8) Validate release        - public x86_64 artifact + Qwen golden
-
-  q) quit
-
 EOF
+    if [[ -f "$QWEN2_5_7B" ]]; then
+        echo "  9) Qwen2.5-7B Q4_K_M TUI   - HP highest-capacity profile"
+    fi
+    printf '\n  q) quit\n\n'
 }
 
 show_antix_menu() {
@@ -226,7 +228,11 @@ if [[ "$ARCH" == "i686" || "$ARCH" == "i386" ]]; then
     esac
 else
     show_host_menu
-    read -r -p "Pick [1/2/3/4/5/6/7/8/q]: " choice
+    if [[ -f "$QWEN2_5_7B" ]]; then
+        read -r -p "Pick [1/2/3/4/5/6/7/8/9/q]: " choice
+    else
+        read -r -p "Pick [1/2/3/4/5/6/7/8/q]: " choice
+    fi
     case "$choice" in
         1) run_tui "$QWEN2_5_3B" "Qwen2.5-3B Q4_K_M" 32768 8192 "You are an accurate and thorough local assistant. Complete every answer fully without stopping mid-sentence." ;;
         2) run_tui "$SMOLLM2_1_7B" "SmolLM2-1.7B Q4_K_M" ;;
@@ -236,6 +242,7 @@ else
         6) run_paris_golden "$SMOLLM2_1_7B" ;;
         7) run_paris_golden "$SMOLLM2_360M" ;;
         8) validate_release_artifact v0.15.1-mvp ;;
+        9) run_tui "$QWEN2_5_7B" "Qwen2.5-7B Q4_K_M" 32768 8192 "You are a precise local assistant. Answer in the user language, preserve stated facts and requested formats, and finish every response completely." ;;
         q|Q) echo "bye" ;;
         *) echo "unknown choice: $choice" >&2; exit 1 ;;
     esac

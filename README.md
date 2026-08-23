@@ -64,7 +64,7 @@ to Q6_K, and preserves every transformer I2_S slot. Additional transform
 profiles, architecture conversion, and target-aware blocking remain roadmap
 work.
 
-## Status: v0.15.0-mvp
+## Status: v0.15.1-mvp
 
 What works **today**, on the path toward the thesis:
 
@@ -80,6 +80,7 @@ What works **today**, on the path toward the thesis:
 | SmolLM2-360M-Instruct Q8_0 | ✅ official 386,404,992-byte artifact loads unchanged. Explicit ChatML system/user prompt IDs and the greedy `The capital of France is Paris.` output match llama.cpp exactly. The same 120 sampled token IDs were reproduced on Apple M4, HP ProBook 430 G6, mbp2012, and the 996 MiB antix1 host. The recorded 16.77 / 5.72 / 2.93 / 0.254 tok/s product-path baseline predates the Q8_0 SIMD kernel and is retained for provenance. |
 | SmolLM2-1.7B-Instruct Q4_K_M | ✅ official 1,055,609,536-byte mixed Q4_K/Q6_K artifact loads unchanged. Strict 256-value block validation, embedding/linear/lm-head consumers, and AVX2/SSE2 Q4_K row dots are implemented with scalar fallback. The pinned ChatML Paris generation matches the 360M llama.cpp golden exactly, and incremental turns return `The capital of France is Paris.` then `Paris.`. Physical x86-host timing is not yet recorded. |
 | Qwen2.5-3B-Instruct Q4_K_M | ✅ official 2,104,932,768-byte artifact loads unchanged. The `qwen2` graph adds mandatory F32 Q/K/V projection biases, NEOX RoPE, Qwen2 GPT-2 pre-tokenization, and ChatML. Willamette and llama.cpp b10369 both produce the same complete six-field Korean maintenance report. This Qwen Research License model is the HP-only quality profile. |
+| Qwen2.5-7B-Instruct Q4_K_M | ✅ pinned 4,683,074,240-byte single-file artifact loads unchanged and generates correct Korean text on HP at 4.082 decode tok/s and 4,672,512 KiB peak RSS without swap. It is the optional HP highest-capacity profile; the 3B model remains the strict six-line Korean-format golden. |
 | Reference parity (bitnet.cpp) | ✅ byte-identical generated text on Stage 5-E prompts |
 | Reference build | `microsoft/BitNet @ 01eb4157…` (see [`UPSTREAM_PIN.md`](UPSTREAM_PIN.md)) |
 | Apple Silicon NEON kernel | ✅ implemented + validated (Apple M4 dev host) |

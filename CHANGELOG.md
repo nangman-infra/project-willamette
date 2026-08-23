@@ -29,6 +29,8 @@ public API guarantee. It will be dropped when that guarantee is established.
   llama2.c entry.
 * The HP demo menu and its `validate-release` command now download and verify a
   published x86_64 archive against the pinned Qwen 75-token golden.
+* The HP menu conditionally exposes a pinned, single-file Qwen2.5-7B-Instruct
+  Q4_K_M model as its highest-capacity 32K-context TUI profile.
 
 ### Fixed
 

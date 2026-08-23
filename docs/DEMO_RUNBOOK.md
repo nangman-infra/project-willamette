@@ -41,6 +41,19 @@ not deployed to the 996 MiB antiX host or mbp2012:
 * License: Qwen Research License; keep the model artifact separate from the
   MIT/Apache-2.0 Willamette binary
 
+HP also exposes Qwen2.5-7B-Instruct Q4_K_M as an optional highest-capacity
+long-session profile. The official Qwen GGUF is split across two files, which
+Willamette does not support, so this profile pins bartowski's equivalent
+single-file quantization:
+
+* Repository: `bartowski/Qwen2.5-7B-Instruct-GGUF`
+* Revision: `8911e8a47f92bac19d6f5c64a2e2095bd2f7d031`
+* Filename: `Qwen2.5-7B-Instruct-Q4_K_M.gguf` (4,683,074,240 bytes)
+* SHA256: `65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423`
+* HP path: `$HOME/willamette-qwen2.5-7b/Qwen2.5-7B-Instruct-Q4_K_M.gguf`
+* Expected dashboard kernel: `Q4_K AVX2`
+* License: Apache-2.0, inherited from `Qwen/Qwen2.5-7B-Instruct`
+
 ## Build And Deploy
 
 Run from the repository root on the build machine:
@@ -67,7 +80,7 @@ the HP host using its configured SSH destination:
 
 ```bash
 HP_HOST=your-hp-ssh-alias
-ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m" "$HOME/willamette-smollm2-1.7b" "$HOME/willamette-qwen2.5-3b"'
+ssh "${HP_HOST}" 'mkdir -p "$HOME/willamette-smollm-135m" "$HOME/willamette-smollm2-360m" "$HOME/willamette-smollm2-1.7b" "$HOME/willamette-qwen2.5-3b" "$HOME/willamette-qwen2.5-7b"'
 scp models/SmolLM-135M-Instruct-Q8_0.gguf \
   "${HP_HOST}:willamette-smollm-135m/SmolLM-135M-Instruct-Q8_0.gguf"
 scp models/SmolLM2-360M-Instruct-Q8_0.gguf \
@@ -76,6 +89,7 @@ scp models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf \
   "${HP_HOST}:willamette-smollm2-1.7b/SmolLM2-1.7B-Instruct-Q4_K_M.gguf"
 scp models/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
   "${HP_HOST}:willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+ssh "${HP_HOST}" 'curl -fL --retry 3 -o "$HOME/willamette-qwen2.5-7b/Qwen2.5-7B-Instruct-Q4_K_M.gguf.new" "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/8911e8a47f92bac19d6f5c64a2e2095bd2f7d031/Qwen2.5-7B-Instruct-Q4_K_M.gguf?download=true" && printf "%s  %s\n" "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423" "$HOME/willamette-qwen2.5-7b/Qwen2.5-7B-Instruct-Q4_K_M.gguf.new" | sha256sum -c - && mv "$HOME/willamette-qwen2.5-7b/Qwen2.5-7B-Instruct-Q4_K_M.gguf.new" "$HOME/willamette-qwen2.5-7b/Qwen2.5-7B-Instruct-Q4_K_M.gguf"'
 scp target/x86_64-unknown-linux-musl/release/project-willamette \
   "${HP_HOST}:willamette-demo-current.new"
 ssh "${HP_HOST}" 'chmod +x "$HOME/willamette-demo-current.new" && mv "$HOME/willamette-demo-current.new" "$HOME/willamette-demo-current"'
@@ -163,9 +177,11 @@ separately because mbp2012 intentionally does not carry it:
 HP_HOST=your-hp-ssh-alias
 ssh "${HP_HOST}" '
   cd "$HOME" &&
-  printf "%s  %s\n" \
+  printf "%s  %s\n%s  %s\n" \
     "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d" \
-    "willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf" |
+    "willamette-qwen2.5-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf" \
+    "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423" \
+    "willamette-qwen2.5-7b/Qwen2.5-7B-Instruct-Q4_K_M.gguf" |
   sha256sum -c -
 '
 ```
@@ -206,13 +222,15 @@ ssh -t "${HP_HOST}" '$HOME/demo.sh'
 ssh -t mbp2012 '$HOME/demo.sh'
 ```
 
-On HP, select menu item `1` for the Qwen2.5-3B TUI or item `5` for its
-deterministic Korean six-field report. Select item `2` on mbp2012 for the 1.7B
-TUI. The Qwen TUI allows up to 8,192 new tokens per turn in the model's full
-32,768-token context and asks it to finish detailed answers; portable profiles
-retain the 96-token/1,024-token limits. Qwen still stops earlier on its ChatML
-end marker, and `Esc` cancels an unwanted long response. The portable 1.7B and
-360M golden checks remain items `6` and `7`.
+On HP, select menu item `1` for the validated Qwen2.5-3B Korean-quality TUI,
+item `5` for its deterministic Korean six-field report, or item `9` for the
+Qwen2.5-7B highest-capacity TUI. Item `9` is shown only when its pinned model
+file is present. Select item `2` on mbp2012 for the 1.7B TUI. Both Qwen TUI
+profiles allow up to 8,192 new tokens per turn in the model's full 32,768-token
+context and ask it to finish detailed answers; portable profiles retain the
+96-token/1,024-token limits. Qwen still stops earlier on its ChatML end marker,
+and `Esc` cancels an unwanted long response. The portable 1.7B and 360M golden
+checks remain items `6` and `7`.
 
 ## Expected Timing
 
@@ -251,6 +269,15 @@ The expanded HP quality pass also completed a factual one-sentence summary and
 four context-dependent turns ending at token position 158. The strict table
 line-count and missing-field checks failed; these are documented acceptance
 limits, not demo claims.
+
+The pinned Qwen2.5-7B artifact loaded unchanged on HP and answered the Korean
+capital prompt with `대한민국의 수도는 서울입니다.` in 16.414 seconds: 13.965
+seconds for 41-token prefill and 2.450 seconds for 10-token decode (4.082 decode
+tok/s). Maximum RSS was 4,672,512 KiB with zero swap. A 164-token maintenance
+prompt completed in 87.331 seconds at 4,720,072 KiB maximum RSS and zero swap,
+preserving all six facts but placing them on one line. Keep the 3B profile and
+item `5` as the strict six-line acceptance; the 7B profile is a capacity option,
+not a replacement for that formatting golden.
 
 The Qwen TUI was also opened in a 120x40 SSH terminal. Its dashboard reported
 `x86_64`, eight logical/four physical cores, and the expected `Q4_K AVX2`
