@@ -22,6 +22,17 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+### Added
+
+* The HP demo menu and its `validate-release` command now download and verify a
+  published x86_64 archive against the pinned Qwen 75-token golden.
+
+### Fixed
+
+* The HP Qwen TUI now allows up to 8,192 generated tokens per turn in the
+  model's full 32,768-token context and requests complete, detailed answers
+  instead of silently ending at the shared portable profile's 96-token cap.
+
 ## [v0.15.1-mvp] — 2026-08-23
 
 ### Fixed

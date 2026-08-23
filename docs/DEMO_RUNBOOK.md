@@ -104,6 +104,24 @@ ssh mbp2012 'chmod +x "$HOME/demo.sh.new" && mv "$HOME/demo.sh.new" "$HOME/demo.
 
 Do not add host addresses or credentials to the repository.
 
+## Release Artifact Acceptance
+
+Do not deploy a Linux release based only on a successful build matrix. The HP
+demo script includes release acceptance: it downloads the public x86_64 archive
+and checksum, verifies the pinned Qwen model and runtime version, then requires
+the exact 75-token, six-line greedy output:
+
+```bash
+HP_HOST=your-hp-ssh-alias
+ssh "${HP_HOST}" '$HOME/demo.sh validate-release v0.15.1-mvp'
+```
+
+Menu item `8` runs the same check for v0.15.1-mvp. `QWEN2_5_3B` can override
+the default HP model path, `RAYON_NUM_THREADS` can override the eight-thread
+default, and `RELEASE_REPOSITORY` can select a fork. The check is intentionally
+limited to Linux x86_64 because it depends on the HP-only Qwen artifact and
+AVX2 physical-host result.
+
 ## Preflight
 
 Check antiX immediately before a live demonstration:
@@ -190,7 +208,11 @@ ssh -t mbp2012 '$HOME/demo.sh'
 
 On HP, select menu item `1` for the Qwen2.5-3B TUI or item `5` for its
 deterministic Korean six-field report. Select item `2` on mbp2012 for the 1.7B
-TUI. The portable 1.7B and 360M golden checks remain items `6` and `7`.
+TUI. The Qwen TUI allows up to 8,192 new tokens per turn in the model's full
+32,768-token context and asks it to finish detailed answers; portable profiles
+retain the 96-token/1,024-token limits. Qwen still stops earlier on its ChatML
+end marker, and `Esc` cancels an unwanted long response. The portable 1.7B and
+360M golden checks remain items `6` and `7`.
 
 ## Expected Timing
 
@@ -208,12 +230,22 @@ Before batched prefill, the HP Qwen2.5-3B Korean report check completed in 71.14
 seconds with the menu-default eight Rayon threads and 2,013,084 KiB maximum RSS.
 The layer-major/tiled-Q4_K build emitted the same pinned 75 token IDs in 51.58
 seconds: 25.31 seconds for 164-token prefill and 26.26 seconds for decode, with
-2,039,504 KiB maximum RSS. The final v0.15.0 build reuses Q8_K activations for
-AVX2 Q4_K and Q6_K decode and completed the same output in 37.64 seconds: 25.89
-seconds for prefill and 11.75 seconds for decode, with 2,175,812 KiB maximum
-RSS. This clears the 40-second target and is 47.1% faster than the original
-path. Four threads on the old path took 75.35 seconds, so retain the logical-CPU
-default on this 4C/8T host.
+2,039,504 KiB maximum RSS. The validated local v0.15.0 candidate reuses Q8_K
+activations for AVX2 Q4_K and Q6_K decode and completed the same output in
+37.64 seconds: 25.89 seconds for prefill and 11.75 seconds for decode, with
+2,175,812 KiB maximum RSS. This clears the 40-second target and is 47.1% faster
+than the original path. Four threads on the old path took 75.35 seconds, so
+retain the logical-CPU default on this 4C/8T host.
+
+The public v0.15.0 x86_64 archive used Zig 0.13.0 and instead emitted a
+70-token, one-line report, so it was never deployed. The replacement
+v0.15.1-mvp archive pins Zig 0.16.0 and cargo-zigbuild 0.23.0. Its public
+x86_64 archive SHA256 is
+`7ce760d24bd4d41d29b6056dff916558951520decf06be6f320f583888126f11`;
+the extracted runtime and deployed `$HOME/willamette-demo-current` SHA256 is
+`ee4aa5a280e09a0351d2db5308d25905ecc52b4d17b17e3cb3297f74385f848b`.
+That exact public runtime reproduced all 75 token IDs in 37.241 seconds: 25.592
+seconds for prefill and 11.650 seconds for decode.
 
 The expanded HP quality pass also completed a factual one-sentence summary and
 four context-dependent turns ending at token position 158. The strict table
