@@ -3,7 +3,11 @@
 use crate::error::WillametteError;
 use crate::gguf::tensor::TensorView;
 use crate::model::primitives::f16_to_f32;
+use crate::model::q4_k::{Q8KActivation, Q8KBlock};
 use half::f16;
+
+const BLOCK_BYTES: usize = TensorView::Q6K_BYTES_PER_BLOCK as usize;
+const BLOCK_VALUES: usize = TensorView::Q6K_ELEMENTS_PER_BLOCK as usize;
 
 fn validate_row(row: &[u8], values: usize) -> Result<(), WillametteError> {
     if !values.is_multiple_of(TensorView::Q6K_ELEMENTS_PER_BLOCK as usize) {
@@ -56,8 +60,37 @@ fn for_each_weight(block: &[u8], mut visit: impl FnMut(usize, f32)) {
     }
 }
 
+pub(super) fn unpack_block_levels(block: &[u8], levels: &mut [u8; BLOCK_VALUES]) {
+    let ql = &block[..128];
+    let qh = &block[128..192];
+    for half in 0..2 {
+        let ql = &ql[half * 64..];
+        let qh = &qh[half * 32..];
+        let output = half * 128;
+        for index in 0..32 {
+            levels[output + index] = (ql[index] & 0x0f) | ((qh[index] & 3) << 4);
+            levels[output + index + 32] = (ql[index + 32] & 0x0f) | (((qh[index] >> 2) & 3) << 4);
+            levels[output + index + 64] = (ql[index] >> 4) | (((qh[index] >> 4) & 3) << 4);
+            levels[output + index + 96] = (ql[index + 32] >> 4) | (((qh[index] >> 6) & 3) << 4);
+        }
+    }
+}
+
+pub(crate) fn validate_d_scales(row: &[u8]) -> Result<(), WillametteError> {
+    for (block_index, block) in row.chunks_exact(BLOCK_BYTES).enumerate() {
+        let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
+        if !d.is_finite() {
+            return Err(WillametteError::GgufParse(format!(
+                "Q6_K block {block_index} has a non-finite d scale"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn dequantize_row(row: &[u8], out: &mut [f32]) -> Result<(), WillametteError> {
     validate_row(row, out.len())?;
+    validate_d_scales(row)?;
     for (block_index, block) in row
         .chunks_exact(TensorView::Q6K_BYTES_PER_BLOCK as usize)
         .enumerate()
@@ -70,6 +103,7 @@ pub fn dequantize_row(row: &[u8], out: &mut [f32]) -> Result<(), WillametteError
 
 pub fn dot_row(row: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     validate_row(row, input.len())?;
+    validate_d_scales(row)?;
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     if std::arch::is_x86_feature_detected!("sse2") {
@@ -79,6 +113,48 @@ pub fn dot_row(row: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     }
 
     Ok(dot_row_scalar_validated(row, input))
+}
+
+/// Computes a Q6_K row dot product against a previously quantized Q8_K activation.
+pub fn dot_row_q8_k(row: &[u8], input: &Q8KActivation) -> Result<f32, WillametteError> {
+    if input.is_empty() || input.blocks.len().checked_mul(BLOCK_VALUES) != Some(input.len()) {
+        return Err(WillametteError::GgufParse(
+            "Q8_K activation has invalid dimensions".to_string(),
+        ));
+    }
+    validate_row(row, input.len())?;
+    validate_d_scales(row)?;
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: runtime detection establishes AVX2 support and the checks
+        // above establish complete, matching Q6_K and Q8_K blocks.
+        return Ok(unsafe { super::q6_k_simd::dot_row_q8_avx2_validated(row, &input.blocks) });
+    }
+
+    Ok(dot_row_q8_scalar_validated(row, &input.blocks))
+}
+
+pub(super) fn dot_row_q8_scalar_validated(row: &[u8], input: &[Q8KBlock]) -> f32 {
+    let mut sum = 0.0_f32;
+    let mut levels = [0_u8; BLOCK_VALUES];
+    for (block, activation) in row.chunks_exact(BLOCK_BYTES).zip(input) {
+        unpack_block_levels(block, &mut levels);
+        let scales = &block[192..208];
+        let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
+        let mut block_sum = 0_i32;
+        for group in 0..16 {
+            let mut dot = 0_i32;
+            for index in 0..16 {
+                dot += i32::from(levels[group * 16 + index])
+                    * i32::from(activation.qs[group * 16 + index]);
+            }
+            block_sum +=
+                i32::from(scales[group] as i8) * (dot - 32 * i32::from(activation.bsums[group]));
+        }
+        sum += d * activation.d * block_sum as f32;
+    }
+    sum
 }
 
 fn dot_row_scalar_validated(row: &[u8], input: &[f32]) -> f32 {
@@ -289,6 +365,92 @@ mod tests {
         assert_eq!(dot_row_scalar_validated(&block, &input), expected);
         let dispatched = dot_row(&block, &input).unwrap();
         assert!((dispatched - expected).abs() < 1e-3);
+    }
+
+    fn q8_parity_fixture(block_count: usize) -> (Vec<u8>, Vec<f32>) {
+        let weights = (0..block_count * 256)
+            .map(|index| (index as f32 * 0.173).sin() * 4.0 - (index % 13) as f32 * 0.125)
+            .collect::<Vec<_>>();
+        let mut row = vec![0_u8; block_count * BLOCK_BYTES];
+        quantize_row(&weights, &mut row).unwrap();
+        let input = (0..block_count * 256)
+            .map(|index| {
+                let magnitude = 0.5 + ((index * 29 + 7) % 101) as f32 / 23.0;
+                if index % 2 == 0 {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            })
+            .collect();
+        (row, input)
+    }
+
+    fn reconstructed_q8_reference(row: &[u8], activation: &Q8KActivation) -> (f32, f32) {
+        let mut weights = vec![0.0; activation.len()];
+        dequantize_row(row, &mut weights).unwrap();
+        let mut sum = 0.0_f32;
+        let mut sum_abs = 0.0_f32;
+        for (block_index, block) in activation.blocks.iter().enumerate() {
+            for index in 0..BLOCK_VALUES {
+                let product = weights[block_index * BLOCK_VALUES + index]
+                    * block.d
+                    * f32::from(block.qs[index]);
+                sum += product;
+                sum_abs += product.abs();
+            }
+        }
+        (sum, sum_abs)
+    }
+
+    #[test]
+    fn q6_k_q8_k_scalar_oracle_matches_reconstructed_values() {
+        let (row, input) = q8_parity_fixture(5);
+        let activation = Q8KActivation::from_f32(&input).unwrap();
+        let scalar = dot_row_q8_scalar_validated(&row, &activation.blocks);
+        let (reference, sum_abs) = reconstructed_q8_reference(&row, &activation);
+        let tolerance = 2e-6 * sum_abs.max(1.0);
+        assert!(
+            (scalar - reference).abs() <= tolerance,
+            "scalar={scalar}, reference={reference}, tolerance={tolerance}"
+        );
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn q6_k_q8_k_avx2_matches_scalar_oracle() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let (row, input) = q8_parity_fixture(7);
+        let activation = Q8KActivation::from_f32(&input).unwrap();
+        let scalar = dot_row_q8_scalar_validated(&row, &activation.blocks);
+        let (_, sum_abs) = reconstructed_q8_reference(&row, &activation);
+        // SAFETY: the feature check above established AVX2 support and the
+        // fixture contains complete matching Q6_K and Q8_K blocks.
+        let avx2 =
+            unsafe { super::super::q6_k_simd::dot_row_q8_avx2_validated(&row, &activation.blocks) };
+        let tolerance = 2e-6 * sum_abs.max(1.0);
+        assert!(
+            (avx2 - scalar).abs() <= tolerance,
+            "AVX2={avx2}, scalar={scalar}, tolerance={tolerance}"
+        );
+        let dispatched = dot_row_q8_k(&row, &activation).unwrap();
+        assert_eq!(dispatched.to_bits(), avx2.to_bits());
+    }
+
+    #[test]
+    fn checked_q6_k_dots_reject_non_finite_scale_and_bad_q8_dimensions() {
+        let mut row = ones_block();
+        row[208..210].copy_from_slice(&0x7e00_u16.to_le_bytes());
+        let activation = Q8KActivation::from_f32(&[1.0; 256]).unwrap();
+        assert!(dot_row(&row, &[1.0; 256]).is_err());
+        assert!(dot_row_q8_k(&row, &activation).is_err());
+
+        let valid = ones_block();
+        assert!(dot_row_q8_k(&valid, &Q8KActivation::new()).is_err());
+        let two_blocks = Q8KActivation::from_f32(&[1.0; 512]).unwrap();
+        assert!(dot_row_q8_k(&valid, &two_blocks).is_err());
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

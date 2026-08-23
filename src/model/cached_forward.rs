@@ -29,10 +29,11 @@ use crate::model::attention::{apply_rope_multi_head, softmax_inplace};
 use crate::model::ffn::{elementwise_mul, relu_square, silu};
 use crate::model::graph::{LayerWeights, ModelGraph};
 use crate::model::kv_cache::KVCache;
-use crate::model::linear::{linear_batched_f32, linear_matvec_f32};
+use crate::model::linear::linear_batched_f32;
 use crate::model::primitives::{
     attention_scale, embedding_gather, kv_head_for_q_head, rms_norm_f32, AttentionShape, RopeType,
 };
+use crate::model::q4_k::Q8KActivation;
 use crate::model::stage_timing::time_stage;
 
 /// Per-token constants pulled from `ModelConfig` — packaged so the
@@ -76,6 +77,7 @@ pub struct ForwardWorkspace {
     fused: Vec<f32>,
     fused_norm: Vec<f32>,
     down: Vec<f32>,
+    q8_k_activation: Q8KActivation,
 }
 
 /// Reusable buffers for layer-major cached prompt prefill.
@@ -165,6 +167,7 @@ impl ForwardWorkspace {
             fused: vec![0.0; n_ff],
             fused_norm: vec![0.0; n_ff],
             down: vec![0.0; n_embd],
+            q8_k_activation: Q8KActivation::new(),
         }
     }
 
@@ -740,11 +743,12 @@ fn project_qkv_and_append(
     });
 
     time_stage!("matvec_qkv", {
-        layer.project_qkv(
+        layer.project_qkv_graph_validated(
             &workspace.x_norm,
             &mut workspace.q,
             &mut workspace.k,
             &mut workspace.v,
+            &mut workspace.q8_k_activation,
         )?;
     });
 
@@ -813,10 +817,10 @@ fn finish_one_layer(
         ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &workspace.attn_out,
     };
     time_stage!("matvec_attn_output", {
-        linear_matvec_f32(
-            layer.attn_output,
+        layer.project_attn_output(
             attn_projection_input,
             &mut workspace.wo_out,
+            &mut workspace.q8_k_activation,
         )?;
     });
     time_stage!("residual_attn", {
@@ -880,8 +884,12 @@ fn apply_ffn_block(
         )?;
     });
     time_stage!("matvec_ffn_gate_up", {
-        linear_matvec_f32(layer.ffn_gate, &workspace.x_norm_ffn, &mut workspace.gate)?;
-        linear_matvec_f32(layer.ffn_up, &workspace.x_norm_ffn, &mut workspace.up)?;
+        layer.project_ffn_gate_up(
+            &workspace.x_norm_ffn,
+            &mut workspace.gate,
+            &mut workspace.up,
+            &mut workspace.q8_k_activation,
+        )?;
     });
     time_stage!("ffn_relu2_emul", {
         match ctx.variant {
@@ -909,7 +917,11 @@ fn apply_ffn_block(
         ForwardVariant::VanillaLlama | ForwardVariant::Qwen2 => &workspace.fused,
     };
     time_stage!("matvec_ffn_down", {
-        linear_matvec_f32(layer.ffn_down, down_input, &mut workspace.down)?;
+        layer.project_ffn_down(
+            down_input,
+            &mut workspace.down,
+            &mut workspace.q8_k_activation,
+        )?;
     });
     time_stage!("residual_ffn", {
         for d in 0..ctx.n_embd {

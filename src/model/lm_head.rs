@@ -113,12 +113,16 @@ pub fn compute_logits_from_graph(
     final_hidden: &[f32],
     graph: &ModelGraph<'_>,
 ) -> Result<Vec<f32>, WillametteError> {
-    compute_logits(
-        final_hidden,
-        graph.lm_head, // already tied to token_embd by ModelGraph
-        graph.config.embedding_length,
-        graph.config.vocab_size,
-    )
+    let embedding_length = graph.config.embedding_length as usize;
+    if final_hidden.len() != embedding_length {
+        return Err(WillametteError::GgufParse(format!(
+            "compute_logits: final_hidden.len()={} != embedding_length={embedding_length}",
+            final_hidden.len()
+        )));
+    }
+    let mut logits = vec![0.0; graph.config.vocab_size as usize];
+    graph.project_lm_head(final_hidden, &mut logits)?;
+    Ok(logits)
 }
 
 /// Numerically stable negative log-likelihood for one target token.

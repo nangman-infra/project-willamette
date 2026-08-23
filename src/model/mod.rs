@@ -34,6 +34,8 @@ pub mod q4_k;
 mod q4_k_simd;
 pub mod q6_k;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod q6_k_simd;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod q6_k_sse2;
 pub mod q8_0;
 #[cfg(all(

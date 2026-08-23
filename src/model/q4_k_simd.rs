@@ -3,7 +3,10 @@
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use super::{primitives::f16_to_f32, q4_k::scale_min};
+use super::{
+    primitives::f16_to_f32,
+    q4_k::{dot_row_q8_scalar_validated, scale_min, Q8KBlock},
+};
 
 const BLOCK_BYTES: usize = 144;
 const BLOCK_VALUES: usize = 256;
@@ -11,22 +14,104 @@ const TOKEN_TILE: usize = 4;
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::{
-    __m128, __m128i, __m256, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi32_ps,
-    _mm256_cvtepu8_epi32, _mm256_extractf128_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps,
-    _mm256_setzero_ps, _mm256_sub_ps, _mm_add_ps, _mm_add_ss, _mm_and_si128, _mm_cvtepi32_ps,
+    __m128, __m128i, __m256, __m256i, _mm256_add_epi32, _mm256_add_ps, _mm256_and_si256,
+    _mm256_castps256_ps128, _mm256_cvtepi32_ps, _mm256_cvtepu8_epi32, _mm256_extractf128_ps,
+    _mm256_loadu_ps, _mm256_loadu_si256, _mm256_madd_epi16, _mm256_maddubs_epi16, _mm256_mul_ps,
+    _mm256_set1_epi16, _mm256_set1_epi8, _mm256_set1_ps, _mm256_setzero_ps, _mm256_setzero_si256,
+    _mm256_srai_epi16, _mm256_sub_ps, _mm_add_ps, _mm_add_ss, _mm_and_si128, _mm_cvtepi32_ps,
     _mm_cvtss_f32, _mm_loadl_epi64, _mm_loadu_ps, _mm_loadu_si128, _mm_movehl_ps, _mm_mul_ps,
     _mm_set1_epi8, _mm_set1_ps, _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_ps, _mm_srli_epi16,
     _mm_sub_ps, _mm_unpackhi_epi16, _mm_unpackhi_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m128, __m128i, __m256, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi32_ps,
-    _mm256_cvtepu8_epi32, _mm256_extractf128_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps,
-    _mm256_setzero_ps, _mm256_sub_ps, _mm_add_ps, _mm_add_ss, _mm_and_si128, _mm_cvtepi32_ps,
+    __m128, __m128i, __m256, __m256i, _mm256_add_epi32, _mm256_add_ps, _mm256_and_si256,
+    _mm256_castps256_ps128, _mm256_cvtepi32_ps, _mm256_cvtepu8_epi32, _mm256_extractf128_ps,
+    _mm256_loadu_ps, _mm256_loadu_si256, _mm256_madd_epi16, _mm256_maddubs_epi16, _mm256_mul_ps,
+    _mm256_set1_epi16, _mm256_set1_epi8, _mm256_set1_ps, _mm256_setzero_ps, _mm256_setzero_si256,
+    _mm256_srai_epi16, _mm256_sub_ps, _mm_add_ps, _mm_add_ss, _mm_and_si128, _mm_cvtepi32_ps,
     _mm_cvtss_f32, _mm_loadl_epi64, _mm_loadu_ps, _mm_loadu_si128, _mm_movehl_ps, _mm_mul_ps,
     _mm_set1_epi8, _mm_set1_ps, _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_ps, _mm_srli_epi16,
     _mm_sub_ps, _mm_unpackhi_epi16, _mm_unpackhi_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
+
+/// The caller must have selected AVX2 and validated matching complete blocks.
+pub(super) unsafe fn dot_row_q8_avx2_validated(row: &[u8], input: &[Q8KBlock]) -> f32 {
+    debug_assert_eq!(row.len() / BLOCK_BYTES, input.len());
+    dot_row_q8_avx2_inner(row, input)
+}
+
+pub(super) fn dot_row_q8_sse2_validated(row: &[u8], input: &[Q8KBlock]) -> f32 {
+    assert!(std::arch::is_x86_feature_detected!("sse2"));
+    debug_assert_eq!(row.len() / BLOCK_BYTES, input.len());
+    dot_row_q8_scalar_validated(row, input)
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn dot_row_q8_avx2_inner(row: &[u8], input: &[Q8KBlock]) -> f32 {
+    let nibble_mask = _mm256_set1_epi8(0x0f);
+    let mut scaled_sum = _mm256_setzero_ps();
+    let mut minimum_sum = 0.0_f32;
+
+    for (block, activation) in row.chunks_exact(BLOCK_BYTES).zip(input) {
+        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+        let scales = &block[4..16];
+        let quants = block.as_ptr().add(16);
+        let mut block_scaled_sum = _mm256_setzero_si256();
+        let mut block_minimum_sum = 0_i32;
+
+        for band in 0..4 {
+            let low_group = band * 2;
+            let high_group = low_group + 1;
+            let packed = _mm256_loadu_si256(quants.add(band * 32).cast::<__m256i>());
+            let low_q4 = _mm256_and_si256(packed, nibble_mask);
+            let high_q4 = _mm256_and_si256(_mm256_srai_epi16(packed, 4), nibble_mask);
+            let low_q8 =
+                _mm256_loadu_si256(activation.qs.as_ptr().add(low_group * 32).cast::<__m256i>());
+            let high_q8 = _mm256_loadu_si256(
+                activation
+                    .qs
+                    .as_ptr()
+                    .add(high_group * 32)
+                    .cast::<__m256i>(),
+            );
+            let (low_scale, low_minimum) = scale_min(scales, low_group);
+            let (high_scale, high_minimum) = scale_min(scales, high_group);
+            let low_pairs = _mm256_maddubs_epi16(low_q4, low_q8);
+            let high_pairs = _mm256_maddubs_epi16(high_q4, high_q8);
+            block_scaled_sum = _mm256_add_epi32(
+                block_scaled_sum,
+                _mm256_madd_epi16(low_pairs, _mm256_set1_epi16(i16::from(low_scale))),
+            );
+            block_scaled_sum = _mm256_add_epi32(
+                block_scaled_sum,
+                _mm256_madd_epi16(high_pairs, _mm256_set1_epi16(i16::from(high_scale))),
+            );
+            block_minimum_sum += i32::from(low_minimum)
+                * (i32::from(activation.bsums[low_group * 2])
+                    + i32::from(activation.bsums[low_group * 2 + 1]));
+            block_minimum_sum += i32::from(high_minimum)
+                * (i32::from(activation.bsums[high_group * 2])
+                    + i32::from(activation.bsums[high_group * 2 + 1]));
+        }
+
+        scaled_sum = _mm256_add_ps(
+            scaled_sum,
+            _mm256_mul_ps(
+                _mm256_cvtepi32_ps(block_scaled_sum),
+                _mm256_set1_ps(d * activation.d),
+            ),
+        );
+        minimum_sum += dmin * activation.d * block_minimum_sum as f32;
+    }
+
+    let halves = _mm_add_ps(
+        _mm256_castps256_ps128(scaled_sum),
+        _mm256_extractf128_ps(scaled_sum, 1),
+    );
+    hsum_sse2(halves) - minimum_sum
+}
 
 /// Run the AVX2 kernel after checking that this process may execute it.
 pub(super) fn dot_row_avx2_validated(row: &[u8], input: &[f32]) -> f32 {

@@ -16,8 +16,12 @@ use crate::gguf::tensor::TensorView;
 use crate::gguf::types::GgmlType;
 use crate::model::architecture::{resolve, ForwardVariant, LayerTensorRole};
 use crate::model::config::ModelConfig;
-use crate::model::linear::{linear_batched_f32, linear_matvec_f32};
+use crate::model::linear::{
+    graph_validated_linear_matvec_f32, graph_validated_linear_matvec_prequantized,
+    linear_batched_f32, linear_matvec_f32, GraphLinearBackend,
+};
 use crate::model::primitives::f32_tensor_to_vec;
+use crate::model::q4_k::Q8KActivation;
 
 #[derive(Debug)]
 pub struct LayerWeights<'a> {
@@ -50,6 +54,14 @@ pub struct LayerWeights<'a> {
     pub ffn_sub_norm: Option<&'a TensorView<'a>>,
     /// Pre-decoded `ffn_sub_norm` weights (Stage 10-A).
     pub ffn_sub_norm_f32: Option<Vec<f32>>,
+
+    attn_q_backend: GraphLinearBackend,
+    attn_k_backend: GraphLinearBackend,
+    attn_v_backend: GraphLinearBackend,
+    attn_output_backend: GraphLinearBackend,
+    ffn_gate_backend: GraphLinearBackend,
+    ffn_up_backend: GraphLinearBackend,
+    ffn_down_backend: GraphLinearBackend,
 }
 
 #[derive(Debug)]
@@ -71,6 +83,8 @@ pub struct ModelGraph<'a> {
     /// Currently `false` for `microsoft/bitnet-b1.58-2B-4T-gguf` and may be
     /// either value for classic Llama.
     pub has_output_weight_tensor: bool,
+
+    lm_head_backend: GraphLinearBackend,
 
     pub layers: Vec<LayerWeights<'a>>,
 }
@@ -96,6 +110,8 @@ impl<'a> ModelGraph<'a> {
                 "duplicate tensor names in GGUF tensor directory".to_string(),
             ));
         }
+        validate_q4_k_super_scales(&gguf.tensors)?;
+        validate_q6_k_scales(&gguf.tensors)?;
         reject_unsupported_bias_tensors(
             &config.architecture,
             &gguf.tensors,
@@ -219,6 +235,13 @@ impl<'a> ModelGraph<'a> {
                 ffn_down,
                 ffn_sub_norm,
                 ffn_sub_norm_f32,
+                attn_q_backend: GraphLinearBackend::resolve(attn_q),
+                attn_k_backend: GraphLinearBackend::resolve(attn_k),
+                attn_v_backend: GraphLinearBackend::resolve(attn_v),
+                attn_output_backend: GraphLinearBackend::resolve(attn_output),
+                ffn_gate_backend: GraphLinearBackend::resolve(ffn_gate),
+                ffn_up_backend: GraphLinearBackend::resolve(ffn_up),
+                ffn_down_backend: GraphLinearBackend::resolve(ffn_down),
             });
         }
 
@@ -232,6 +255,7 @@ impl<'a> ModelGraph<'a> {
             output_norm_f32,
             lm_head,
             has_output_weight_tensor,
+            lm_head_backend: GraphLinearBackend::resolve(lm_head),
             layers,
         })
     }
@@ -241,6 +265,29 @@ impl<'a> ModelGraph<'a> {
         // Pointer equality between the borrowed tensors. Both come from
         // gguf.tensors, so identical address means identical tensor.
         std::ptr::eq(self.lm_head as *const _, self.token_embd as *const _)
+    }
+
+    pub(crate) fn project_lm_head(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+    ) -> Result<(), WillametteError> {
+        if !self.lm_head_backend.uses_q8_k() {
+            return graph_validated_linear_matvec_f32(
+                self.lm_head,
+                self.lm_head_backend,
+                input,
+                output,
+            );
+        }
+        let activation = Q8KActivation::from_f32(input)?;
+        graph_validated_linear_matvec_prequantized(
+            self.lm_head,
+            self.lm_head_backend,
+            input,
+            &activation,
+            output,
+        )
     }
 }
 
@@ -261,6 +308,46 @@ impl LayerWeights<'_> {
         add_projection_bias(v, self.attn_v_bias_f32.as_deref())
     }
 
+    pub(crate) fn project_qkv_graph_validated(
+        &self,
+        input: &[f32],
+        q: &mut [f32],
+        k: &mut [f32],
+        v: &mut [f32],
+        activation: &mut Q8KActivation,
+    ) -> Result<(), WillametteError> {
+        if self.attn_q_backend.uses_q8_k()
+            || self.attn_k_backend.uses_q8_k()
+            || self.attn_v_backend.uses_q8_k()
+        {
+            activation.quantize(input)?;
+        }
+        graph_validated_linear_matvec_prequantized(
+            self.attn_q,
+            self.attn_q_backend,
+            input,
+            activation,
+            q,
+        )?;
+        add_projection_bias(q, self.attn_q_bias_f32.as_deref())?;
+        graph_validated_linear_matvec_prequantized(
+            self.attn_k,
+            self.attn_k_backend,
+            input,
+            activation,
+            k,
+        )?;
+        add_projection_bias(k, self.attn_k_bias_f32.as_deref())?;
+        graph_validated_linear_matvec_prequantized(
+            self.attn_v,
+            self.attn_v_backend,
+            input,
+            activation,
+            v,
+        )?;
+        add_projection_bias(v, self.attn_v_bias_f32.as_deref())
+    }
+
     /// Compute token-major Q/K/V and apply each projection bias once per token.
     pub fn project_qkv_batched(
         &self,
@@ -276,6 +363,144 @@ impl LayerWeights<'_> {
         linear_batched_f32(self.attn_v, input, v)?;
         add_projection_bias_batched(v, self.attn_v_bias_f32.as_deref())
     }
+
+    pub(crate) fn project_attn_output(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        activation: &mut Q8KActivation,
+    ) -> Result<(), WillametteError> {
+        self.project_single(
+            self.attn_output,
+            self.attn_output_backend,
+            input,
+            output,
+            activation,
+        )
+    }
+
+    pub(crate) fn project_ffn_gate_up(
+        &self,
+        input: &[f32],
+        gate: &mut [f32],
+        up: &mut [f32],
+        activation: &mut Q8KActivation,
+    ) -> Result<(), WillametteError> {
+        if self.ffn_gate_backend.uses_q8_k() || self.ffn_up_backend.uses_q8_k() {
+            activation.quantize(input)?;
+        }
+        graph_validated_linear_matvec_prequantized(
+            self.ffn_gate,
+            self.ffn_gate_backend,
+            input,
+            activation,
+            gate,
+        )?;
+        graph_validated_linear_matvec_prequantized(
+            self.ffn_up,
+            self.ffn_up_backend,
+            input,
+            activation,
+            up,
+        )
+    }
+
+    pub(crate) fn project_ffn_down(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        activation: &mut Q8KActivation,
+    ) -> Result<(), WillametteError> {
+        self.project_single(
+            self.ffn_down,
+            self.ffn_down_backend,
+            input,
+            output,
+            activation,
+        )
+    }
+
+    fn project_single(
+        &self,
+        weight: &TensorView<'_>,
+        backend: GraphLinearBackend,
+        input: &[f32],
+        output: &mut [f32],
+        activation: &mut Q8KActivation,
+    ) -> Result<(), WillametteError> {
+        if backend.uses_q8_k() {
+            activation.quantize(input)?;
+        }
+        graph_validated_linear_matvec_prequantized(weight, backend, input, activation, output)
+    }
+}
+
+fn validate_q4_k_super_scales(tensors: &[TensorView<'_>]) -> Result<(), WillametteError> {
+    let block_bytes = TensorView::Q4K_BYTES_PER_BLOCK as usize;
+    for tensor in tensors
+        .iter()
+        .filter(|tensor| tensor.ggml_type == GgmlType::Q4K)
+    {
+        tensor.verify_byte_len()?;
+        let expected = usize::try_from(TensorView::q4k_expected_byte_len(&tensor.shape)?)
+            .map_err(|_| WillametteError::GgufParse("Q4_K tensor size overflow".to_string()))?;
+        if tensor.data.len() != expected {
+            return Err(WillametteError::GgufParse(format!(
+                "tensor {:?}: Q4_K data length {} != expected {expected}",
+                tensor.name,
+                tensor.data.len()
+            )));
+        }
+        if !tensor.data.len().is_multiple_of(block_bytes) {
+            return Err(WillametteError::GgufParse(format!(
+                "tensor {:?}: Q4_K data length {} is not a multiple of {block_bytes}",
+                tensor.name,
+                tensor.data.len()
+            )));
+        }
+        for (block_index, block) in tensor.data.chunks_exact(block_bytes).enumerate() {
+            let d = crate::model::primitives::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+            let dmin =
+                crate::model::primitives::f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+            if !d.is_finite() || !dmin.is_finite() {
+                return Err(WillametteError::GgufParse(format!(
+                    "tensor {:?}: Q4_K block {block_index} has a non-finite d or dmin scale",
+                    tensor.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_q6_k_scales(tensors: &[TensorView<'_>]) -> Result<(), WillametteError> {
+    let block_bytes = TensorView::Q6K_BYTES_PER_BLOCK as usize;
+    for tensor in tensors
+        .iter()
+        .filter(|tensor| tensor.ggml_type == GgmlType::Q6K)
+    {
+        tensor.verify_byte_len()?;
+        let expected = usize::try_from(TensorView::q6k_expected_byte_len(&tensor.shape)?)
+            .map_err(|_| WillametteError::GgufParse("Q6_K tensor size overflow".to_string()))?;
+        if tensor.data.len() != expected {
+            return Err(WillametteError::GgufParse(format!(
+                "tensor {:?}: Q6_K data length {} != expected {expected}",
+                tensor.name,
+                tensor.data.len()
+            )));
+        }
+        if !tensor.data.len().is_multiple_of(block_bytes) {
+            return Err(WillametteError::GgufParse(format!(
+                "tensor {:?}: Q6_K data length {} is not a multiple of {block_bytes}",
+                tensor.name,
+                tensor.data.len()
+            )));
+        }
+        crate::model::q6_k::validate_d_scales(tensor.data).map_err(|error| {
+            WillametteError::GgufParse(format!("tensor {:?}: {error}", tensor.name))
+        })?;
+    }
+    Ok(())
 }
 
 fn add_projection_bias(
@@ -542,6 +767,7 @@ fn check_shape(t: &TensorView<'_>, expected: &[u64]) -> Result<(), WillametteErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::reader::GgufValue;
     use LayerTensorRole::{
         AttnK, AttnNorm, AttnOutput, AttnQ, AttnSubNorm, AttnV, FfnDown, FfnGate, FfnNorm,
         FfnSubNorm, FfnUp,
@@ -560,6 +786,143 @@ mod tests {
         FfnUp,
         FfnDown,
     ];
+
+    #[test]
+    fn graph_load_rejects_non_finite_q4_k_super_scale() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "general.architecture".to_string(),
+            GgufValue::Str("bitnet-b1.58".to_string()),
+        );
+        for (key, value) in [
+            ("block_count", 1),
+            ("embedding_length", 256),
+            ("feed_forward_length", 256),
+            ("context_length", 16),
+            ("attention.head_count", 1),
+            ("attention.head_count_kv", 1),
+            ("rope.dimension_count", 256),
+            ("vocab_size", 1),
+        ] {
+            metadata.insert(format!("bitnet-b1.58.{key}"), GgufValue::Uint32(value));
+        }
+        metadata.insert(
+            "bitnet-b1.58.attention.layer_norm_rms_epsilon".to_string(),
+            GgufValue::Float32(1e-5),
+        );
+        metadata.insert(
+            "bitnet-b1.58.rope.freq_base".to_string(),
+            GgufValue::Float32(10_000.0),
+        );
+
+        let mut data = vec![0u8; TensorView::Q4K_BYTES_PER_BLOCK as usize];
+        data[..2].copy_from_slice(&0x7e00_u16.to_le_bytes());
+        let gguf = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata,
+            tensors: vec![TensorView {
+                name: "malformed.weight".to_string(),
+                shape: vec![256, 1],
+                ggml_type: GgmlType::Q4K,
+                offset: 0,
+                byte_len: data.len() as u64,
+                data: &data,
+                scale_data: None,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+            tensor_descriptors: Vec::new(),
+        };
+
+        let error = ModelGraph::from_gguf(&gguf).unwrap_err();
+        assert!(error.to_string().contains("non-finite d or dmin scale"));
+    }
+
+    #[test]
+    fn graph_load_rejects_non_finite_q6_k_scale() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "general.architecture".to_string(),
+            GgufValue::Str("bitnet-b1.58".to_string()),
+        );
+        for (key, value) in [
+            ("block_count", 1),
+            ("embedding_length", 256),
+            ("feed_forward_length", 256),
+            ("context_length", 16),
+            ("attention.head_count", 1),
+            ("attention.head_count_kv", 1),
+            ("rope.dimension_count", 256),
+            ("vocab_size", 1),
+        ] {
+            metadata.insert(format!("bitnet-b1.58.{key}"), GgufValue::Uint32(value));
+        }
+        metadata.insert(
+            "bitnet-b1.58.attention.layer_norm_rms_epsilon".to_string(),
+            GgufValue::Float32(1e-5),
+        );
+        metadata.insert(
+            "bitnet-b1.58.rope.freq_base".to_string(),
+            GgufValue::Float32(10_000.0),
+        );
+
+        let mut data = vec![0_u8; TensorView::Q6K_BYTES_PER_BLOCK as usize];
+        data[208..210].copy_from_slice(&0x7e00_u16.to_le_bytes());
+        let gguf = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata,
+            tensors: vec![TensorView {
+                name: "malformed.weight".to_string(),
+                shape: vec![256, 1],
+                ggml_type: GgmlType::Q6K,
+                offset: 0,
+                byte_len: data.len() as u64,
+                data: &data,
+                scale_data: None,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+            tensor_descriptors: Vec::new(),
+        };
+
+        let error = ModelGraph::from_gguf(&gguf).unwrap_err();
+        assert!(error.to_string().contains("non-finite d scale"));
+    }
+
+    #[test]
+    fn quantized_scale_validation_rejects_shape_storage_mismatch() {
+        let q4_data = vec![0_u8; TensorView::Q4K_BYTES_PER_BLOCK as usize];
+        let q4 = TensorView {
+            name: "short-q4.weight".to_string(),
+            shape: vec![256, 2],
+            ggml_type: GgmlType::Q4K,
+            offset: 0,
+            byte_len: (q4_data.len() * 2) as u64,
+            data: &q4_data,
+            scale_data: None,
+        };
+        assert!(validate_q4_k_super_scales(&[q4])
+            .unwrap_err()
+            .to_string()
+            .contains("data length"));
+
+        let q6_data = vec![0_u8; TensorView::Q6K_BYTES_PER_BLOCK as usize];
+        let q6 = TensorView {
+            name: "short-q6.weight".to_string(),
+            shape: vec![256, 2],
+            ggml_type: GgmlType::Q6K,
+            offset: 0,
+            byte_len: (q6_data.len() * 2) as u64,
+            data: &q6_data,
+            scale_data: None,
+        };
+        assert!(validate_q6_k_scales(&[q6])
+            .unwrap_err()
+            .to_string()
+            .contains("data length"));
+    }
 
     #[test]
     fn role_contract_rejects_duplicates() {
@@ -694,6 +1057,13 @@ mod tests {
             ffn_down: &weight,
             ffn_sub_norm: None,
             ffn_sub_norm_f32: None,
+            attn_q_backend: GraphLinearBackend::Checked,
+            attn_k_backend: GraphLinearBackend::Checked,
+            attn_v_backend: GraphLinearBackend::Checked,
+            attn_output_backend: GraphLinearBackend::Checked,
+            ffn_gate_backend: GraphLinearBackend::Checked,
+            ffn_up_backend: GraphLinearBackend::Checked,
+            ffn_down_backend: GraphLinearBackend::Checked,
         };
         let input = [2.0, -1.0, -0.5, 4.0, 3.0, 0.25];
         let mut expected_q = vec![0.0; 6];

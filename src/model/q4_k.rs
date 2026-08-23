@@ -4,6 +4,105 @@ use crate::error::WillametteError;
 use crate::gguf::tensor::TensorView;
 use half::f16;
 
+const BLOCK_VALUES: usize = 256;
+
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub(super) struct Q8KBlock {
+    pub(super) d: f32,
+    pub(super) qs: [i8; BLOCK_VALUES],
+    pub(super) bsums: [i16; 16],
+}
+
+impl Default for Q8KBlock {
+    fn default() -> Self {
+        Self {
+            d: 0.0,
+            qs: [0; BLOCK_VALUES],
+            bsums: [0; 16],
+        }
+    }
+}
+
+/// Owned Q8_K activation blocks whose allocation can be reused across rows.
+#[derive(Clone, Debug, Default)]
+pub struct Q8KActivation {
+    pub(super) blocks: Vec<Q8KBlock>,
+    values: usize,
+}
+
+impl Q8KActivation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_f32(input: &[f32]) -> Result<Self, WillametteError> {
+        let mut activation = Self::new();
+        activation.quantize(input)?;
+        Ok(activation)
+    }
+
+    /// Replaces this activation while retaining storage when its capacity is sufficient.
+    pub fn quantize(&mut self, input: &[f32]) -> Result<(), WillametteError> {
+        if input.is_empty() || !input.len().is_multiple_of(BLOCK_VALUES) {
+            return Err(WillametteError::GgufParse(format!(
+                "Q8_K activation length {} is not a positive multiple of {BLOCK_VALUES}",
+                input.len()
+            )));
+        }
+        if input.iter().any(|value| !value.is_finite()) {
+            return Err(WillametteError::GgufParse(
+                "Q8_K activation contains a non-finite value".to_string(),
+            ));
+        }
+
+        let block_count = input.len() / BLOCK_VALUES;
+        self.blocks.resize_with(block_count, Q8KBlock::default);
+        for (source, target) in input.chunks_exact(BLOCK_VALUES).zip(&mut self.blocks) {
+            quantize_q8_k_block(source, target);
+        }
+        self.values = input.len();
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.values
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values == 0
+    }
+}
+
+fn quantize_q8_k_block(input: &[f32], output: &mut Q8KBlock) {
+    let mut amax = 0.0_f32;
+    let mut max = 0.0_f32;
+    for &value in input {
+        let absolute = value.abs();
+        if absolute > amax {
+            amax = absolute;
+            max = value;
+        }
+    }
+
+    if amax == 0.0 {
+        *output = Q8KBlock::default();
+        return;
+    }
+
+    let iscale = -127.0 / max;
+    output.d = 1.0 / iscale;
+    for (group, values) in input.chunks_exact(16).enumerate() {
+        let mut sum = 0_i16;
+        for (index, &value) in values.iter().enumerate() {
+            let quant = (value * iscale).round_ties_even().clamp(-127.0, 127.0) as i8;
+            output.qs[group * 16 + index] = quant;
+            sum += i16::from(quant);
+        }
+        output.bsums[group] = sum;
+    }
+}
+
 fn validate_row(row: &[u8], values: usize) -> Result<(), WillametteError> {
     if values == 0 || !values.is_multiple_of(TensorView::Q4K_ELEMENTS_PER_BLOCK as usize) {
         return Err(WillametteError::GgufParse(format!(
@@ -93,6 +192,32 @@ pub fn dot_row(row: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
     dot_row_validated(row, input)
 }
 
+/// Computes a Q4_K row dot product against a previously quantized Q8_K activation.
+pub fn dot_row_q8_k(row: &[u8], input: &Q8KActivation) -> Result<f32, WillametteError> {
+    if input.values == 0 || input.blocks.len().checked_mul(BLOCK_VALUES) != Some(input.values) {
+        return Err(WillametteError::GgufParse(
+            "Q8_K activation has invalid dimensions".to_string(),
+        ));
+    }
+    validate_row(row, input.values)?;
+    validate_super_scales(row)?;
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: runtime detection established AVX2 support and both rows were validated.
+        return Ok(unsafe { super::q4_k_simd::dot_row_q8_avx2_validated(row, &input.blocks) });
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("sse2") {
+        return Ok(super::q4_k_simd::dot_row_q8_sse2_validated(
+            row,
+            &input.blocks,
+        ));
+    }
+
+    Ok(dot_row_q8_scalar_validated(row, &input.blocks))
+}
+
 pub(crate) fn dot_rows(
     row: &[u8],
     inputs: &[f32],
@@ -165,6 +290,44 @@ fn dot_row_scalar(row: &[u8], input: &[f32]) -> Result<f32, WillametteError> {
         })?;
     }
     Ok(sum)
+}
+
+pub(super) fn dot_row_q8_scalar_validated(row: &[u8], input: &[Q8KBlock]) -> f32 {
+    let mut sum = 0.0_f32;
+    for (block, activation) in row
+        .chunks_exact(TensorView::Q4K_BYTES_PER_BLOCK as usize)
+        .zip(input)
+    {
+        let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+        let dmin = f16::from_bits(u16::from_le_bytes([block[2], block[3]])).to_f32();
+        let scales = &block[4..16];
+        let qs = &block[16..144];
+        let mut scaled_sum = 0_i32;
+        let mut minimum_sum = 0_i32;
+
+        for group in 0..8 {
+            let (scale, minimum) = scale_min(scales, group);
+            let band = group / 2;
+            let high_nibble = group % 2 != 0;
+            let mut dot = 0_i32;
+            for index in 0..32 {
+                let packed = qs[band * 32 + index];
+                let quant = if high_nibble {
+                    packed >> 4
+                } else {
+                    packed & 0x0f
+                };
+                dot += i32::from(quant) * i32::from(activation.qs[group * 32 + index]);
+            }
+            scaled_sum += i32::from(scale) * dot;
+            minimum_sum += i32::from(minimum)
+                * (i32::from(activation.bsums[group * 2])
+                    + i32::from(activation.bsums[group * 2 + 1]));
+        }
+
+        sum += d * activation.d * scaled_sum as f32 - dmin * activation.d * minimum_sum as f32;
+    }
+    sum
 }
 
 pub fn active_kernel_label() -> &'static str {
@@ -434,5 +597,169 @@ mod tests {
         assert!(dot_rows(&[], &[], 0, &mut output).is_err());
         assert!(dot_rows(&row, &[], 256, &mut []).is_err());
         assert_eq!(output, [0.0; 2]);
+    }
+
+    #[test]
+    fn q8_k_quantization_has_pinned_layout_sums_and_ties_to_even() {
+        assert_eq!(std::mem::size_of::<Q8KBlock>(), 292);
+        let mut input = vec![1.0; 256];
+        input[0] = -127.0;
+        input[1] = 0.5;
+        input[2] = 1.5;
+        input[3] = 2.5;
+
+        let activation = Q8KActivation::from_f32(&input).unwrap();
+        let block = &activation.blocks[0];
+        assert_eq!(block.d, 1.0);
+        assert_eq!(&block.qs[..4], &[-127, 0, 2, 2]);
+        assert_eq!(block.bsums[0], -111);
+        assert!(block.bsums[1..].iter().all(|&sum| sum == 16));
+        assert_eq!(activation.len(), 256);
+        assert!(!activation.is_empty());
+    }
+
+    #[test]
+    fn q8_k_quantization_uses_first_signed_extremum_and_handles_zero() {
+        let mut tied = vec![0.0; 256];
+        tied[0] = 4.0;
+        tied[1] = -4.0;
+        let activation = Q8KActivation::from_f32(&tied).unwrap();
+        assert!(activation.blocks[0].d.is_sign_negative());
+        assert_eq!(activation.blocks[0].qs[0], -127);
+        assert_eq!(activation.blocks[0].qs[1], 127);
+
+        let zero = Q8KActivation::from_f32(&[0.0; 256]).unwrap();
+        assert_eq!(zero.blocks[0].d.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(zero.blocks[0].qs, [0; 256]);
+        assert_eq!(zero.blocks[0].bsums, [0; 16]);
+    }
+
+    #[test]
+    fn q8_k_quantization_reuses_storage_and_rejects_bad_input_without_mutation() {
+        let mut activation = Q8KActivation::new();
+        activation.quantize(&[1.0; 512]).unwrap();
+        let capacity = activation.blocks.capacity();
+        activation.quantize(&[-2.0; 256]).unwrap();
+        assert_eq!(activation.blocks.capacity(), capacity);
+        let retained_d = activation.blocks[0].d;
+
+        assert!(activation.quantize(&[]).is_err());
+        assert!(activation.quantize(&[0.0; 255]).is_err());
+        let mut nonfinite = [0.0; 256];
+        nonfinite[17] = f32::NAN;
+        assert!(activation.quantize(&nonfinite).is_err());
+        nonfinite[17] = f32::INFINITY;
+        assert!(activation.quantize(&nonfinite).is_err());
+        assert_eq!(activation.len(), 256);
+        assert_eq!(activation.blocks[0].d, retained_d);
+    }
+
+    fn reconstructed_q8_reference(row: &[u8], activation: &Q8KActivation) -> (f32, f32) {
+        let mut weights = vec![0.0; activation.len()];
+        dequantize_row(row, &mut weights).unwrap();
+        let mut sum = 0.0_f32;
+        let mut sum_abs = 0.0_f32;
+        for (block_index, block) in activation.blocks.iter().enumerate() {
+            for index in 0..256 {
+                let product =
+                    weights[block_index * 256 + index] * block.d * f32::from(block.qs[index]);
+                sum += product;
+                sum_abs += product.abs();
+            }
+        }
+        (sum, sum_abs)
+    }
+
+    #[test]
+    fn q4_k_q8_k_scalar_matches_reconstructed_reference_across_blocks() {
+        let (row, input, _) = parity_fixture_portable(5);
+        let activation = Q8KActivation::from_f32(&input).unwrap();
+        let scalar = dot_row_q8_scalar_validated(&row, &activation.blocks);
+        let (reference, sum_abs) = reconstructed_q8_reference(&row, &activation);
+        let tolerance = 2e-6 * sum_abs.max(1.0);
+        assert!(
+            (scalar - reference).abs() <= tolerance,
+            "scalar={scalar}, reference={reference}, tolerance={tolerance}"
+        );
+        let dispatched = dot_row_q8_k(&row, &activation).unwrap();
+        assert!((dispatched - scalar).abs() <= 1e-6 * scalar.abs().max(1.0));
+    }
+
+    #[test]
+    fn q4_k_q8_k_rejects_malformed_rows_and_dimension_mismatches() {
+        let row = pinned_block(1.0, 0.5);
+        let one = Q8KActivation::from_f32(&[0.0; 256]).unwrap();
+        let two = Q8KActivation::from_f32(&[0.0; 512]).unwrap();
+        assert!(dot_row_q8_k(&row[..143], &one).is_err());
+        assert!(dot_row_q8_k(&row, &two).is_err());
+        assert!(dot_row_q8_k(&row, &Q8KActivation::new()).is_err());
+
+        let malformed = Q8KActivation {
+            blocks: Vec::new(),
+            values: 256,
+        };
+        assert!(dot_row_q8_k(&row, &malformed).is_err());
+    }
+
+    fn parity_fixture_portable(block_count: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+        let mut state = 0x6d2b_79f5_u32;
+        let mut next_byte = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        };
+        let mut row = Vec::with_capacity(block_count * 144);
+        for block_index in 0..block_count {
+            let mut block = vec![0u8; 144];
+            let d = if block_index % 2 == 0 {
+                0.03125 * (block_index + 1) as f32
+            } else {
+                -0.0234375 * (block_index + 1) as f32
+            };
+            let dmin = 0.015625 * (block_index + 2) as f32;
+            block[..2].copy_from_slice(&f16::from_f32(d).to_bits().to_le_bytes());
+            block[2..4].copy_from_slice(&f16::from_f32(dmin).to_bits().to_le_bytes());
+            for byte in &mut block[4..] {
+                *byte = next_byte();
+            }
+            row.extend(block);
+        }
+        let input = (0..block_count * 256)
+            .map(|index| {
+                let magnitude = 0.25 + ((index * 37 + 11) % 97) as f32 / 19.0;
+                let oscillation = (index as f32 * 0.137).sin() * 0.125;
+                if index % 2 == 0 {
+                    magnitude + oscillation
+                } else {
+                    -magnitude + oscillation
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut dequantized = vec![0.0; input.len()];
+        dequantize_row(&row, &mut dequantized).unwrap();
+        (row, input, dequantized)
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn q4_k_q8_k_simd_matches_scalar_on_cancellation_heavy_blocks() {
+        let (row, input, _) = parity_fixture_portable(7);
+        let activation = Q8KActivation::from_f32(&input).unwrap();
+        let scalar = dot_row_q8_scalar_validated(&row, &activation.blocks);
+        let (_, sum_abs) = reconstructed_q8_reference(&row, &activation);
+        let tolerance = 2e-6 * sum_abs.max(1.0);
+
+        if std::arch::is_x86_feature_detected!("sse2") {
+            let sse = super::super::q4_k_simd::dot_row_q8_sse2_validated(&row, &activation.blocks);
+            assert_eq!(sse.to_bits(), scalar.to_bits());
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            let avx = unsafe {
+                super::super::q4_k_simd::dot_row_q8_avx2_validated(&row, &activation.blocks)
+            };
+            assert!(
+                (avx - scalar).abs() <= tolerance,
+                "AVX2={avx}, scalar={scalar}, tolerance={tolerance}"
+            );
+        }
     }
 }

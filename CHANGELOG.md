@@ -44,24 +44,31 @@ public API guarantee. It will be dropped when that guarantee is established.
 * Prompt prefill now runs layer-major, batches QKV, attention-output, and FFN
   projections, and uses exact tiled Q4_K AVX2/SSE2 row dots that decode each
   weight chunk once for four token accumulators.
+* Single-token Q4_K and Q6_K graph projections now quantize each activation to
+  reusable Q8_K blocks and use AVX2 integer dot products. Q/K/V and FFN gate/up
+  share one quantization pass; checked f32 APIs, non-AVX2 fallbacks, and batched
+  prefill remain unchanged. Quantized scales are validated once when the model
+  graph is loaded instead of once per output row.
 
 ### Validated
 
 * Qwen2.5-3B produced the complete pinned six-field Korean maintenance report
   under both llama.cpp b10369 and Willamette greedy decoding, preserving the
-  duration and post-test result omitted by the smaller profiles. The deployed
-  The HP ProBook v0.15.0 build completed it in 51.58 seconds with eight threads
-  at 2,039,504 KiB maximum RSS, down from 71.14 seconds while preserving all 75
-  output token IDs. Prefill was 25.31 seconds and decode was 26.26 seconds. Its
-  TUI selected Q4_K AVX2.
+  duration and post-test result omitted by the smaller profiles. Batched
+  prefill first reduced the HP ProBook run from 71.14 to 51.58 seconds. Shared
+  Q8_K activation decode then completed the same 75 output token IDs in 37.64
+  seconds: 25.89 seconds for 164-token prefill and 11.75 seconds for decode,
+  with 2,175,812 KiB maximum RSS. This is 27.0% faster than the prefill-only
+  build and 47.1% faster than the original path. Its TUI selected Q4_K AVX2.
 * The expanded Korean suite passed factual one-sentence summary and four-turn
   context recall. It also exposed two limits: an extra Markdown separator broke
   a strict two-line table request, and missing-field-only extraction failed.
   SmolLM2-1.7B truncated the same Korean summary under the common 50-token cap.
 * Exact batched-versus-sequential hidden/KV parity passes across chunk sizes and
-  nonzero prefixes; Qwen's external 6-field golden, 276 library tests, all
-  targets, and warning-free clippy also pass. ARMv7 still lacks physical-device
-  acceptance for this release.
+  nonzero prefixes; scalar/SIMD Q4_K-by-Q8_K and Q6_K-by-Q8_K parity, Qwen's
+  external 6-field golden, the full test suite, all targets, and warning-free
+  clippy also pass. ARMv7 still lacks physical-device acceptance for this
+  release.
 * The portable menu launched the 360M TUI successfully with Q8_0/AVX2 on HP
   and Q8_0/SSE2 on mbp2012. Its Paris golden completed in 1.771 and 3.441
   seconds respectively with the exact pinned response.
