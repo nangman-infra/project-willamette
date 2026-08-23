@@ -107,11 +107,11 @@ jobs:
         # target.
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.13.0
+          version: 0.16.0
 
       - name: Install cargo-zigbuild
         if: matrix.zigbuild
-        run: cargo install cargo-zigbuild --locked
+        run: cargo install cargo-zigbuild --version 0.23.0 --locked
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4

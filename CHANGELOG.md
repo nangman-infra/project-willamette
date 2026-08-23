@@ -22,6 +22,21 @@ public API guarantee. It will be dropped when that guarantee is established.
 
 ## [Unreleased]
 
+## [v0.15.1-mvp] — 2026-08-23
+
+### Fixed
+
+* Linux release builds now pin Zig 0.16.0 and cargo-zigbuild 0.23.0. The Zig
+  0.13.0 linker used for v0.15.0 changed the optimized Qwen2.5 greedy result
+  from the validated six-line report to a semantically similar one-line report.
+
+### Validated
+
+* A clean x86_64 musl build using the pinned release toolchain reproduced the
+  exact 75-token, six-line Korean report on the HP ProBook. A control build from
+  the same source and Rust 1.94.0 using Zig 0.13.0 reproduced the v0.15.0
+  release artifact's 70-token one-line output.
+
 ## [v0.15.0-mvp] — 2026-08-23
 
 ### Added
